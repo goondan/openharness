@@ -1,0 +1,8 @@
+# source package manifest used for publish metadata/validation.
+# runtime-consumable resources are emitted to dist/{entrypointFileName} at build time (default: dist/harness.yaml).
+apiVersion: goondan.ai/v1
+kind: Package
+metadata:
+  name: "@goondan/openharness-base"
+spec:
+  version: "0.0.1-alpha1"
