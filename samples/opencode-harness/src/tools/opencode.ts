@@ -2,9 +2,12 @@ import { spawn } from "node:child_process";
 import { Console } from "node:console";
 import { accessSync, constants as fsConstants, createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
-import { createInterface } from "node:readline";
+import { createInterface as createLineReader } from "node:readline";
+import { createInterface as createPromptInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 
 import { createRunnerFromHarnessYaml, type JsonObject, type JsonValue, type ToolContext } from "@goondan/openharness";
 
@@ -29,6 +32,8 @@ const MAX_WEBFETCH_TIMEOUT_MS = 120_000;
 const DEFAULT_WEBFETCH_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const WEBFETCH_FORMATS = ["text", "markdown", "html"] as const;
+const MAX_SKILL_FILE_COUNT = 10;
+const MAX_SKILL_SCAN_RESULTS = 256;
 
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -188,6 +193,314 @@ function readRecordArg(args: JsonObject, key: string): Record<string, string> | 
     }
   }
   return result;
+}
+
+function readArrayArg(args: JsonObject, key: string): readonly JsonValue[] | undefined {
+  const value = args[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
+interface QuestionOptionInput {
+  label: string;
+  description: string;
+}
+
+interface QuestionInfoInput {
+  question: string;
+  header: string;
+  options: QuestionOptionInput[];
+  multiple: boolean;
+  custom: boolean;
+}
+
+interface SkillInfo {
+  name: string;
+  description: string;
+  location: string;
+  content: string;
+}
+
+function createQuestionPrompt(question: QuestionInfoInput, answerMode: "single" | "multiple"): string {
+  const lines = [`[${question.header}] ${question.question}`];
+  if (question.options.length > 0) {
+    lines.push("");
+    for (const [index, option] of question.options.entries()) {
+      lines.push(`${index + 1}. ${option.label} — ${option.description}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(
+    answerMode === "multiple"
+      ? "답변을 번호 목록(예: 1,3) 또는 자유 텍스트로 입력하세요."
+      : "답변을 번호 또는 자유 텍스트로 입력하세요.",
+  );
+
+  return lines.join("\n");
+}
+
+function parseFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+  if (!match) {
+    return {};
+  }
+
+  const result: Record<string, string> = {};
+  const body = match[1] ?? "";
+  for (const line of body.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key.length === 0 || value.length === 0) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+function stripFrontmatter(content: string): string {
+  return content.replace(/^---\s*\n[\s\S]*?\n---\s*(?:\n|$)/, "").trim();
+}
+
+function isJsonObject(value: JsonValue): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseQuestionOption(value: JsonValue, index: number): QuestionOptionInput {
+  if (!isJsonObject(value)) {
+    throw new Error(`questions[${index}].options entries must be objects`);
+  }
+
+  const label = typeof value.label === "string" ? value.label.trim() : "";
+  if (!label) {
+    throw new Error(`questions[${index}].options entries must include label`);
+  }
+
+  const description = typeof value.description === "string" ? value.description.trim() : "";
+  return {
+    label,
+    description,
+  };
+}
+
+function parseQuestionInfo(value: JsonValue, index: number): QuestionInfoInput {
+  if (!isJsonObject(value)) {
+    throw new Error(`questions[${index}] must be an object`);
+  }
+
+  const question = typeof value.question === "string" ? value.question.trim() : "";
+  if (!question) {
+    throw new Error(`questions[${index}].question is required`);
+  }
+
+  const headerRaw = typeof value.header === "string" ? value.header.trim() : "";
+  const header = headerRaw || `Question ${index + 1}`;
+  const optionsValue = Array.isArray(value.options) ? value.options : [];
+  const options = optionsValue.map((option, optionIndex) => parseQuestionOption(option, index + optionIndex));
+
+  return {
+    question,
+    header,
+    options,
+    multiple: value.multiple === true,
+    custom: value.custom !== false,
+  };
+}
+
+function parseQuestionAnswers(input: string, question: QuestionInfoInput): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const tokens = trimmed.split(",").map((part) => part.trim()).filter(Boolean);
+  const optionIndexes = tokens.map((token) => Number.parseInt(token, 10));
+  const allNumeric = tokens.length > 0 && optionIndexes.every((value) => Number.isInteger(value));
+
+  if (allNumeric && question.options.length > 0) {
+    const selected = optionIndexes.map((value) => question.options[value - 1]?.label).filter((value): value is string => Boolean(value));
+    if (selected.length === tokens.length) {
+      return question.multiple ? selected : selected.slice(0, 1);
+    }
+  }
+
+  if (!question.custom) {
+    throw new Error("옵션 번호를 입력해야 합니다.");
+  }
+
+  return question.multiple ? tokens : [trimmed];
+}
+
+async function promptForQuestion(question: QuestionInfoInput): Promise<string[]> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("question tool requires an interactive TTY session");
+  }
+
+  const prompt = createQuestionPrompt(question, question.multiple ? "multiple" : "single");
+  const readline = createPromptInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    while (true) {
+      const answer = await readline.question(`${prompt}\n> `);
+      try {
+        const parsed = parseQuestionAnswers(answer, question);
+        if (parsed.length === 0) {
+          throw new Error("비어 있지 않은 답변이 필요합니다.");
+        }
+        return parsed;
+      } catch (error) {
+        process.stdout.write(`${error instanceof Error ? error.message : String(error)}\n\n`);
+      }
+    }
+  } finally {
+    readline.close();
+  }
+}
+
+async function findFilesNamed(root: string, target: string, results: string[], seen: Set<string>): Promise<void> {
+  const normalizedRoot = path.resolve(root);
+  if (seen.has(normalizedRoot)) {
+    return;
+  }
+  seen.add(normalizedRoot);
+
+  const dirents = await fs.readdir(normalizedRoot, { withFileTypes: true }).catch(() => []);
+  for (const dirent of dirents) {
+    const absolutePath = path.join(normalizedRoot, dirent.name);
+    if (dirent.isDirectory()) {
+      await findFilesNamed(absolutePath, target, results, seen);
+      if (results.length >= MAX_SKILL_SCAN_RESULTS) {
+        return;
+      }
+      continue;
+    }
+
+    if (dirent.isFile() && dirent.name === target) {
+      results.push(absolutePath);
+      if (results.length >= MAX_SKILL_SCAN_RESULTS) {
+        return;
+      }
+    }
+  }
+}
+
+function collectSkillRoots(workdir: string): string[] {
+  const roots = new Set<string>();
+  const homedir = os.homedir();
+  for (const root of [
+    path.join(homedir, ".codex", "skills"),
+    path.join(homedir, ".claude", "skills"),
+    path.join(homedir, ".agents", "skills"),
+  ]) {
+    roots.add(root);
+  }
+
+  let current = path.resolve(workdir);
+  while (true) {
+    roots.add(path.join(current, ".claude", "skills"));
+    roots.add(path.join(current, ".agents", "skills"));
+    roots.add(path.join(current, "skills"));
+    roots.add(path.join(current, "skill"));
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return [...roots];
+}
+
+async function discoverSkills(workdir: string): Promise<SkillInfo[]> {
+  const matches: string[] = [];
+  const seen = new Set<string>();
+
+  for (const root of collectSkillRoots(workdir)) {
+    const stat = await fs.stat(root).catch(() => undefined);
+    if (!stat?.isDirectory()) {
+      continue;
+    }
+    await findFilesNamed(root, "SKILL.md", matches, seen);
+    if (matches.length >= MAX_SKILL_SCAN_RESULTS) {
+      break;
+    }
+  }
+
+  const skills = await Promise.all(
+    matches.map(async (location) => {
+      const raw = await fs.readFile(location, "utf8").catch(() => undefined);
+      if (!raw) {
+        return undefined;
+      }
+      const frontmatter = parseFrontmatter(raw);
+      const name = frontmatter.name?.trim() || path.basename(path.dirname(location));
+      const description = frontmatter.description?.trim() || "No description provided.";
+      return {
+        name,
+        description,
+        location,
+        content: stripFrontmatter(raw),
+      } satisfies SkillInfo;
+    }),
+  );
+
+  const byName = new Map<string, SkillInfo>();
+  for (const skill of skills) {
+    if (!skill) {
+      continue;
+    }
+    byName.set(skill.name, skill);
+  }
+
+  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function collectSkillSampleFiles(baseDir: string): Promise<string[]> {
+  const files: string[] = [];
+  const queue = [baseDir];
+  const seen = new Set<string>();
+
+  while (queue.length > 0 && files.length < MAX_SKILL_FILE_COUNT) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+    const normalized = path.resolve(current);
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+
+    const dirents = await fs.readdir(normalized, { withFileTypes: true }).catch(() => []);
+    dirents.sort((left, right) => left.name.localeCompare(right.name));
+    for (const dirent of dirents) {
+      const absolutePath = path.join(normalized, dirent.name);
+      if (dirent.isDirectory()) {
+        queue.push(absolutePath);
+        continue;
+      }
+      if (!dirent.isFile()) {
+        continue;
+      }
+      if (dirent.name === "SKILL.md") {
+        continue;
+      }
+      files.push(absolutePath);
+      if (files.length >= MAX_SKILL_FILE_COUNT) {
+        break;
+      }
+    }
+  }
+
+  return files;
 }
 
 function truncateMetadataOutput(text: string): string {
@@ -550,6 +863,82 @@ export async function invalid(_ctx: ToolContext, args: JsonObject): Promise<Json
   });
 }
 
+export async function question(_ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
+  const rawQuestions = readArrayArg(args, "questions");
+  if (!rawQuestions || rawQuestions.length === 0) {
+    throw new Error("questions is required");
+  }
+
+  const questions = rawQuestions.map((value, index) => parseQuestionInfo(value, index));
+  const answers: string[][] = [];
+
+  for (const questionInfo of questions) {
+    const answer = await promptForQuestion(questionInfo);
+    answers.push(answer);
+  }
+
+  const formatted = questions
+    .map((questionInfo, index) => `"${questionInfo.question}"="${(answers[index] ?? []).join(", ") || "Unanswered"}"`)
+    .join(", ");
+
+  return normalizePayload({
+    title: `Asked ${questions.length} question${questions.length === 1 ? "" : "s"}`,
+    output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+    metadata: {
+      answers,
+      questions: questions.map((questionInfo) => ({
+        header: questionInfo.header,
+        question: questionInfo.question,
+      })),
+    },
+  });
+}
+
+export async function skill(ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
+  const name = readStringArg(args, "name")?.trim() ?? "";
+  if (!name) {
+    throw new Error("name is required");
+  }
+
+  const availableSkills = await discoverSkills(ctx.workdir);
+  const selectedSkill = availableSkills.find((skillInfo) => skillInfo.name === name);
+  if (!selectedSkill) {
+    const availableNames = availableSkills.map((skillInfo) => skillInfo.name).join(", ");
+    throw new Error(`Skill "${name}" not found. Available skills: ${availableNames || "none"}`);
+  }
+
+  const dir = path.dirname(selectedSkill.location);
+  const sampledFiles = await collectSkillSampleFiles(dir);
+  const base = pathToFileURL(dir).href;
+
+  return normalizePayload({
+    title: `Loaded skill: ${selectedSkill.name}`,
+    output: [
+      `<skill_content name="${selectedSkill.name}">`,
+      `# Skill: ${selectedSkill.name}`,
+      "",
+      selectedSkill.content.trim(),
+      "",
+      `Base directory for this skill: ${base}`,
+      "Relative paths in this skill (for example scripts/ or references/) are relative to this base directory.",
+      "Note: file list is sampled.",
+      "",
+      "<skill_files>",
+      ...sampledFiles.map((filepath) => `<file>${filepath}</file>`),
+      "</skill_files>",
+      "</skill_content>",
+    ].join("\n"),
+    metadata: {
+      name: selectedSkill.name,
+      description: selectedSkill.description,
+      dir,
+      location: selectedSkill.location,
+      fileCount: sampledFiles.length,
+      availableSkills: availableSkills.map((skillInfo) => skillInfo.name),
+    },
+  });
+}
+
 export async function read(ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
   const filePathArg = readStringArg(args, "filePath") ?? "";
   if (!filePathArg.trim()) {
@@ -667,7 +1056,7 @@ export async function read(ctx: ToolContext, args: JsonObject): Promise<JsonValu
   }
 
   const stream = createReadStream(absolutePath, { encoding: "utf8" });
-  const rl = createInterface({
+  const rl = createLineReader({
     input: stream,
     crlfDelay: Infinity,
   });

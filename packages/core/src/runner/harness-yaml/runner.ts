@@ -432,9 +432,12 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
       const hasSystem = ctx.conversationState.nextMessages.some(
         (msg) => msg.data.role === "system" && msg.metadata["__openharness.runner.system"] === true,
       );
+      const runtimeSystemPrompt =
+        typeof ctx.runtime.agent.prompt?.system === "string" ? ctx.runtime.agent.prompt.system : "";
+      const effectiveSystemPrompt = runtimeSystemPrompt.trim().length > 0 ? runtimeSystemPrompt : systemPrompt;
 
-      if (!hasSystem && systemPrompt.trim().length > 0) {
-        ctx.emitMessageEvent({ type: "append", message: createSystemMessage(systemPrompt) });
+      if (!hasSystem && effectiveSystemPrompt.trim().length > 0) {
+        ctx.emitMessageEvent({ type: "append", message: createSystemMessage(effectiveSystemPrompt) });
       }
 
       const inboundInput = typeof ctx.inputEvent.input === "string" ? ctx.inputEvent.input : "";

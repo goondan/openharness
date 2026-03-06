@@ -214,6 +214,60 @@ spec:
         required:
           - tool
           - error
+    - name: question
+      description: Ask the user one or more clarification questions in an interactive CLI session.
+      parameters:
+        type: object
+        properties:
+          questions:
+            type: array
+            description: Questions to ask in order.
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                  description: Full question to ask.
+                header:
+                  type: string
+                  description: Short label for the question.
+                options:
+                  type: array
+                  description: Optional answer choices.
+                  items:
+                    type: object
+                    properties:
+                      label:
+                        type: string
+                      description:
+                        type: string
+                    additionalProperties: false
+                    required:
+                      - label
+                      - description
+                multiple:
+                  type: boolean
+                  description: Allow multiple selections.
+                custom:
+                  type: boolean
+                  description: Allow free-form answers.
+              additionalProperties: false
+              required:
+                - question
+        additionalProperties: false
+        required:
+          - questions
+    - name: skill
+      description: Load a local skill file and inject its instructions into the conversation.
+      parameters:
+        type: object
+        properties:
+          name:
+            type: string
+            description: Skill name to load.
+        additionalProperties: false
+        required:
+          - name
 ---
 apiVersion: goondan.ai/v1
 kind: Extension
