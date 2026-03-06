@@ -21,7 +21,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postbuild": "node ./scripts/link-global-bin.mjs",
     "prepack": "pnpm build",
+    "link:global": "node ./scripts/link-global-bin.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node -e \"process.exit(0)\"",
     "start": "node dist/bin.js",
