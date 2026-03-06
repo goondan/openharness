@@ -12,7 +12,7 @@ import { FileWorkspaceStorage } from "../../workspace/storage.js";
 import { PipelineRegistryImpl } from "../../pipeline/registry.js";
 import { RUNTIME_EVENT_TYPES, RuntimeEventBusImpl } from "../../events/runtime-events.js";
 import { ToolRegistryImpl, type ToolRegistry } from "../../tools/registry.js";
-import { createMinimalToolContext, ToolExecutor, type ToolExecutionRequest } from "../../tools/executor.js";
+import { ToolExecutor, type ToolExecutionRequest } from "../../tools/executor.js";
 import { buildToolName } from "../../tools/naming.js";
 import { ExtensionApiImpl } from "../../extension/api-impl.js";
 import { ExtensionStateManagerImpl } from "../../extension/state-manager.js";
@@ -21,14 +21,11 @@ import { runTurn, type RunTurnModelConfig } from "../../engine/run-turn.js";
 
 import type {
   AgentEvent,
-  JsonObject,
-  JsonValue,
   Message,
   MiddlewareAgentsApi,
   RuntimeContext,
   ToolCatalogItem,
   ToolHandler,
-  TurnProcessor,
   TurnResult,
   RuntimeResource,
 } from "../../types.js";
@@ -106,16 +103,6 @@ function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function mergeToolCatalog(primary: ToolCatalogItem[], secondary: ToolCatalogItem[]): ToolCatalogItem[] {
-  const merged = [...primary];
-  for (const item of secondary) {
-    if (!merged.some((existing) => existing.name === item.name)) {
-      merged.push(item);
-    }
-  }
-  return merged;
-}
-
 function createSystemMessage(text: string): Message {
   return {
     id: createId("msg"),
@@ -133,16 +120,6 @@ function createUserMessage(text: string): Message {
   return {
     id: createId("msg"),
     data: { role: "user", content: text },
-    metadata: {},
-    createdAt: new Date(),
-    source: { type: "user" },
-  };
-}
-
-function createToolContextMessage(content: string): Message {
-  return {
-    id: createId("msg"),
-    data: { role: "user", content },
     metadata: {},
     createdAt: new Date(),
     source: { type: "user" },
@@ -384,8 +361,6 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
   const extensionState = new ExtensionStateManagerImpl(storage, instanceKey, extensionNames);
   await extensionState.loadAll();
   const extensionEventBus = new EventEmitter();
-  let registeredTurnProcessor: TurnProcessor | undefined;
-  let registeredTurnProcessorOwner: string | undefined;
 
   if (extensionResources.length > 0) {
     const apiFactory = (extensionName: string) => {
@@ -396,17 +371,6 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
         extensionState,
         extensionEventBus,
         logger,
-        {
-          registerTurnProcessor(ownerExtensionName, processor) {
-            if (registeredTurnProcessor && registeredTurnProcessorOwner !== ownerExtensionName) {
-              throw new Error(
-                `turn processor already registered by extension '${registeredTurnProcessorOwner}', cannot register another from '${ownerExtensionName}'`,
-              );
-            }
-            registeredTurnProcessor = processor;
-            registeredTurnProcessorOwner = ownerExtensionName;
-          },
-        },
       );
     };
 
@@ -500,148 +464,6 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
       };
 
       try {
-        const resolveToolCatalog = (): ToolCatalogItem[] => {
-          const extensionCatalog = extensionToolRegistry.getCatalog();
-          return mergeToolCatalog(baseTools.baseToolCatalog, extensionCatalog);
-        };
-
-        const runTurnWithPipeline = (core: Parameters<typeof pipelineRegistry.runTurn>[1]) => {
-          return pipelineRegistry.runTurn(
-            {
-              agentName: agent.metadata.name,
-              instanceKey,
-              turnId,
-              traceId,
-              inputEvent,
-              conversationState: conversationState as ConversationStateImpl,
-              agents: noopAgentsApi,
-              runtime,
-              emitMessageEvent(ev) {
-                conversationState.emitMessageEvent(ev);
-              },
-              metadata: {},
-            },
-            core,
-          );
-        };
-
-        const runStepWithPipeline = (
-          stepIndex: number,
-          toolCatalog: ToolCatalogItem[],
-          metadata: Record<string, JsonValue>,
-          core: Parameters<typeof pipelineRegistry.runStep>[1],
-        ) => {
-          return pipelineRegistry.runStep(
-            {
-              agentName: agent.metadata.name,
-              instanceKey,
-              turnId,
-              traceId,
-              turn: {
-                id: turnId,
-                agentName: agent.metadata.name,
-                inputEvent,
-                messages: conversationState.nextMessages,
-                steps: [],
-                status: "running",
-                metadata: {},
-              },
-              stepIndex,
-              conversationState: conversationState as ConversationStateImpl,
-              agents: noopAgentsApi,
-              runtime,
-              emitMessageEvent(ev) {
-                conversationState.emitMessageEvent(ev);
-              },
-              toolCatalog,
-              metadata,
-            },
-            core,
-          );
-        };
-
-        const runToolCallWithPipeline = async (inputForToolCall: {
-          stepIndex: number;
-          toolCallId: string;
-          toolName: string;
-          args: JsonObject;
-          metadata?: Record<string, JsonValue>;
-          toolCatalog: ToolCatalogItem[];
-        }) => {
-          return pipelineRegistry.runToolCall(
-            {
-              agentName: agent.metadata.name,
-              instanceKey,
-              turnId,
-              traceId,
-              stepIndex: inputForToolCall.stepIndex,
-              toolName: inputForToolCall.toolName,
-              toolCallId: inputForToolCall.toolCallId,
-              conversationState: conversationState as ConversationStateImpl,
-              runtime,
-              args: inputForToolCall.args,
-              metadata: inputForToolCall.metadata ?? {},
-            },
-            async (toolCallCtx) => {
-              const toolContext = createMinimalToolContext({
-                agentName: agent.metadata.name,
-                instanceKey,
-                turnId,
-                traceId,
-                toolCallId: toolCallCtx.toolCallId,
-                message: createToolContextMessage(text),
-                workdir,
-                logger,
-                runtime: undefined,
-              });
-
-              const executor =
-                extensionToolRegistry.has(toolCallCtx.toolName) === true ? extensionExecutor : baseTools.toolExecutor;
-
-              return executor.execute({
-                toolCallId: toolCallCtx.toolCallId,
-                toolName: toolCallCtx.toolName,
-                args: toolCallCtx.args,
-                catalog: inputForToolCall.toolCatalog,
-                context: toolContext,
-              });
-            },
-          );
-        };
-
-        if (registeredTurnProcessor) {
-          return await registeredTurnProcessor({
-            agentName: agent.metadata.name,
-            instanceKey,
-            turnId,
-            traceId,
-            inputEvent,
-            conversationState: conversationState as ConversationStateImpl,
-            agents: noopAgentsApi,
-            runtime,
-            model,
-            maxSteps,
-            workdir,
-            logger,
-            resolveToolCatalog,
-            runTurn: runTurnWithPipeline,
-            runStep(inputForStep, core) {
-              return runStepWithPipeline(
-                inputForStep.stepIndex,
-                inputForStep.toolCatalog ?? resolveToolCatalog(),
-                inputForStep.metadata ?? {},
-                core,
-              );
-            },
-            runToolCall(inputForToolCall) {
-              return runToolCallWithPipeline({
-                ...inputForToolCall,
-                toolCatalog: resolveToolCatalog(),
-              });
-            },
-          });
-        }
-
         const output = await runTurn({
           agentName: agent.metadata.name,
           instanceKey,

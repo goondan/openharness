@@ -1,4 +1,4 @@
-import type { ExtensionApi, JsonValue, ToolCatalogItem, ToolHandler, TurnProcessor } from "../types.js";
+import type { ExtensionApi, JsonValue, ToolCatalogItem, ToolHandler } from "../types.js";
 import type { PipelineRegistry } from "../pipeline/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ExtensionStateManager } from "./state-manager.js";
@@ -12,9 +12,6 @@ export class ExtensionApiImpl implements ExtensionApi {
     private readonly stateManager: ExtensionStateManager,
     private readonly eventBus: EventEmitter,
     private readonly loggerImpl: Console,
-    private readonly sessionApi?: {
-      registerTurnProcessor(extensionName: string, processor: TurnProcessor): void;
-    },
   ) {}
 
   get pipeline(): PipelineRegistry {
@@ -51,17 +48,6 @@ export class ExtensionApiImpl implements ExtensionApi {
       emit: (event: string, ...args: unknown[]): Promise<void> => {
         this.eventBus.emit(event, ...args);
         return Promise.resolve();
-      },
-    };
-  }
-
-  get session() {
-    return {
-      registerTurnProcessor: (processor: TurnProcessor): void => {
-        if (!this.sessionApi) {
-          throw new Error("turn processor registration is not available in this runtime");
-        }
-        this.sessionApi.registerTurnProcessor(this.extensionName, processor);
       },
     };
   }

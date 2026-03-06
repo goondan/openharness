@@ -478,51 +478,6 @@ export type TurnMiddleware = (ctx: TurnMiddlewareContext) => Promise<TurnResult>
 export type StepMiddleware = (ctx: StepMiddlewareContext) => Promise<StepResult>;
 export type ToolCallMiddleware = (ctx: ToolCallMiddlewareContext) => Promise<ToolCallResult>;
 
-export interface TurnProcessorStepInput {
-  stepIndex: number;
-  toolCatalog?: ToolCatalogItem[];
-  metadata?: Record<string, JsonValue>;
-}
-
-export interface TurnProcessorToolCallInput {
-  stepIndex: number;
-  toolName: string;
-  toolCallId: string;
-  args: JsonObject;
-  metadata?: Record<string, JsonValue>;
-}
-
-export interface TurnProcessorModelConfig {
-  provider: string;
-  apiKey: string;
-  modelName: string;
-  temperature: number;
-  maxTokens: number;
-}
-
-export interface TurnProcessorOutput {
-  turnResult: TurnResult;
-  finalResponseText: string;
-  stepCount: number;
-}
-
-export interface TurnProcessorContext extends ExecutionContext {
-  readonly inputEvent: AgentEvent;
-  readonly conversationState: ConversationState;
-  readonly agents: MiddlewareAgentsApi;
-  readonly runtime: RuntimeContext;
-  readonly model: TurnProcessorModelConfig;
-  readonly maxSteps: number;
-  readonly workdir: string;
-  readonly logger: Console;
-  resolveToolCatalog(): ToolCatalogItem[];
-  runTurn(core: TurnMiddleware): Promise<TurnResult>;
-  runStep(input: TurnProcessorStepInput, core: StepMiddleware): Promise<StepResult>;
-  runToolCall(input: TurnProcessorToolCallInput): Promise<ToolCallResult>;
-}
-
-export type TurnProcessor = (ctx: TurnProcessorContext) => Promise<TurnProcessorOutput>;
-
 export interface PipelineRegistry {
   register(type: "turn", fn: TurnMiddleware, options?: { priority?: number }): void;
   register(type: "step", fn: StepMiddleware, options?: { priority?: number }): void;
@@ -541,9 +496,6 @@ export interface ExtensionApi {
   events: {
     on(event: string, handler: (...args: unknown[]) => void | Promise<void>): () => void;
     emit(event: string, ...args: unknown[]): Promise<void>;
-  };
-  session: {
-    registerTurnProcessor(processor: TurnProcessor): void;
   };
   logger: Pick<Console, "debug" | "info" | "warn" | "error">;
 }
