@@ -128,6 +128,65 @@ function createToolContextMessage(content: string): Message {
   };
 }
 
+function readStringMetadata(metadata: Record<string, JsonValue>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function deriveFinalResponseText(
+  conversationState: ConversationStateImpl,
+  stepResult: StepResult,
+  fallbackText: string,
+): string {
+  const explicit = readStringMetadata(stepResult.metadata, "opencode.finalResponseText");
+  if (explicit !== undefined) {
+    return explicit;
+  }
+
+  if (fallbackText.trim().length > 0) {
+    return fallbackText;
+  }
+
+  const messages = conversationState.nextMessages;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.data.role !== "assistant") {
+      continue;
+    }
+
+    const content = message.data.content;
+    if (typeof content === "string") {
+      const trimmed = content.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+      continue;
+    }
+
+    if (!Array.isArray(content)) {
+      continue;
+    }
+
+    const text = content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+        if (isJsonObject(part) && part.type === "text" && typeof part.text === "string") {
+          return part.text;
+        }
+        return "";
+      })
+      .join("\n")
+      .trim();
+    if (text.length > 0) {
+      return text;
+    }
+  }
+
+  return "";
+}
+
 export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
   const logger = input.logger ?? new Console({ stdout: process.stdout, stderr: process.stderr });
   const stepLimit = input.stepLimitResponse ?? buildStepLimitResponse;
@@ -344,7 +403,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
           continue;
         }
 
-        const responseText = lastText.length > 0 ? lastText : "";
+        const responseText = deriveFinalResponseText(input.conversationState, stepResult, lastText);
         finalResponseText = responseText;
         return {
           turnId: input.turnId,

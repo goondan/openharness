@@ -27,3 +27,6 @@ coverage/
 # Editor/IDE
 .vscode/
 .idea/
+
+# Sample runtime state
+.goondan-opencode-harness/

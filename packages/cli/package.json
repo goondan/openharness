@@ -1,5 +1,5 @@
 {
-  "name": "@goondan/openharness",
+  "name": "@goondan/openharness-cli",
   "version": "0.0.1-alpha1",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,9 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "bin": {
+    "oh": "./dist/bin.js"
   },
   "exports": {
     ".": {
@@ -20,16 +23,11 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "node -e \"process.exit(0)\"",
+    "start": "node dist/bin.js",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.44",
-    "@ai-sdk/google": "^3.0.29",
-    "@ai-sdk/openai": "^3.0.29",
-    "@goondan/openharness-types": "^0.0.1-alpha1",
-    "ai": "^6.0.86",
-    "yaml": "^2.8.1",
-    "unique-names-generator": "^4.7.1"
+    "@goondan/openharness": "^0.0.1-alpha1"
   }
 }

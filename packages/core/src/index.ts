@@ -14,6 +14,10 @@ export * from "./extension/index.js";
 
 export * from "./runner/conversation-state.js";
 
+export * from "./runner/harness-yaml/loader.js";
+export * from "./runner/harness-yaml/resolve.js";
+export * from "./runner/harness-yaml/runner.js";
+
 export * from "./llm/model-step.js";
 
 export * from "./engine/run-turn.js";
