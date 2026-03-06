@@ -467,6 +467,7 @@ export interface ToolCallMiddlewareContext extends ExecutionContext {
   readonly stepIndex: number;
   readonly toolName: string;
   readonly toolCallId: string;
+  readonly conversationState: ConversationState;
   readonly runtime: RuntimeContext;
   args: JsonObject;
   metadata: Record<string, JsonValue>;

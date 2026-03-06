@@ -336,6 +336,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
                   stepIndex: step,
                   toolName: toolUse.name,
                   toolCallId: toolUse.id,
+                  conversationState: input.conversationState,
                   runtime: input.runtime,
                   args: toolArgs,
                   metadata: {},

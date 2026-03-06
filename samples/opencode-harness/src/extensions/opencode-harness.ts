@@ -1,10 +1,12 @@
 import * as path from "node:path";
 
-import type { ExtensionApi, ToolCallResult } from "@goondan/openharness";
+import type { ExtensionApi, Message, ToolCallResult } from "@goondan/openharness";
 
 import { PermissionDeniedError, PermissionRejectedError, requestPermission } from "../session/permission.js";
 import { buildOpencodeSystemPrompt } from "../session/system.js";
-import { opencodeTurnProcessor } from "../session/processor.js";
+import { filterToolCatalogForModel } from "../session/tool-catalog.js";
+
+const DOOM_LOOP_THRESHOLD = 3;
 
 function isPathInsideRoot(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
@@ -234,10 +236,293 @@ function buildPermissionError(input: {
   };
 }
 
+function readToolCallSignature(part: unknown): { toolName: string; argsText: string } | undefined {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) {
+    return undefined;
+  }
+
+  const record = part as Record<string, unknown>;
+  if (record.type === "tool-call" && typeof record.toolName === "string") {
+    return {
+      toolName: record.toolName,
+      argsText: JSON.stringify(record.input ?? {}),
+    };
+  }
+
+  if (record.type === "tool" && typeof record.tool === "string") {
+    const state = typeof record.state === "object" && record.state !== null && !Array.isArray(record.state)
+      ? (record.state as Record<string, unknown>)
+      : {};
+    return {
+      toolName: record.tool,
+      argsText: JSON.stringify(state.input ?? {}),
+    };
+  }
+
+  return undefined;
+}
+
+function collectRecentToolCalls(messages: readonly Message[], limit: number): Array<{ toolName: string; argsText: string }> {
+  const recent: Array<{ toolName: string; argsText: string }> = [];
+
+  for (let messageIndex = messages.length - 1; messageIndex >= 0 && recent.length < limit; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (message?.data.role !== "assistant" || !Array.isArray(message.data.content)) {
+      continue;
+    }
+
+    for (let partIndex = message.data.content.length - 1; partIndex >= 0 && recent.length < limit; partIndex -= 1) {
+      const signature = readToolCallSignature(message.data.content[partIndex]);
+      if (signature) {
+        recent.push(signature);
+      }
+    }
+  }
+
+  return recent;
+}
+
+function isDoomLoop(messages: readonly Message[], toolName: string, args: Record<string, unknown>): boolean {
+  const targetArgs = JSON.stringify(args);
+  const recent = collectRecentToolCalls(messages, DOOM_LOOP_THRESHOLD);
+  return (
+    recent.length === DOOM_LOOP_THRESHOLD
+    && recent.every((entry) => entry.toolName === toolName && entry.argsText === targetArgs)
+  );
+}
+
+function extractLegacyAssistantText(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part !== "object" || part === null || Array.isArray(part)) {
+        return "";
+      }
+      const record = part as Record<string, unknown>;
+      if (record.type === "text" && typeof record.text === "string") {
+        return record.text;
+      }
+      if (record.type === "compaction" && typeof record.text === "string") {
+        return record.text;
+      }
+      return "";
+    })
+    .join("")
+    .trim();
+}
+
+function isLegacyAssistantMessage(message: Message): boolean {
+  return message.data.role === "assistant"
+    && (message.metadata["opencode.assistant"] === true || message.metadata["opencode.assistant.migrated"] === true);
+}
+
+function shouldStripLegacyProtocolLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { type?: unknown };
+    return parsed.type === "step-start"
+      || parsed.type === "step-finish"
+      || parsed.type === "patch"
+      || parsed.type === "compaction";
+  } catch {
+    return false;
+  }
+}
+
+function stripLegacyAssistantProtocol(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !shouldStripLegacyProtocolLine(line))
+    .join("\n")
+    .trim();
+}
+
+function normalizeAssistantMessage(message: Message): Message | null {
+  if (!isLegacyAssistantMessage(message)) {
+    return message;
+  }
+
+  if (typeof message.data.content === "string") {
+    const normalizedText = stripLegacyAssistantProtocol(message.data.content);
+    if (normalizedText.length === 0) {
+      return null;
+    }
+    if (normalizedText === message.data.content) {
+      return message;
+    }
+    return {
+      ...message,
+      data: {
+        ...message.data,
+        content: normalizedText,
+      },
+      metadata: {
+        ...message.metadata,
+        "opencode.assistant.migrated": true,
+      },
+    };
+  }
+
+  if (Array.isArray(message.data.content) && message.metadata["opencode.assistant"] === true) {
+    const migratedText = stripLegacyAssistantProtocol(extractLegacyAssistantText(message.data.content));
+    if (migratedText.length === 0) {
+      return null;
+    }
+
+    return {
+      ...message,
+      data: {
+        ...message.data,
+        content: migratedText,
+      },
+      metadata: {
+        ...message.metadata,
+        "opencode.assistant.migrated": true,
+      },
+    };
+  }
+
+  return message;
+}
+
+function readToolCallId(part: unknown): string | undefined {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) {
+    return undefined;
+  }
+
+  const record = part as Record<string, unknown>;
+  if (record.type === "tool-call" || record.type === "tool-use" || record.type === "tool-result") {
+    if (typeof record.toolCallId === "string" && record.toolCallId.trim().length > 0) {
+      return record.toolCallId;
+    }
+    if (typeof record.toolUseId === "string" && record.toolUseId.trim().length > 0) {
+      return record.toolUseId;
+    }
+    if (typeof record.callId === "string" && record.callId.trim().length > 0) {
+      return record.callId;
+    }
+    if (typeof record.id === "string" && record.id.trim().length > 0) {
+      return record.id;
+    }
+  }
+
+  return undefined;
+}
+
+function isToolResultPart(part: unknown): boolean {
+  return typeof part === "object"
+    && part !== null
+    && !Array.isArray(part)
+    && (part as Record<string, unknown>).type === "tool-result";
+}
+
+function hasMatchingAssistantToolCall(message: Message | null, toolCallIds: readonly string[]): boolean {
+  if (!message || message.data.role !== "assistant" || !Array.isArray(message.data.content)) {
+    return false;
+  }
+
+  const knownIds = new Set(
+    message.data.content
+      .map((part) => {
+        if (typeof part !== "object" || part === null || Array.isArray(part)) {
+          return undefined;
+        }
+        const record = part as Record<string, unknown>;
+        if (record.type !== "tool-call" && record.type !== "tool-use") {
+          return undefined;
+        }
+        return readToolCallId(record);
+      })
+      .filter((value): value is string => typeof value === "string"),
+  );
+
+  return toolCallIds.every((id) => knownIds.has(id));
+}
+
+function findPreviousAssistantMessage(messages: ReadonlyArray<Message | null>, index: number): Message | null {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const candidate = messages[cursor];
+    if (!candidate) {
+      continue;
+    }
+    if (candidate.data.role === "assistant") {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function isOrphanToolResultMessage(message: Message, previousAssistant: Message | null): boolean {
+  if (message.data.role !== "user" || !Array.isArray(message.data.content) || message.data.content.length === 0) {
+    return false;
+  }
+
+  if (!message.data.content.every(isToolResultPart)) {
+    return false;
+  }
+
+  const toolCallIds = message.data.content
+    .map((part) => readToolCallId(part))
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  if (toolCallIds.length !== message.data.content.length) {
+    return true;
+  }
+
+  return !hasMatchingAssistantToolCall(previousAssistant, toolCallIds);
+}
+
 export function register(api: ExtensionApi): void {
   api.pipeline.register(
     "turn",
     async (ctx) => {
+      const normalizedMessages = [...ctx.conversationState.nextMessages] as Array<Message | null>;
+
+      for (let index = 0; index < normalizedMessages.length; index += 1) {
+        const message = normalizedMessages[index];
+        if (!message) {
+          continue;
+        }
+        const normalized = normalizeAssistantMessage(message);
+        if (normalized === null) {
+          ctx.emitMessageEvent({
+            type: "remove",
+            targetId: message.id,
+          });
+          normalizedMessages[index] = null;
+          continue;
+        }
+        if (normalized !== message) {
+          ctx.emitMessageEvent({
+            type: "replace",
+            targetId: message.id,
+            message: normalized,
+          });
+          normalizedMessages[index] = normalized;
+        }
+      }
+
+      for (let index = 0; index < normalizedMessages.length; index += 1) {
+        const message = normalizedMessages[index];
+        if (!message) {
+          continue;
+        }
+        if (isOrphanToolResultMessage(message, findPreviousAssistantMessage(normalizedMessages, index))) {
+          ctx.emitMessageEvent({
+            type: "remove",
+            targetId: message.id,
+          });
+          normalizedMessages[index] = null;
+        }
+      }
+
       const prompt = ctx.runtime.agent.prompt ?? {};
       const currentSystem = typeof prompt.system === "string" ? prompt.system.trim() : "";
       const runtimeModel = ctx.runtime.model;
@@ -258,8 +543,40 @@ export function register(api: ExtensionApi): void {
     { priority: -100 },
   );
 
+  api.pipeline.register("step", async (ctx) => {
+    const modelName = ctx.runtime.model?.modelName;
+    if (typeof modelName === "string" && modelName.trim().length > 0) {
+      ctx.toolCatalog = filterToolCatalogForModel(ctx.toolCatalog, modelName);
+    }
+    return ctx.next();
+  });
+
   api.pipeline.register("toolCall", async (ctx) => {
     const workdir = ctx.runtime.agent.bundleRoot;
+
+    if (isDoomLoop(ctx.conversationState.nextMessages, ctx.toolName, ctx.args)) {
+      try {
+        await requestPermission({
+          workdir,
+          permission: "doom_loop",
+          patterns: [ctx.toolName],
+          always: [ctx.toolName],
+          metadata: {
+            tool: ctx.toolName,
+            input: ctx.args,
+          },
+        });
+      } catch (error) {
+        if (error instanceof PermissionDeniedError || error instanceof PermissionRejectedError) {
+          return buildPermissionError({
+            toolCallId: ctx.toolCallId,
+            toolName: ctx.toolName,
+            error,
+          });
+        }
+        throw error;
+      }
+    }
 
     try {
       if (
@@ -315,6 +632,4 @@ export function register(api: ExtensionApi): void {
 
     return ctx.next();
   });
-
-  api.session.registerTurnProcessor((ctx) => opencodeTurnProcessor(ctx));
 }

@@ -3,7 +3,9 @@ kind: Package
 metadata:
   name: opencode-harness-sample
 spec:
-  dependencies: []
+  dependencies:
+    - name: "@goondan/openharness-base"
+      version: "0.0.1-alpha1"
 ---
 apiVersion: goondan.ai/v1
 kind: Model
@@ -348,4 +350,6 @@ spec:
     - Tool/opencode
   extensions:
     - Extension/opencode-harness
+    - Extension/context-message
+    - Extension/message-compaction
     - Extension/opencode-todo

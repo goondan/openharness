@@ -58,6 +58,7 @@ export interface ToolCallMiddlewareContext extends ExecutionContext {
   readonly stepIndex: number;
   readonly toolName: string;
   readonly toolCallId: string;
+  readonly conversationState: ConversationState;
   readonly runtime: RuntimeContext;
   args: JsonObject;
   metadata: Record<string, JsonValue>;
@@ -98,6 +99,7 @@ interface ToolCallMutableState extends ExecutionContext {
   stepIndex: number;
   toolName: string;
   toolCallId: string;
+  conversationState: ConversationState;
   runtime: RuntimeContext;
   args: JsonObject;
   metadata: Record<string, JsonValue>;
@@ -550,6 +552,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       stepIndex: ctx.stepIndex,
       toolName: ctx.toolName,
       toolCallId: ctx.toolCallId,
+      conversationState: ctx.conversationState,
       runtime: ctx.runtime,
       args: ctx.args,
       metadata: ctx.metadata,
@@ -761,6 +764,9 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       },
       get toolCallId() {
         return state.toolCallId;
+      },
+      get conversationState() {
+        return state.conversationState;
       },
       get runtime() {
         return state.runtime;

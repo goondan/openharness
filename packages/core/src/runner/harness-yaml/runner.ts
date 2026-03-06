@@ -577,6 +577,7 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
               stepIndex: inputForToolCall.stepIndex,
               toolName: inputForToolCall.toolName,
               toolCallId: inputForToolCall.toolCallId,
+              conversationState: conversationState as ConversationStateImpl,
               runtime,
               args: inputForToolCall.args,
               metadata: inputForToolCall.metadata ?? {},
