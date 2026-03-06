@@ -2,6 +2,7 @@ import * as path from "node:path";
 
 import type { ExtensionApi, ToolCallResult } from "@goondan/openharness";
 
+import { PermissionDeniedError, PermissionRejectedError, requestPermission } from "../session/permission.js";
 import { buildOpencodeSystemPrompt } from "../session/system.js";
 import { opencodeTurnProcessor } from "../session/processor.js";
 
@@ -67,6 +68,172 @@ function buildBoundaryError(input: {
   };
 }
 
+function createPreview(text: string, maxChars = 2_000): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n\n...` : text;
+}
+
+function buildBashAlwaysPattern(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return "*";
+  }
+
+  const [firstToken] = trimmed.split(/\s+/);
+  return firstToken ? `${firstToken} *` : "*";
+}
+
+function buildPermissionRequest(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "opencode__bash") {
+    const command = typeof args.command === "string" ? args.command.trim() : "";
+    if (!command) {
+      return undefined;
+    }
+    return {
+      permission: "bash",
+      patterns: [command],
+      always: [buildBashAlwaysPattern(command)],
+      metadata: {
+        command,
+        cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+        description: typeof args.description === "string" ? args.description : undefined,
+      },
+    };
+  }
+
+  if (toolName === "opencode__write") {
+    const filePath = typeof args.filePath === "string" ? args.filePath : "";
+    if (!filePath) {
+      return undefined;
+    }
+    return {
+      permission: "edit",
+      patterns: [filePath],
+      always: ["*"],
+      metadata: {
+        filePath,
+        contentPreview: typeof args.content === "string" ? createPreview(args.content) : undefined,
+      },
+    };
+  }
+
+  if (toolName === "opencode__edit") {
+    const filePath = typeof args.filePath === "string" ? args.filePath : "";
+    if (!filePath) {
+      return undefined;
+    }
+    return {
+      permission: "edit",
+      patterns: [filePath],
+      always: ["*"],
+      metadata: {
+        filePath,
+        oldStringPreview: typeof args.oldString === "string" ? createPreview(args.oldString) : undefined,
+        newStringPreview: typeof args.newString === "string" ? createPreview(args.newString) : undefined,
+        replaceAll: args.replaceAll === true,
+      },
+    };
+  }
+
+  if (toolName === "opencode__apply_patch") {
+    const patchText = typeof args.patchText === "string" ? args.patchText : "";
+    const touched = parsePatchTouchedPaths(patchText);
+    if (touched.length === 0) {
+      return undefined;
+    }
+    return {
+      permission: "edit",
+      patterns: touched,
+      always: ["*"],
+      metadata: {
+        files: touched,
+        patchPreview: createPreview(patchText, 4_000),
+      },
+    };
+  }
+
+  if (toolName === "opencode__task") {
+    const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : "general";
+    return {
+      permission: "task",
+      patterns: [subagentType],
+      always: ["*"],
+      metadata: {
+        description: typeof args.description === "string" ? args.description : undefined,
+        subagent_type: subagentType,
+      },
+    };
+  }
+
+  if (toolName === "opencode__websearch") {
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    if (!query) {
+      return undefined;
+    }
+    return {
+      permission: "websearch",
+      patterns: [query],
+      always: ["*"],
+      metadata: {
+        query,
+        numResults: typeof args.numResults === "number" ? args.numResults : undefined,
+        type: typeof args.type === "string" ? args.type : undefined,
+      },
+    };
+  }
+
+  if (toolName === "opencode__codesearch") {
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    if (!query) {
+      return undefined;
+    }
+    return {
+      permission: "codesearch",
+      patterns: [query],
+      always: ["*"],
+      metadata: {
+        query,
+        tokensNum: typeof args.tokensNum === "number" ? args.tokensNum : undefined,
+      },
+    };
+  }
+
+  if (toolName === "opencode__skill") {
+    const name = typeof args.name === "string" ? args.name.trim() : "";
+    if (!name) {
+      return undefined;
+    }
+    return {
+      permission: "skill",
+      patterns: [name],
+      always: [name],
+      metadata: {
+        name,
+      },
+    };
+  }
+
+  return undefined;
+}
+
+function buildPermissionError(input: {
+  toolCallId: string;
+  toolName: string;
+  error: PermissionDeniedError | PermissionRejectedError;
+}): ToolCallResult {
+  const rejected = input.error instanceof PermissionRejectedError;
+  return {
+    toolCallId: input.toolCallId,
+    toolName: input.toolName,
+    status: "error",
+    error: {
+      name: input.error.name,
+      code: rejected ? "E_PERMISSION_REJECTED" : "E_PERMISSION_DENIED",
+      message: input.error.message,
+      suggestion: rejected ? "다른 접근을 시도하거나 사용자에게 확인을 요청하세요." : "승인 규칙을 확인하세요.",
+    },
+  };
+}
+
 export function register(api: ExtensionApi): void {
   api.pipeline.register(
     "turn",
@@ -125,6 +292,25 @@ export function register(api: ExtensionApi): void {
         toolName: ctx.toolName,
         error,
       });
+    }
+
+    const permissionRequest = buildPermissionRequest(ctx.toolName, ctx.args);
+    if (permissionRequest) {
+      try {
+        await requestPermission({
+          workdir,
+          ...permissionRequest,
+        });
+      } catch (error) {
+        if (error instanceof PermissionDeniedError || error instanceof PermissionRejectedError) {
+          return buildPermissionError({
+            toolCallId: ctx.toolCallId,
+            toolName: ctx.toolName,
+            error,
+          });
+        }
+        throw error;
+      }
     }
 
     return ctx.next();

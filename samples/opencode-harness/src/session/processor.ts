@@ -26,12 +26,15 @@ import {
   stringifyJson,
   toModelMessages,
 } from "./messages.js";
+import { PermissionDeniedError, PermissionRejectedError, requestPermission } from "./permission.js";
 import { type AssistantPart, readToolPayload } from "./protocol.js";
 import { captureWorkspaceSnapshot, diffWorkspaceSnapshots, type WorkspaceSnapshot } from "./snapshot.js";
 import { filterToolCatalogForModel } from "./tool-catalog.js";
 
 const DOOM_LOOP_THRESHOLD = 3;
 const LLM_INPUT_PREVIEW_LIMIT = 1_000;
+
+type BlockedReason = "doom_loop" | "permission";
 
 interface AssistantAttemptResult {
   assistantMessage: Message;
@@ -150,7 +153,7 @@ async function processAssistantAttempt(input: ProcessAssistantAttemptInput): Pro
   let turnFinishReason: TurnResult["finishReason"] = "text_response";
   let needsCompaction = false;
   let lastStepTotalTokens: number | undefined;
-  let blocked = false;
+  let blockedReason: BlockedReason | undefined;
 
   while (accumulatedStepCount < processorCtx.maxSteps) {
     const stepIndex = accumulatedStepCount + 1;
@@ -164,7 +167,7 @@ async function processAssistantAttempt(input: ProcessAssistantAttemptInput): Pro
       toolCatalog: fullToolCatalog,
     });
 
-    let stepBlocked = false;
+    let stepBlockedReason: BlockedReason | undefined;
     let stepNeedsCompaction = false;
 
     let stepResult: StepResult;
@@ -188,8 +191,8 @@ async function processAssistantAttempt(input: ProcessAssistantAttemptInput): Pro
             onAssistantMessage(nextMessage) {
               assistantMessage = nextMessage;
             },
-            onBlocked() {
-              stepBlocked = true;
+            onBlocked(reason) {
+              stepBlockedReason = reason;
             },
             onNeedsCompaction() {
               stepNeedsCompaction = true;
@@ -207,7 +210,7 @@ async function processAssistantAttempt(input: ProcessAssistantAttemptInput): Pro
     }
 
     accumulatedStepCount += 1;
-    blocked ||= stepBlocked;
+    blockedReason ??= stepBlockedReason;
     needsCompaction ||= stepNeedsCompaction;
     lastStepTotalTokens = readTotalTokens(stepResult.metadata) ?? lastStepTotalTokens;
 
@@ -237,10 +240,10 @@ async function processAssistantAttempt(input: ProcessAssistantAttemptInput): Pro
       break;
     }
 
-    if (blocked) {
+    if (blockedReason) {
       turnError = {
-        message: "doom loop detected",
-        code: "E_DOOM_LOOP",
+        message: blockedReason === "doom_loop" ? "doom loop detected" : "tool execution blocked by permission flow",
+        code: blockedReason === "doom_loop" ? "E_DOOM_LOOP" : "E_PERMISSION_REJECTED",
       };
       turnFinishReason = "error";
       break;
@@ -279,7 +282,7 @@ interface ProcessStreamingStepInput {
   toolCatalog: ToolCatalogItem[];
   fullToolCatalog: ToolCatalogItem[];
   onAssistantMessage(message: Message): void;
-  onBlocked(): void;
+  onBlocked(reason: BlockedReason): void;
   onNeedsCompaction(): void;
 }
 
@@ -316,18 +319,34 @@ async function processStreamingStep(input: ProcessStreamingStepInput): Promise<S
       messages: modelMessages,
       executeTool: async ({ toolName, toolCallId, args }) => {
         if (isDoomLoop(readAssistantParts(assistantMessage), toolName, args)) {
-          onBlocked();
-          return {
-            toolCallId,
-            toolName,
-            status: "error",
-            error: {
-              name: "DoomLoopError",
-              code: "E_DOOM_LOOP",
-              message: `동일한 도구 호출이 ${DOOM_LOOP_THRESHOLD}회 반복되어 중단했습니다.`,
-              suggestion: "현재 상태를 요약하고 다른 접근을 선택하세요.",
-            },
-          };
+          try {
+            await requestPermission({
+              workdir: processorCtx.workdir,
+              permission: "doom_loop",
+              patterns: [toolName],
+              always: [toolName],
+              metadata: {
+                tool: toolName,
+                input: args,
+              },
+            });
+          } catch (error) {
+            if (error instanceof PermissionDeniedError || error instanceof PermissionRejectedError) {
+              onBlocked("permission");
+              return {
+                toolCallId,
+                toolName,
+                status: "error",
+                error: {
+                  name: error.name,
+                  code: "E_PERMISSION_REJECTED",
+                  message: error.message,
+                  suggestion: "현재 상태를 요약하고 사용자에게 확인을 요청하세요.",
+                },
+              };
+            }
+            throw error;
+          }
         }
 
         return processorCtx.runToolCall({
@@ -511,7 +530,10 @@ async function processStreamingStep(input: ProcessStreamingStepInput): Promise<S
         case "tool-error": {
           const error = toToolResultError(event.error);
           if (error.code === "E_DOOM_LOOP") {
-            onBlocked();
+            onBlocked("doom_loop");
+          }
+          if (error.code === "E_PERMISSION_REJECTED" || error.code === "E_PERMISSION_DENIED") {
+            onBlocked("permission");
           }
 
           toolResults.push({

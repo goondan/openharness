@@ -252,7 +252,7 @@ spec:
           - tool
           - error
     - name: question
-      description: Ask the user one or more clarification questions in an interactive CLI session.
+      description: Ask the user one or more clarification questions in an interactive CLI session. Fails clearly in non-interactive or non-TTY environments.
       parameters:
         type: object
         properties:
@@ -295,7 +295,17 @@ spec:
         required:
           - questions
     - name: skill
-      description: Load a local skill file and inject its instructions into the conversation.
+      description: |
+        Load a local skill file and inject its instructions into the conversation.
+
+        Available local skills in this session:
+        - danggeun-writing-tone
+        - manager-mode
+        - skill-creator
+        - skill-installer
+        - wide-scope-mode
+
+        Tool output includes a <skill_content name="..."> block with the loaded instructions and sampled local files.
       parameters:
         type: object
         properties:

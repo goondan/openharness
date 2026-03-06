@@ -275,14 +275,14 @@ function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseQuestionOption(value: JsonValue, index: number): QuestionOptionInput {
+function parseQuestionOption(value: JsonValue, questionIndex: number, optionIndex: number): QuestionOptionInput {
   if (!isJsonObject(value)) {
-    throw new Error(`questions[${index}].options entries must be objects`);
+    throw new Error(`questions[${questionIndex}].options[${optionIndex}] must be an object`);
   }
 
   const label = typeof value.label === "string" ? value.label.trim() : "";
   if (!label) {
-    throw new Error(`questions[${index}].options entries must include label`);
+    throw new Error(`questions[${questionIndex}].options[${optionIndex}].label is required`);
   }
 
   const description = typeof value.description === "string" ? value.description.trim() : "";
@@ -305,7 +305,7 @@ function parseQuestionInfo(value: JsonValue, index: number): QuestionInfoInput {
   const headerRaw = typeof value.header === "string" ? value.header.trim() : "";
   const header = headerRaw || `Question ${index + 1}`;
   const optionsValue = Array.isArray(value.options) ? value.options : [];
-  const options = optionsValue.map((option, optionIndex) => parseQuestionOption(option, index + optionIndex));
+  const options = optionsValue.map((option, optionIndex) => parseQuestionOption(option, index, optionIndex));
 
   return {
     question,
@@ -313,6 +313,19 @@ function parseQuestionInfo(value: JsonValue, index: number): QuestionInfoInput {
     options,
     multiple: value.multiple === true,
     custom: value.custom !== false,
+  };
+}
+
+function serializeQuestionInfo(question: QuestionInfoInput): JsonObject {
+  return {
+    header: question.header,
+    question: question.question,
+    options: question.options.map((option) => ({
+      label: option.label,
+      description: option.description,
+    })),
+    multiple: question.multiple,
+    custom: question.custom,
   };
 }
 
@@ -950,16 +963,15 @@ export async function question(_ctx: ToolContext, args: JsonObject): Promise<Jso
   const formatted = questions
     .map((questionInfo, index) => `"${questionInfo.question}"="${(answers[index] ?? []).join(", ") || "Unanswered"}"`)
     .join(", ");
+  const summary = `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`;
 
   return normalizePayload({
     title: `Asked ${questions.length} question${questions.length === 1 ? "" : "s"}`,
-    output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+    output: summary,
     metadata: {
+      summary,
       answers,
-      questions: questions.map((questionInfo) => ({
-        header: questionInfo.header,
-        question: questionInfo.question,
-      })),
+      questions: questions.map((questionInfo) => serializeQuestionInfo(questionInfo)),
     },
   });
 }
@@ -1004,7 +1016,11 @@ export async function skill(ctx: ToolContext, args: JsonObject): Promise<JsonVal
       dir,
       location: selectedSkill.location,
       fileCount: sampledFiles.length,
-      availableSkills: availableSkills.map((skillInfo) => skillInfo.name),
+      availableSkills: availableSkills.map((skillInfo) => ({
+        name: skillInfo.name,
+        description: skillInfo.description,
+        location: skillInfo.location,
+      })),
     },
   });
 }

@@ -263,6 +263,17 @@ function extractFinalText(result: unknown): string {
     return "";
   }
 
+  const turnResult = result.turnResult;
+  let errorCode: string | undefined;
+  let errorMessage: string | undefined;
+  if (isRecord(turnResult)) {
+    const error = turnResult.error;
+    if (isRecord(error)) {
+      errorCode = typeof error.code === "string" ? error.code : undefined;
+      errorMessage = typeof error.message === "string" ? error.message : undefined;
+    }
+  }
+
   const candidates = [
     result.finalResponseText,
     result.responseText,
@@ -271,11 +282,17 @@ function extractFinalText(result: unknown): string {
   ];
   for (const value of candidates) {
     if (typeof value === "string") {
+      if (
+        errorMessage
+        && (errorCode === "E_PERMISSION_REJECTED" || errorCode === "E_PERMISSION_DENIED" || errorCode === "E_DOOM_LOOP")
+      ) {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? `${trimmed}\n\n${errorMessage}` : errorMessage;
+      }
       return value;
     }
   }
 
-  const turnResult = result.turnResult;
   if (isRecord(turnResult)) {
     const responseMessage = turnResult.responseMessage;
     if (isRecord(responseMessage)) {
@@ -286,7 +303,7 @@ function extractFinalText(result: unknown): string {
     }
   }
 
-  return "";
+  return errorMessage ?? "";
 }
 
 async function loadCreateRunnerFromHarnessYaml(): Promise<(opts: unknown) => unknown> {
