@@ -163,6 +163,43 @@ spec:
         additionalProperties: false
         required:
           - url
+    - name: websearch
+      description: Search the public web for recent information and return summarized context.
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: Search query.
+          numResults:
+            type: number
+            description: Number of results to request.
+          livecrawl:
+            type: string
+            description: fallback | preferred
+          type:
+            type: string
+            description: auto | fast | deep
+          contextMaxCharacters:
+            type: number
+            description: Optional context size budget.
+        additionalProperties: false
+        required:
+          - query
+    - name: codesearch
+      description: Search public code and library documentation context for a programming query.
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: Search query for APIs, SDKs, libraries, or framework usage.
+          tokensNum:
+            type: number
+            description: Approximate number of tokens to return (1000-50000).
+        additionalProperties: false
+        required:
+          - query
     - name: task
       description: Delegate a bounded task to a nested OpenHarness runner.
       parameters:

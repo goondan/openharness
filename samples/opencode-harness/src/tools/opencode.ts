@@ -32,6 +32,11 @@ const MAX_WEBFETCH_TIMEOUT_MS = 120_000;
 const DEFAULT_WEBFETCH_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const WEBFETCH_FORMATS = ["text", "markdown", "html"] as const;
+const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
+const DEFAULT_WEBSEARCH_RESULTS = 8;
+const DEFAULT_CODESEARCH_TOKENS = 5_000;
+const MIN_CODESEARCH_TOKENS = 1_000;
+const MAX_CODESEARCH_TOKENS = 50_000;
 const MAX_SKILL_FILE_COUNT = 10;
 const MAX_SKILL_SCAN_RESULTS = 256;
 
@@ -501,6 +506,71 @@ async function collectSkillSampleFiles(baseDir: string): Promise<string[]> {
   }
 
   return files;
+}
+
+async function callExaMcpTool(
+  name: "web_search_exa" | "get_code_context_exa",
+  args: Record<string, string | number>,
+  timeoutMs: number,
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(EXA_MCP_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name,
+          arguments: args,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`${name} failed with status ${response.status}${errorText ? `: ${errorText}` : ""}`);
+    }
+
+    const body = await response.text();
+    const lines = body.split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) {
+        continue;
+      }
+
+      const data = JSON.parse(line.slice(6)) as {
+        result?: {
+          content?: Array<{
+            type?: string;
+            text?: string;
+          }>;
+        };
+      };
+
+      const text = data.result?.content?.find((entry) => typeof entry.text === "string")?.text?.trim();
+      if (text) {
+        return text;
+      }
+    }
+
+    return "";
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${name} request timed out after ${timeoutMs} ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function truncateMetadataOutput(text: string): string {
@@ -1665,6 +1735,77 @@ export async function webfetch(ctx: ToolContext, args: JsonObject): Promise<Json
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function websearch(ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
+  const query = readStringArg(args, "query")?.trim() ?? "";
+  if (!query) {
+    throw new Error("query is required");
+  }
+
+  const numResultsRaw = readNumberArg(args, "numResults");
+  const numResults = numResultsRaw !== undefined ? Math.max(1, Math.floor(numResultsRaw)) : DEFAULT_WEBSEARCH_RESULTS;
+  const livecrawl = readEnumArg(args, "livecrawl", ["fallback", "preferred"] as const, "fallback");
+  const type = readEnumArg(args, "type", ["auto", "fast", "deep"] as const, "auto");
+  const contextMaxCharactersRaw = readNumberArg(args, "contextMaxCharacters");
+  const contextMaxCharacters =
+    contextMaxCharactersRaw !== undefined ? Math.max(1_000, Math.floor(contextMaxCharactersRaw)) : undefined;
+
+  const text = await callExaMcpTool(
+    "web_search_exa",
+    {
+      query,
+      numResults,
+      livecrawl,
+      type,
+      ...(contextMaxCharacters !== undefined ? { contextMaxCharacters } : {}),
+    },
+    25_000,
+  );
+
+  return wrapTextOutput(ctx, {
+    title: `Web search: ${query}`,
+    output: text || "No search results found. Try a more specific query.",
+    metadata: {
+      query,
+      numResults,
+      livecrawl,
+      type,
+      ...(contextMaxCharacters !== undefined ? { contextMaxCharacters } : {}),
+    },
+  });
+}
+
+export async function codesearch(ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
+  const query = readStringArg(args, "query")?.trim() ?? "";
+  if (!query) {
+    throw new Error("query is required");
+  }
+
+  const tokensNumRaw = readNumberArg(args, "tokensNum");
+  const tokensNum = tokensNumRaw !== undefined
+    ? Math.max(MIN_CODESEARCH_TOKENS, Math.min(MAX_CODESEARCH_TOKENS, Math.floor(tokensNumRaw)))
+    : DEFAULT_CODESEARCH_TOKENS;
+
+  const text = await callExaMcpTool(
+    "get_code_context_exa",
+    {
+      query,
+      tokensNum,
+    },
+    30_000,
+  );
+
+  return wrapTextOutput(ctx, {
+    title: `Code search: ${query}`,
+    output:
+      text
+      || "No code snippets or documentation found. Try a more specific library, API, or framework query.",
+    metadata: {
+      query,
+      tokensNum,
+    },
+  });
 }
 
 export async function task(ctx: ToolContext, args: JsonObject): Promise<JsonValue> {
