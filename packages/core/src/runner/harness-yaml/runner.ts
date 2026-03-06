@@ -429,15 +429,29 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
 
   if (!hasContextMessage) {
     pipelineRegistry.register("turn", async (ctx) => {
-      const hasSystem = ctx.conversationState.nextMessages.some(
-        (msg) => msg.data.role === "system" && msg.metadata["__openharness.runner.system"] === true,
-      );
       const runtimeSystemPrompt =
         typeof ctx.runtime.agent.prompt?.system === "string" ? ctx.runtime.agent.prompt.system : "";
       const effectiveSystemPrompt = runtimeSystemPrompt.trim().length > 0 ? runtimeSystemPrompt : systemPrompt;
 
-      if (!hasSystem && effectiveSystemPrompt.trim().length > 0) {
-        ctx.emitMessageEvent({ type: "append", message: createSystemMessage(effectiveSystemPrompt) });
+      if (effectiveSystemPrompt.trim().length > 0) {
+        const nextMessages = ctx.conversationState.nextMessages;
+        const nonSystemMessages = nextMessages.filter((message) => message.data.role !== "system");
+        const firstMessage = nextMessages[0];
+        const hasTrailingSystemMessage = nextMessages.slice(1).some((message) => message.data.role === "system");
+        const shouldNormalizeSystem =
+          nextMessages.length !== nonSystemMessages.length + 1
+          || firstMessage?.data.role !== "system"
+          || typeof firstMessage.data.content !== "string"
+          || firstMessage.data.content !== effectiveSystemPrompt
+          || hasTrailingSystemMessage
+          || firstMessage.metadata["__openharness.runner.system"] !== true;
+
+        if (shouldNormalizeSystem) {
+          (ctx.conversationState as ConversationStateImpl).replaceBase([
+            createSystemMessage(effectiveSystemPrompt),
+            ...nonSystemMessages,
+          ]);
+        }
       }
 
       const inboundInput = typeof ctx.inputEvent.input === "string" ? ctx.inputEvent.input : "";
