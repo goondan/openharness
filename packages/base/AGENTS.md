@@ -10,8 +10,8 @@
 
 ## 구조적 결정
 
-1. 배포는 `gdn package publish` 경로만 사용한다.
-이유: npm 패키지가 아니라 goondan 리소스 패키지로 유통되는 자산이기 때문.
+1. 배포는 npm package를 기본 경로로 사용하고, `harness.yaml` manifest는 dist 산출물에 함께 포함한다.
+이유: OpenHarness 소비자가 npm 설치만으로 reference tool/extension과 manifest를 함께 가져갈 수 있어야 하기 때문.
 2. Tool/Extension 계약은 각 스펙 문서를 단일 기준으로 따른다.
 이유: 런타임과 계약 불일치가 누적되는 것을 막기 위해.
 3. 기본 메시지 정책은 tool-call/tool-result 정합성을 보존한다.
@@ -27,7 +27,7 @@
 
 - Tool 이름 규칙 `{resource}__{export}`를 유지한다.
 - Tool manifest 입력 스키마는 속성 설명(`description`)과 닫힌 스키마(`additionalProperties: false`) 원칙을 기본으로 유지한다.
-- `@goondan/openharness-base`는 npm publish를 수행하지 않는다.
+- `@goondan/openharness-base`는 public npm publish 대상이다.
 - `packages/base/harness.yaml`의 `spec.version`은 루트 `@goondan/*` npm 버전과 항상 동일해야 하며, 불일치 상태로 배포하지 않는다.
 - 코어 텍스트 주입=0 원칙을 전제로, Extension은 시스템 프롬프트 텍스트 조립/주입 책임을 명시적으로 소유하며 이를 Runtime 코어 책임으로 되돌리지 않는다.
 - Runtime이 제공하는 `ctx.runtime.agent`/`ctx.runtime.inbound` 정보는 실행 컨텍스트 전달값으로 취급하며, 프롬프트 정책 결정의 단일 소유자는 Extension이다.

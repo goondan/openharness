@@ -1,17 +1,33 @@
 {
   "name": "@goondan/openharness-cli",
   "version": "0.0.1-alpha1",
+  "description": "CLI for running and debugging OpenHarness agents locally",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
+  "homepage": "https://github.com/goondan/openharness#readme",
+  "bugs": {
+    "url": "https://github.com/goondan/openharness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goondan/openharness.git",
+    "directory": "packages/cli"
+  },
   "publishConfig": {
     "access": "public"
   },
+  "keywords": [
+    "agent",
+    "cli",
+    "harness",
+    "llm"
+  ],
   "bin": {
-    "oh": "./dist/bin.js"
+    "oh": "dist/bin.js"
   },
   "exports": {
     ".": {

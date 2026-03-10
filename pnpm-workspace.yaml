@@ -1,3 +1,5 @@
 packages:
   - "packages/*"
   - "samples/*"
+linkWorkspacePackages: true
+preferWorkspacePackages: true

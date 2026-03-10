@@ -1,9 +1,19 @@
 {
   "name": "@goondan/openharness-types",
   "version": "0.0.1-alpha1",
+  "description": "Shared type contracts for OpenHarness runtimes and extensions",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "homepage": "https://github.com/goondan/openharness#readme",
+  "bugs": {
+    "url": "https://github.com/goondan/openharness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goondan/openharness.git",
+    "directory": "packages/types"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,6 +22,12 @@
   },
   "files": [
     "dist"
+  ],
+  "keywords": [
+    "contracts",
+    "harness",
+    "types",
+    "validation"
   ],
   "publishConfig": {
     "access": "public"

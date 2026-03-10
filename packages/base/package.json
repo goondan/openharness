@@ -5,6 +5,15 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "homepage": "https://github.com/goondan/openharness#readme",
+  "bugs": {
+    "url": "https://github.com/goondan/openharness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goondan/openharness.git",
+    "directory": "packages/base"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -13,6 +22,13 @@
   },
   "files": [
     "dist"
+  ],
+  "keywords": [
+    "agent",
+    "extensions",
+    "harness",
+    "reference",
+    "tools"
   ],
   "publishConfig": {
     "access": "public"

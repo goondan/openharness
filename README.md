@@ -140,6 +140,40 @@ console.log(output.finalResponseText);
 - `createHarnessRuntimeFromYaml()`는 ingress 포함 상위 runtime입니다. `processTurn()`은 기본 Agent가 결정되는 경우에만 사용합니다.
 - `createRunnerFromHarnessYaml()`는 내부적으로 runtime을 만든 뒤 기본 Agent를 고정하고, 텍스트 입력용 `conversationId`를 함께 제공하는 convenience wrapper입니다.
 
+## npm packages
+
+- `@goondan/openharness`: core runtime engine
+- `@goondan/openharness-types`: shared contracts and pure utilities
+- `@goondan/openharness-base`: reference tools, extensions, manifest bundle
+- `@goondan/openharness-integrations`: optional external-service integrations
+- `@goondan/openharness-cli`: local runner and debugging CLI (`oh`)
+
+## Publish workflow
+
+로컬에서 publish 준비 상태를 점검할 때는 아래 순서로 실행합니다.
+
+```bash
+pnpm verify
+pnpm publish:check
+pnpm publish:packages -- --dry-run
+```
+
+로컬 터미널에서 직접 npm 계정으로 배포할 때는 Trusted Publisher/OIDC가 없으므로 provenance를 끈 별도 스크립트를 사용합니다.
+
+```bash
+pnpm publish:packages:local -- --dry-run
+pnpm publish:packages:local
+```
+
+GitHub Actions 기반 Trusted Publisher를 사용하려면 npm package settings에서 각 패키지에 같은 workflow 파일명을 연결해야 합니다.
+
+1. npmjs.com에서 각 패키지 설정 페이지를 엽니다.
+2. `Trusted Publisher`에 GitHub Actions publisher를 추가합니다.
+3. `Organization or user = goondan`, `Repository = openharness`, `Workflow filename = publish-npm.yml`로 맞춥니다.
+4. 저장 후 첫 publish가 성공하면 `Publishing access`에서 토큰 publish를 막는 설정으로 전환합니다.
+
+`publish-npm.yml` 파일명은 npm Trusted Publisher 설정과 정확히 일치해야 하므로 바꾸지 않는 것을 권장합니다.
+
 ## 문서
 
 - [SPEC.md](./SPEC.md): `harness.yaml`, ingress adapter 계약, 상위 runtime API, acceptance criteria
