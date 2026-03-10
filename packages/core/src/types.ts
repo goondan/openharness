@@ -55,6 +55,25 @@ export interface CoreMessage {
   [key: string]: unknown;
 }
 
+export type InboundPropertyValue = string | number | boolean;
+
+export type InboundContentPart =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image";
+      url: string;
+      alt?: string;
+    }
+  | {
+      type: "file";
+      url: string;
+      name: string;
+      mimeType?: string;
+    };
+
 export type MessageSource =
   | { type: "user" }
   | { type: "assistant"; stepId: string }
@@ -103,22 +122,28 @@ export interface ReplyChannel {
 }
 
 export interface TurnPrincipal {
-  type: string;
-  id: string;
-  [key: string]: JsonValue;
+  readonly type: string;
+  readonly id: string;
+  readonly [key: string]: JsonValue | undefined;
 }
 
-export interface TurnAuth {
-  readonly principal?: TurnPrincipal;
-  readonly [key: string]: JsonValue | TurnPrincipal | undefined;
+interface TurnAuthBase {
+  readonly [key: string]: JsonValue | undefined;
 }
+
+export type TurnAuth = TurnAuthBase & {
+  readonly principal?: TurnPrincipal;
+};
 
 export interface AgentEvent extends EventEnvelope {
   readonly input?: string;
+  readonly content?: InboundContentPart[];
+  readonly properties?: Record<string, InboundPropertyValue>;
   readonly instanceKey?: string;
   readonly source: EventSource;
   readonly auth?: TurnAuth;
   readonly replyTo?: ReplyChannel;
+  readonly rawPayload?: JsonValue;
 }
 
 export type ProcessStatus =
@@ -392,12 +417,15 @@ export interface RuntimeInboundBaseContext {
   eventType: string;
   sourceName: string;
   createdAt: string;
+  connectionName?: string;
   instanceKey?: string;
 }
 
 export interface RuntimeConnectorInboundContext extends RuntimeInboundBaseContext {
   kind: "connector";
-  properties: Record<string, string>;
+  properties: Record<string, InboundPropertyValue>;
+  content: InboundContentPart[];
+  rawPayload?: JsonValue;
 }
 
 export interface RuntimeInboundCallerContext {
@@ -478,14 +506,108 @@ export type TurnMiddleware = (ctx: TurnMiddlewareContext) => Promise<TurnResult>
 export type StepMiddleware = (ctx: StepMiddlewareContext) => Promise<StepResult>;
 export type ToolCallMiddleware = (ctx: ToolCallMiddlewareContext) => Promise<ToolCallResult>;
 
+export interface IngressVerifyContext {
+  readonly connectionName: string;
+  readonly connectorName: string;
+  readonly payload: unknown;
+  readonly config: Record<string, string>;
+  readonly secrets: Record<string, string>;
+  readonly receivedAt: string;
+  metadata: Record<string, JsonValue>;
+  next(): Promise<void>;
+}
+
+export interface InboundEnvelope {
+  readonly name: string;
+  readonly content: InboundContentPart[];
+  readonly properties: Record<string, InboundPropertyValue>;
+  readonly instanceKey?: string;
+  readonly auth?: TurnAuth;
+  readonly rawPayload?: JsonValue;
+  readonly source: EventSource;
+  readonly metadata?: JsonObject;
+}
+
+export interface IngressRouteResolution {
+  connectionName: string;
+  connectorName: string;
+  ruleIndex: number;
+  agentName: string;
+  instanceKey: string;
+  event: InboundEnvelope;
+}
+
+export interface IngressNormalizeContext {
+  readonly connectionName: string;
+  readonly connectorName: string;
+  readonly payload: unknown;
+  readonly config: Record<string, string>;
+  readonly secrets: Record<string, string>;
+  readonly receivedAt: string;
+  metadata: Record<string, JsonValue>;
+  next(): Promise<InboundEnvelope[]>;
+}
+
+export interface IngressRouteContext {
+  readonly connectionName: string;
+  readonly connectorName: string;
+  readonly event: InboundEnvelope;
+  metadata: Record<string, JsonValue>;
+  next(): Promise<IngressRouteResolution>;
+}
+
+export interface IngressDispatchPlan {
+  connectionName: string;
+  connectorName: string;
+  agentName: string;
+  instanceKey: string;
+  event: InboundEnvelope;
+  eventId: string;
+  turnId: string;
+  traceId: string;
+  inputEvent: AgentEvent;
+  runtime: RuntimeContext;
+}
+
+export interface IngressAcceptResult {
+  accepted: true;
+  connectionName: string;
+  connectorName: string;
+  agentName: string;
+  instanceKey: string;
+  eventId: string;
+  eventName: string;
+  turnId: string;
+  traceId: string;
+}
+
+export interface IngressDispatchContext {
+  plan: IngressDispatchPlan;
+  metadata: Record<string, JsonValue>;
+  next(): Promise<IngressAcceptResult>;
+}
+
+export type IngressVerifyMiddleware = (ctx: IngressVerifyContext) => Promise<void>;
+export type IngressNormalizeMiddleware = (ctx: IngressNormalizeContext) => Promise<InboundEnvelope[]>;
+export type IngressRouteMiddleware = (ctx: IngressRouteContext) => Promise<IngressRouteResolution>;
+export type IngressDispatchMiddleware = (ctx: IngressDispatchContext) => Promise<IngressAcceptResult>;
+
 export interface PipelineRegistry {
   register(type: "turn", fn: TurnMiddleware, options?: { priority?: number }): void;
   register(type: "step", fn: StepMiddleware, options?: { priority?: number }): void;
   register(type: "toolCall", fn: ToolCallMiddleware, options?: { priority?: number }): void;
 }
 
+export interface IngressRegistry {
+  register(type: "verify", fn: IngressVerifyMiddleware, options?: { priority?: number }): void;
+  register(type: "normalize", fn: IngressNormalizeMiddleware, options?: { priority?: number }): void;
+  register(type: "route", fn: IngressRouteMiddleware, options?: { priority?: number }): void;
+  register(type: "dispatch", fn: IngressDispatchMiddleware, options?: { priority?: number }): void;
+}
+
 export interface ExtensionApi {
   pipeline: PipelineRegistry;
+  ingress: IngressRegistry;
   tools: {
     register(item: ToolCatalogItem, handler: ToolHandler): void;
   };
@@ -500,10 +622,7 @@ export interface ExtensionApi {
   logger: Pick<Console, "debug" | "info" | "warn" | "error">;
 }
 
-export type ConnectorEventMessage =
-  | { type: "text"; text: string }
-  | { type: "image"; url: string }
-  | { type: "file"; url: string; name: string };
+export type ConnectorEventMessage = InboundContentPart;
 
 export interface ConnectorEvent {
   name: string;
@@ -512,11 +631,24 @@ export interface ConnectorEvent {
   instanceKey: string;
 }
 
-export interface ConnectorContext {
-  emit(event: ConnectorEvent): Promise<void>;
+export interface ConnectorAdapterContext {
+  payload: unknown;
+  connectionName: string;
   config: Record<string, string>;
   secrets: Record<string, string>;
   logger: Pick<Console, "debug" | "info" | "warn" | "error">;
+  receivedAt: string;
+}
+
+export interface ConnectorAdapter {
+  verify?(ctx: ConnectorAdapterContext): Promise<void> | void;
+  normalize(
+    ctx: ConnectorAdapterContext,
+  ): Promise<InboundEnvelope | InboundEnvelope[]> | InboundEnvelope | InboundEnvelope[];
+}
+
+export interface ConnectorContext extends ConnectorAdapterContext {
+  emit(event: ConnectorEvent): Promise<void>;
 }
 
 export type KnownKind =

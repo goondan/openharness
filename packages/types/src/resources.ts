@@ -164,6 +164,8 @@ export interface ConnectionSpec {
   config?: Record<string, ValueSource>;
   /** Connector의 비밀 값 */
   secrets?: Record<string, ValueSource>;
+  /** pre-route ingress(verify/normalize) 용 extension */
+  extensions?: RefOrSelector[];
   verify?: ConnectionVerify;
   ingress?: IngressConfig;
 }
@@ -327,4 +329,3 @@ export function isConnectionResource(value: unknown): value is ConnectionResourc
 export function isPackageResource(value: unknown): value is PackageResource {
   return isResourceOfKind(value, "Package");
 }
-

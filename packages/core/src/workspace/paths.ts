@@ -41,6 +41,10 @@ export class WorkspacePaths {
     return path.join(this.workspaceRoot, "instances");
   }
 
+  get workspaceRuntimeEventsPath(): string {
+    return path.join(this.workspaceRoot, "runtime-events.jsonl");
+  }
+
   packagePath(name: string, version: string): string {
     return path.join(this.packagesDir, `${name}@${version}`);
   }

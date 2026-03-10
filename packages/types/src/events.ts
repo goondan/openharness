@@ -1,5 +1,6 @@
 import { isJsonValue, isPlainObject } from "./json.js";
 import type { JsonObject, JsonValue } from "./json.js";
+import { isInboundContentPart, type InboundContentPart, type InboundPropertyValue } from "./connector.js";
 
 export interface EventEnvelope {
   readonly id: string;
@@ -36,10 +37,13 @@ export type TurnAuth = TurnAuthBase & {
 
 export interface AgentEvent extends EventEnvelope {
   readonly input?: string;
+  readonly content?: InboundContentPart[];
+  readonly properties?: Record<string, InboundPropertyValue>;
   readonly instanceKey?: string;
   readonly source: EventSource;
   readonly auth?: TurnAuth;
   readonly replyTo?: ReplyChannel;
+  readonly rawPayload?: JsonValue;
 }
 
 export type ProcessStatus =
@@ -177,6 +181,31 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
     return false;
   }
 
+  const contentValue = value["content"];
+  if (
+    contentValue !== undefined &&
+    (!Array.isArray(contentValue) || !contentValue.every((item) => isInboundContentPart(item)))
+  ) {
+    return false;
+  }
+
+  const propertiesValue = value["properties"];
+  if (propertiesValue !== undefined) {
+    if (!isPlainObject(propertiesValue)) {
+      return false;
+    }
+
+    for (const propertyValue of Object.values(propertiesValue)) {
+      if (
+        typeof propertyValue !== "string" &&
+        typeof propertyValue !== "number" &&
+        typeof propertyValue !== "boolean"
+      ) {
+        return false;
+      }
+    }
+  }
+
   const instanceKeyValue = value["instanceKey"];
   if (instanceKeyValue !== undefined && typeof instanceKeyValue !== "string") {
     return false;
@@ -184,6 +213,11 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
 
   const replyToValue = value["replyTo"];
   if (replyToValue !== undefined && !isReplyChannel(replyToValue)) {
+    return false;
+  }
+
+  const rawPayloadValue = value["rawPayload"];
+  if (rawPayloadValue !== undefined && !isJsonValue(rawPayloadValue)) {
     return false;
   }
 
@@ -215,4 +249,3 @@ function isEventSource(value: unknown): value is EventSource {
 
   return true;
 }
-

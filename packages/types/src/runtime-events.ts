@@ -7,6 +7,9 @@
  */
 
 export type RuntimeEventType =
+  | "ingress.received"
+  | "ingress.accepted"
+  | "ingress.rejected"
   | "turn.started"
   | "turn.completed"
   | "turn.failed"
@@ -22,14 +25,42 @@ export interface RuntimeEventBase {
   type: RuntimeEventType;
   /** ISO 8601 타임스탬프 */
   timestamp: string;
-  /** 이벤트를 발행한 에이전트 이름 */
-  agentName: string;
-  /** 에이전트 인스턴스 키 */
-  instanceKey: string;
+  /** 이벤트를 발행한 에이전트 이름. ingress 단계에서는 아직 없을 수 있다. */
+  agentName?: string;
+  /** 에이전트 인스턴스 키. ingress 단계에서는 아직 없을 수 있다. */
+  instanceKey?: string;
   /** OTel 호환 추적 컨텍스트 */
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+}
+
+export interface IngressReceivedEvent extends RuntimeEventBase {
+  type: "ingress.received";
+  connectionName: string;
+  connectorName: string;
+  eventId: string;
+}
+
+export interface IngressAcceptedEvent extends RuntimeEventBase {
+  type: "ingress.accepted";
+  connectionName: string;
+  connectorName: string;
+  eventId: string;
+  eventName: string;
+  turnId: string;
+  accepted: true;
+}
+
+export interface IngressRejectedEvent extends RuntimeEventBase {
+  type: "ingress.rejected";
+  connectionName: string;
+  connectorName: string;
+  eventId: string;
+  eventName?: string;
+  turnId?: string;
+  errorMessage: string;
+  errorCode?: string;
 }
 
 export interface TokenUsage {
@@ -155,6 +186,9 @@ export interface ToolFailedEvent extends RuntimeEventBase {
 }
 
 export type RuntimeEvent =
+  | IngressReceivedEvent
+  | IngressAcceptedEvent
+  | IngressRejectedEvent
   | TurnStartedEvent
   | TurnCompletedEvent
   | TurnFailedEvent
@@ -164,4 +198,3 @@ export type RuntimeEvent =
   | ToolCalledEvent
   | ToolCompletedEvent
   | ToolFailedEvent;
-

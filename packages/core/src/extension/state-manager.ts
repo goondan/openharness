@@ -54,3 +54,23 @@ export class ExtensionStateManagerImpl implements ExtensionStateManager {
     this.dirty.clear();
   }
 }
+
+export class InMemoryExtensionStateManager implements ExtensionStateManager {
+  private states: Map<string, JsonValue> = new Map();
+
+  async loadAll(): Promise<void> {
+    // no-op
+  }
+
+  async get(extensionName: string): Promise<JsonValue | null> {
+    return this.states.get(extensionName) ?? null;
+  }
+
+  async set(extensionName: string, value: JsonValue): Promise<void> {
+    this.states.set(extensionName, value);
+  }
+
+  async saveAll(): Promise<void> {
+    // no-op
+  }
+}

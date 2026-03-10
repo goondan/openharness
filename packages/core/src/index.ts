@@ -9,6 +9,7 @@ export { ToolRegistryImpl, type ToolRegistry } from "./tools/registry.js";
 export * from "./tools/executor.js";
 
 export * from "./events/runtime-events.js";
+export * from "./ingress/registry.js";
 
 export * from "./extension/index.js";
 

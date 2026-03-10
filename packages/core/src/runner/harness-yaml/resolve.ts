@@ -8,6 +8,8 @@ import type {
   SelectorWithOverrides,
   ToolSpec,
   ExtensionSpec,
+  ConnectorSpec,
+  ConnectionSpec,
   ValueSource,
 } from "@goondan/openharness-types";
 import {
@@ -24,6 +26,8 @@ export type AgentRuntimeResource = RuntimeResource<AgentSpec> & { kind: "Agent" 
 export type ModelRuntimeResource = RuntimeResource<ModelSpec> & { kind: "Model" };
 export type ToolRuntimeResource = RuntimeResource<ToolSpec> & { kind: "Tool" };
 export type ExtensionRuntimeResource = RuntimeResource<ExtensionSpec> & { kind: "Extension" };
+export type ConnectorRuntimeResource = RuntimeResource<ConnectorSpec> & { kind: "Connector" };
+export type ConnectionRuntimeResource = RuntimeResource<ConnectionSpec> & { kind: "Connection" };
 
 export interface ResolveValueSourceInput {
   env?: Readonly<Record<string, string | undefined>>;

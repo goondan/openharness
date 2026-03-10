@@ -51,6 +51,7 @@ function createTurnContext(input: {
   messages?: Message[];
   metadata?: Record<string, JsonValue>;
   runtime?: RuntimeContext;
+  inputEvent?: AgentEvent;
   emitted: MessageEvent[];
   next?: () => Promise<TurnResult>;
   emitMessageEvent?: (event: MessageEvent) => void;
@@ -63,7 +64,7 @@ function createTurnContext(input: {
     instanceKey: 'instance-1',
     turnId,
     traceId: `trace-${turnId}`,
-    inputEvent: createInputEvent(turnId),
+    inputEvent: input.inputEvent ?? createInputEvent(turnId),
     conversationState: createConversationState(messages),
     agents: noopAgents,
     runtime: input.runtime ?? {
@@ -85,6 +86,7 @@ function createTurnContext(input: {
         sourceName: 'cli',
         createdAt: new Date().toISOString(),
         properties: {},
+        content: [],
       },
     },
     emitMessageEvent(event) {
@@ -159,6 +161,7 @@ describe('context-message extension', () => {
           sourceName: 'cli',
           createdAt: new Date().toISOString(),
           properties: {},
+          content: [],
         },
       },
     });
@@ -225,6 +228,7 @@ describe('context-message extension', () => {
           sourceName: 'cli',
           createdAt: new Date().toISOString(),
           properties: {},
+          content: [],
         },
       },
     });
@@ -301,6 +305,7 @@ describe('context-message extension', () => {
           properties: {
             channel_id: 'C123',
           },
+          content: [],
         },
       },
     });
@@ -346,6 +351,105 @@ describe('context-message extension', () => {
 
     const inboundAppendedEvent = findRuntimeEvent(ctx.metadata, 'context.inbound.appended');
     expect(inboundAppendedEvent).toBeDefined();
+  });
+
+  it('멀티모달 inbound content를 user 메시지로 투영하고 raw payload는 metadata에 남긴다', async () => {
+    const mock = createMockExtensionApi();
+    registerContextMessageExtension(mock.api, {
+      includeAgentPrompt: false,
+      includeSwarmCatalog: false,
+      includeInboundContext: true,
+      includeRouteSummary: false,
+      includeInboundInput: true,
+    });
+
+    const content = [
+      { type: 'text', text: 'hello from slack' },
+      { type: 'image', url: 'https://example.com/diagram.png', alt: 'architecture' },
+      { type: 'file', url: 'https://example.com/spec.pdf', name: 'spec.pdf', mimeType: 'application/pdf' },
+    ] satisfies AgentEvent['content'];
+
+    const emitted: MessageEvent[] = [];
+    const ctx = createTurnContext({
+      emitted,
+      turnId: 'turn-multimodal',
+      inputEvent: {
+        ...createInputEvent('turn-multimodal'),
+        input: 'legacy alias should not win',
+        content,
+        rawPayload: {
+          deliveryId: 'evt-raw-1',
+        },
+      },
+      runtime: {
+        agent: {
+          name: 'coordinator',
+          bundleRoot: '/tmp',
+        },
+        swarm: {
+          swarmName: 'brain',
+          entryAgent: 'coordinator',
+          selfAgent: 'coordinator',
+          availableAgents: ['coordinator'],
+          callableAgents: [],
+        },
+        inbound: {
+          eventId: 'evt-multimodal',
+          eventType: 'slack.message',
+          kind: 'connector',
+          sourceName: 'slack',
+          connectionName: 'slack-main',
+          instanceKey: 'thread:1',
+          createdAt: new Date().toISOString(),
+          properties: {
+            channelId: 'C123',
+          },
+          content,
+          rawPayload: {
+            deliveryId: 'evt-raw-1',
+          },
+        },
+      },
+    });
+
+    const middleware = mock.pipeline.turnMiddlewares[0];
+    if (!middleware) {
+      throw new Error('Missing context-message middleware');
+    }
+
+    await middleware(ctx);
+
+    expect(emitted).toHaveLength(2);
+    const appendEvent = emitted[1];
+    if (!appendEvent || appendEvent.type !== 'append') {
+      throw new Error('Expected inbound append event');
+    }
+
+    expect(appendEvent.message.data.role).toBe('user');
+    expect(appendEvent.message.data.content).toBe(
+      [
+        'hello from slack',
+        '[image] architecture https://example.com/diagram.png',
+        '[file] spec.pdf (application/pdf): https://example.com/spec.pdf',
+      ].join('\n\n'),
+    );
+
+    expect(isJsonObject(appendEvent.message.metadata[INBOUND_MESSAGE_METADATA_KEY])).toBe(true);
+    if (isJsonObject(appendEvent.message.metadata[INBOUND_MESSAGE_METADATA_KEY])) {
+      expect(appendEvent.message.metadata[INBOUND_MESSAGE_METADATA_KEY]).toMatchObject({
+        sourceKind: 'connector',
+        sourceName: 'slack',
+        connectionName: 'slack-main',
+        instanceKey: 'thread:1',
+        eventName: 'slack.message',
+        properties: {
+          channelId: 'C123',
+        },
+        rawPayload: {
+          deliveryId: 'evt-raw-1',
+        },
+      });
+    }
   });
 
   it('기존 system 메시지가 여러 개면 하나로 정리하고 필요 시 교체한다', async () => {
@@ -423,6 +527,7 @@ describe('context-message extension', () => {
           sourceName: 'cli',
           createdAt: new Date().toISOString(),
           properties: {},
+          content: [],
         },
       },
     });
@@ -485,6 +590,7 @@ describe('context-message extension', () => {
           createdAt: new Date().toISOString(),
           instanceKey: 'chat-1',
           properties: {},
+          content: [],
         },
         call: {
           callerAgent: 'coordinator',
@@ -582,6 +688,7 @@ describe('context-message extension', () => {
           sourceName: 'cli',
           createdAt: new Date().toISOString(),
           properties: {},
+          content: [],
         },
       },
     });
@@ -630,6 +737,7 @@ describe('context-message extension', () => {
           sourceName: 'cli',
           createdAt: new Date().toISOString(),
           properties: {},
+          content: [],
         },
       },
     });

@@ -6,8 +6,13 @@ import type {
   AgentToolRuntime,
   ConversationState,
   ExtensionApi,
+  IngressDispatchMiddleware,
+  IngressNormalizeMiddleware,
+  IngressRouteMiddleware,
+  IngressVerifyMiddleware,
   JsonValue,
   Message,
+  IngressRegistry,
   PipelineRegistry,
   StepMiddleware,
   ToolCallMiddleware,
@@ -114,6 +119,43 @@ class TestPipelineRegistry implements PipelineRegistry {
   }
 }
 
+class TestIngressRegistry implements IngressRegistry {
+  readonly verifyMiddlewares: IngressVerifyMiddleware[] = [];
+  readonly normalizeMiddlewares: IngressNormalizeMiddleware[] = [];
+  readonly routeMiddlewares: IngressRouteMiddleware[] = [];
+  readonly dispatchMiddlewares: IngressDispatchMiddleware[] = [];
+
+  register(type: 'verify', middleware: IngressVerifyMiddleware): void;
+  register(type: 'normalize', middleware: IngressNormalizeMiddleware): void;
+  register(type: 'route', middleware: IngressRouteMiddleware): void;
+  register(type: 'dispatch', middleware: IngressDispatchMiddleware): void;
+  register(
+    type: 'verify' | 'normalize' | 'route' | 'dispatch',
+    middleware:
+      | IngressVerifyMiddleware
+      | IngressNormalizeMiddleware
+      | IngressRouteMiddleware
+      | IngressDispatchMiddleware
+  ): void {
+    if (type === 'verify') {
+      this.verifyMiddlewares.push(middleware as IngressVerifyMiddleware);
+      return;
+    }
+
+    if (type === 'normalize') {
+      this.normalizeMiddlewares.push(middleware as IngressNormalizeMiddleware);
+      return;
+    }
+
+    if (type === 'route') {
+      this.routeMiddlewares.push(middleware as IngressRouteMiddleware);
+      return;
+    }
+
+    this.dispatchMiddlewares.push(middleware as IngressDispatchMiddleware);
+  }
+}
+
 class InMemoryEvents {
   private readonly handlers = new Map<string, Set<(...args: unknown[]) => void>>();
 
@@ -164,11 +206,13 @@ export interface MockExtensionApi {
 export function createMockExtensionApi(initialState: JsonValue | null = null): MockExtensionApi {
   let state = initialState;
   const pipeline = new TestPipelineRegistry();
+  const ingress = new TestIngressRegistry();
   const events = new InMemoryEvents();
   const tools: RegisteredTool[] = [];
 
   const api: ExtensionApi = {
     pipeline,
+    ingress,
     tools: {
       register(item: ToolCatalogItem, handler: ToolHandler): void {
         const existingIndex = tools.findIndex((entry) => entry.item.name === item.name);

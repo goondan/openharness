@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { loadExtensions, ExtensionLoadError, type ExtensionSpec } from "./loader.js";
 import type { ExtensionApi, RuntimeResource } from "../types.js";
 import { PipelineRegistryImpl } from "../pipeline/registry.js";
+import { IngressRegistryImpl } from "../ingress/registry.js";
 import { ToolRegistryImpl } from "../tools/registry.js";
 import { ExtensionStateManagerImpl } from "./state-manager.js";
 import { ExtensionApiImpl } from "./api-impl.js";
@@ -33,12 +34,13 @@ describe("loadExtensions", () => {
     await storage.initializeInstanceState("test-instance", "test-agent");
 
     const pipelineRegistry = new PipelineRegistryImpl();
+    const ingressRegistry = new IngressRegistryImpl();
     const toolRegistry = new ToolRegistryImpl();
     const eventBus = new EventEmitter();
 
     apiFactory = (name: string) => {
       const stateManager = new ExtensionStateManagerImpl(storage, "test-instance", [name]);
-      return new ExtensionApiImpl(name, pipelineRegistry, toolRegistry, stateManager, eventBus, console);
+      return new ExtensionApiImpl(name, pipelineRegistry, ingressRegistry, toolRegistry, stateManager, eventBus, console);
     };
 
     logger = console;

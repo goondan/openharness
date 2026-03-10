@@ -9,6 +9,13 @@ export interface ExecutionContext {
   readonly traceId: string;
 }
 
+export interface LoggerLike {
+  debug(...args: unknown[]): void;
+  info(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+}
+
 export interface ToolCall {
   readonly id: string;
   readonly name: string;
@@ -35,9 +42,8 @@ export interface ToolContext extends ExecutionContext {
   readonly toolCallId: string;
   readonly message: Message;
   readonly workdir: string;
-  readonly logger: Console;
+  readonly logger: LoggerLike;
   readonly runtime?: AgentToolRuntime;
 }
 
 export type ToolHandler = (ctx: ToolContext, input: JsonObject) => Promise<JsonValue> | JsonValue;
-

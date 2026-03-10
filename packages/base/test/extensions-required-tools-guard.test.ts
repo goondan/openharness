@@ -61,6 +61,7 @@ function createRuntimeContext(turnId: string): RuntimeContext {
       sourceName: 'cli',
       createdAt: new Date().toISOString(),
       properties: {},
+      content: [],
     },
   };
 }

@@ -1,5 +1,6 @@
-import type { ExtensionApi, JsonValue, ToolCatalogItem, ToolHandler } from "../types.js";
+import type { ExtensionApi, IngressRegistry, JsonValue, ToolCatalogItem, ToolHandler } from "../types.js";
 import type { PipelineRegistry } from "../pipeline/registry.js";
+import type { IngressExecutionRegistry } from "../ingress/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ExtensionStateManager } from "./state-manager.js";
 import { EventEmitter } from "node:events";
@@ -8,6 +9,7 @@ export class ExtensionApiImpl implements ExtensionApi {
   constructor(
     private readonly extensionName: string,
     private readonly pipelineRegistry: PipelineRegistry,
+    private readonly ingressRegistry: IngressExecutionRegistry,
     private readonly toolRegistry: ToolRegistry,
     private readonly stateManager: ExtensionStateManager,
     private readonly eventBus: EventEmitter,
@@ -16,6 +18,10 @@ export class ExtensionApiImpl implements ExtensionApi {
 
   get pipeline(): PipelineRegistry {
     return this.pipelineRegistry;
+  }
+
+  get ingress(): IngressRegistry {
+    return this.ingressRegistry;
   }
 
   get tools() {

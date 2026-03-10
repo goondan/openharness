@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ExtensionApiImpl } from "./api-impl.js";
 import { PipelineRegistryImpl } from "../pipeline/registry.js";
+import { IngressRegistryImpl } from "../ingress/registry.js";
 import { ToolRegistryImpl } from "../tools/registry.js";
 import { ExtensionStateManagerImpl } from "./state-manager.js";
 import { EventEmitter } from "node:events";
@@ -14,6 +15,7 @@ describe("ExtensionApiImpl", () => {
   let tempDir: string;
   let api: ExtensionApiImpl;
   let pipelineRegistry: PipelineRegistryImpl;
+  let ingressRegistry: IngressRegistryImpl;
   let toolRegistry: ToolRegistryImpl;
   let stateManager: ExtensionStateManagerImpl;
   let eventBus: EventEmitter;
@@ -30,16 +32,21 @@ describe("ExtensionApiImpl", () => {
     await storage.initializeInstanceState("test-instance", "test-agent");
 
     pipelineRegistry = new PipelineRegistryImpl();
+    ingressRegistry = new IngressRegistryImpl();
     toolRegistry = new ToolRegistryImpl();
     stateManager = new ExtensionStateManagerImpl(storage, "test-instance", ["test-ext"]);
     eventBus = new EventEmitter();
     logger = console;
 
-    api = new ExtensionApiImpl("test-ext", pipelineRegistry, toolRegistry, stateManager, eventBus, logger);
+    api = new ExtensionApiImpl("test-ext", pipelineRegistry, ingressRegistry, toolRegistry, stateManager, eventBus, logger);
   });
 
   it("should provide pipeline registry", () => {
     expect(api.pipeline).toBe(pipelineRegistry);
+  });
+
+  it("should provide ingress registry", () => {
+    expect(api.ingress).toBe(ingressRegistry);
   });
 
   it("should register tools via tools API", () => {
@@ -111,8 +118,8 @@ describe("ExtensionApiImpl", () => {
     await stateManager1.loadAll();
     await stateManager2.loadAll();
 
-    const api1 = new ExtensionApiImpl("ext1", pipelineRegistry, toolRegistry, stateManager1, eventBus, logger);
-    const api2 = new ExtensionApiImpl("ext2", pipelineRegistry, toolRegistry, stateManager2, eventBus, logger);
+    const api1 = new ExtensionApiImpl("ext1", pipelineRegistry, ingressRegistry, toolRegistry, stateManager1, eventBus, logger);
+    const api2 = new ExtensionApiImpl("ext2", pipelineRegistry, ingressRegistry, toolRegistry, stateManager2, eventBus, logger);
 
     await api1.state.set({ ext1Data: true });
     await api2.state.set({ ext2Data: true });

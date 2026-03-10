@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { ExtensionApi, JsonObject, JsonValue, Message, TurnMiddlewareContext } from '../types.js';
+import type { ExtensionApi, InboundContentPart, JsonObject, JsonValue, Message, TurnMiddlewareContext } from '../types.js';
 import { createId, isJsonObject } from '../utils.js';
 
 const EXTENSION_NAME = 'context-message';
@@ -198,8 +198,19 @@ function createInboundInputMetadata(ctx: TurnMiddlewareContext): Record<string, 
     sourceName: inbound.sourceName,
     eventName: inbound.eventType,
   };
+  if (typeof inbound.connectionName === 'string' && inbound.connectionName.length > 0) {
+    payload.connectionName = inbound.connectionName;
+  }
   if (typeof inbound.instanceKey === 'string' && inbound.instanceKey.length > 0) {
     payload.instanceKey = inbound.instanceKey;
+  }
+  if (inbound.kind === 'connector') {
+    if (Object.keys(inbound.properties).length > 0) {
+      payload.properties = inbound.properties as unknown as JsonValue;
+    }
+    if (ctx.inputEvent.rawPayload !== undefined) {
+      payload.rawPayload = ctx.inputEvent.rawPayload;
+    }
   }
   return {
     [INBOUND_MESSAGE_METADATA_KEY]: payload,
@@ -219,6 +230,34 @@ function createInboundInputMessage(ctx: TurnMiddlewareContext, content: string):
       type: 'user',
     },
   };
+}
+
+function renderInboundParts(parts: InboundContentPart[]): string {
+  const textBlocks: string[] = [];
+  const attachmentBlocks: string[] = [];
+
+  for (const part of parts) {
+    if (part.type === 'text') {
+      const trimmed = part.text.trim();
+      if (trimmed.length > 0) {
+        textBlocks.push(trimmed);
+      }
+      continue;
+    }
+
+    if (part.type === 'image') {
+      const label = typeof part.alt === 'string' && part.alt.trim().length > 0 ? ` ${part.alt.trim()}` : '';
+      attachmentBlocks.push(`[image]${label} ${part.url}`.trim());
+      continue;
+    }
+
+    const mimeLabel = typeof part.mimeType === 'string' && part.mimeType.trim().length > 0
+      ? ` (${part.mimeType.trim()})`
+      : '';
+    attachmentBlocks.push(`[file] ${part.name}${mimeLabel}: ${part.url}`);
+  }
+
+  return [...textBlocks, ...attachmentBlocks].join('\n\n').trim();
 }
 
 function appendRuntimeEvent(
@@ -312,12 +351,21 @@ function resolveInboundContextSegment(ctx: TurnMiddlewareContext): ContextSegmen
     `sourceName=${inbound.sourceName}`,
     `createdAt=${inbound.createdAt}`,
   ];
+  if (typeof inbound.connectionName === 'string' && inbound.connectionName.length > 0) {
+    lines.push(`connectionName=${inbound.connectionName}`);
+  }
   if (typeof inbound.instanceKey === 'string' && inbound.instanceKey.length > 0) {
     lines.push(`instanceKey=${inbound.instanceKey}`);
   }
   if (inbound.kind === 'connector') {
     if (Object.keys(inbound.properties).length > 0) {
       lines.push(`properties=${JSON.stringify(inbound.properties)}`);
+    }
+    if (inbound.content.length > 0) {
+      lines.push(`content=${JSON.stringify(inbound.content)}`);
+    }
+    if (inbound.rawPayload !== undefined) {
+      lines.push(`rawPayload=${JSON.stringify(inbound.rawPayload)}`);
     }
   } else {
     lines.push(`caller.agent=${inbound.caller.agent}`);
@@ -670,9 +718,12 @@ async function emitContextMessages(
     emittedContextMutation = true;
   }
 
-  const inboundInput = typeof ctx.inputEvent.input === 'string'
-    ? ctx.inputEvent.input
+  const renderedInboundInput = ctx.runtime.inbound.kind === 'connector'
+    ? renderInboundParts(ctx.runtime.inbound.content)
     : '';
+  const inboundInput = renderedInboundInput.trim().length > 0
+    ? renderedInboundInput
+    : (typeof ctx.inputEvent.input === 'string' ? ctx.inputEvent.input : '');
   if (config.includeInboundInput && inboundInput.trim().length > 0) {
     ctx.emitMessageEvent({
       type: 'append',

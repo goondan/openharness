@@ -9,6 +9,7 @@ import type {
   JsonValue,
 } from "../types.js";
 import { PipelineRegistryImpl } from "../pipeline/registry.js";
+import { IngressRegistryImpl } from "../ingress/registry.js";
 import { ToolRegistryImpl } from "../tools/registry.js";
 import { ExtensionStateManagerImpl } from "./state-manager.js";
 import { ExtensionApiImpl } from "./api-impl.js";
@@ -54,6 +55,7 @@ function createRuntimeContext(agentName: string): RuntimeContext {
       sourceName: "cli",
       createdAt: new Date().toISOString(),
       properties: {},
+      content: [],
     },
   };
 }
@@ -62,6 +64,7 @@ describe("Extension Integration", () => {
   let tempDir: string;
   let storage: FileWorkspaceStorage;
   let pipelineRegistry: PipelineRegistryImpl;
+  let ingressRegistry: IngressRegistryImpl;
   let toolRegistry: ToolRegistryImpl;
   let eventBus: EventEmitter;
   let runtimeEventBus: RuntimeEventBusImpl;
@@ -78,6 +81,7 @@ describe("Extension Integration", () => {
 
     runtimeEventBus = new RuntimeEventBusImpl();
     pipelineRegistry = new PipelineRegistryImpl(runtimeEventBus);
+    ingressRegistry = new IngressRegistryImpl();
     toolRegistry = new ToolRegistryImpl();
     eventBus = new EventEmitter();
   });
@@ -117,7 +121,7 @@ describe("Extension Integration", () => {
 
     const apiFactory = (name: string): ExtensionApi => {
       const stateManager = new ExtensionStateManagerImpl(storage, "test-instance", [name]);
-      return new ExtensionApiImpl(name, pipelineRegistry, toolRegistry, stateManager, eventBus, console);
+      return new ExtensionApiImpl(name, pipelineRegistry, ingressRegistry, toolRegistry, stateManager, eventBus, console);
     };
 
     await loadExtensions(resources, apiFactory, tempDir, console);
@@ -155,7 +159,7 @@ describe("Extension Integration", () => {
 
     const apiFactory = (name: string): ExtensionApi => {
       const stateManager = new ExtensionStateManagerImpl(storage, "test-instance", [name]);
-      return new ExtensionApiImpl(name, pipelineRegistry, toolRegistry, stateManager, eventBus, console);
+      return new ExtensionApiImpl(name, pipelineRegistry, ingressRegistry, toolRegistry, stateManager, eventBus, console);
     };
 
     await loadExtensions(resources, apiFactory, tempDir, console);
@@ -273,7 +277,7 @@ describe("Extension Integration", () => {
     await stateManager.loadAll();
 
     const apiFactory = (name: string): ExtensionApi => {
-      return new ExtensionApiImpl(name, pipelineRegistry, toolRegistry, stateManager, eventBus, console);
+      return new ExtensionApiImpl(name, pipelineRegistry, ingressRegistry, toolRegistry, stateManager, eventBus, console);
     };
 
     await loadExtensions(resources, apiFactory, tempDir, console);

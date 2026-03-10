@@ -31,12 +31,15 @@ export class FileWorkspaceStorage {
   async initializeSystemRoot(): Promise<void> {
     await fs.mkdir(this.paths.packagesDir, { recursive: true });
     await fs.mkdir(path.join(this.paths.goondanHome, "workspaces"), { recursive: true });
+    await fs.mkdir(this.paths.workspaceRoot, { recursive: true });
 
     try {
       await fs.access(this.paths.configFile);
     } catch {
       await fs.writeFile(this.paths.configFile, "{}\n", "utf8");
     }
+
+    await ensureFile(this.paths.workspaceRuntimeEventsPath);
   }
 
   async initializeInstanceState(instanceKey: string, agentName: string): Promise<void> {
@@ -92,6 +95,13 @@ export class FileWorkspaceStorage {
 
   async appendRuntimeEvent(instanceKey: string, event: RuntimeEvent): Promise<void> {
     const runtimeEventPath = this.paths.instanceRuntimeEventsPath(instanceKey);
+    await ensureParentDir(runtimeEventPath);
+
+    await fs.appendFile(runtimeEventPath, `${JSON.stringify(event)}\n`, "utf8");
+  }
+
+  async appendWorkspaceRuntimeEvent(event: RuntimeEvent): Promise<void> {
+    const runtimeEventPath = this.paths.workspaceRuntimeEventsPath;
     await ensureParentDir(runtimeEventPath);
 
     await fs.appendFile(runtimeEventPath, `${JSON.stringify(event)}\n`, "utf8");

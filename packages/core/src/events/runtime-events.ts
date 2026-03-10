@@ -13,6 +13,9 @@ export type {
   RuntimeEventType,
   RuntimeEventBase,
   TokenUsage,
+  IngressReceivedEvent,
+  IngressAcceptedEvent,
+  IngressRejectedEvent,
   StepStartedLlmInputMessageContentSource,
   StepStartedLlmInputTextPart,
   StepStartedLlmInputToolCallPart,
@@ -40,6 +43,9 @@ import type { RuntimeEvent, RuntimeEventType } from "@goondan/openharness-types"
 export const STEP_STARTED_LLM_INPUT_MESSAGES_METADATA_KEY = "runtime.llmInputMessages";
 
 export const RUNTIME_EVENT_TYPES: RuntimeEventType[] = [
+  "ingress.received",
+  "ingress.accepted",
+  "ingress.rejected",
   "turn.started",
   "turn.completed",
   "turn.failed",

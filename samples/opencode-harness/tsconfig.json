@@ -6,7 +6,12 @@
     "declaration": false,
     "sourceMap": true,
     "types": ["node"],
-    "noEmitOnError": true
+    "noEmitOnError": true,
+    "baseUrl": ".",
+    "paths": {
+      "@goondan/openharness": ["../../packages/core/dist/index.d.ts"],
+      "@goondan/openharness-base": ["../../packages/base/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts"],
   "exclude": ["dist", "node_modules"]
