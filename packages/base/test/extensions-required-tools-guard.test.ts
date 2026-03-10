@@ -3,7 +3,6 @@ import { register as registerRequiredToolsGuardExtension } from '../src/extensio
 import type {
   AgentEvent,
   MessageEvent,
-  MiddlewareAgentsApi,
   StepMiddlewareContext,
   StepResult,
   ToolCallMiddlewareContext,
@@ -14,22 +13,6 @@ import type {
 } from '../src/types.js';
 import type { RequiredToolsGuardConfig } from '../src/extensions/required-tools-guard.js';
 import { createConversationState, createMessage, createMockExtensionApi } from './helpers.js';
-
-const noopAgents: MiddlewareAgentsApi = {
-  async request() {
-    return {
-      target: 'noop',
-      response: '',
-      accepted: true,
-      async: false,
-    };
-  },
-  async send() {
-    return {
-      accepted: true,
-    };
-  },
-};
 
 function createInputEvent(turnId: string): AgentEvent {
   return {
@@ -46,13 +29,6 @@ function createRuntimeContext(turnId: string): RuntimeContext {
     agent: {
       name: 'coordinator',
       bundleRoot: '/tmp',
-    },
-    swarm: {
-      swarmName: 'brain',
-      entryAgent: 'coordinator',
-      selfAgent: 'coordinator',
-      availableAgents: ['coordinator'],
-      callableAgents: [],
     },
     inbound: {
       eventId: `evt-${turnId}`,
@@ -73,12 +49,11 @@ function createTurnContext(input: {
 }): TurnMiddlewareContext {
   return {
     agentName: 'coordinator',
-    instanceKey: 'brain',
+    conversationId: 'brain',
     turnId: input.turnId,
     traceId: `trace-${input.turnId}`,
     inputEvent: createInputEvent(input.turnId),
     conversationState: createConversationState([createMessage('m1', 'hello')]),
-    agents: noopAgents,
     runtime: createRuntimeContext(input.turnId),
     emitMessageEvent(event) {
       input.emitted.push(event);
@@ -95,13 +70,12 @@ function createStepContext(input: {
 }): StepMiddlewareContext {
   return {
     agentName: 'coordinator',
-    instanceKey: 'brain',
+    conversationId: 'brain',
     turnId: input.turnId,
     traceId: `trace-${input.turnId}`,
     turn: { id: input.turnId, startedAt: new Date() },
     stepIndex: 1,
     conversationState: createConversationState([createMessage('m1', 'hello')]),
-    agents: noopAgents,
     runtime: createRuntimeContext(input.turnId),
     emitMessageEvent(event) {
       input.emitted.push(event);
@@ -121,7 +95,7 @@ function createToolCallContext(input: {
 }): ToolCallMiddlewareContext {
   return {
     agentName: 'coordinator',
-    instanceKey: 'brain',
+    conversationId: 'brain',
     turnId: input.turnId,
     traceId: `trace-${input.turnId}`,
     stepIndex: 1,

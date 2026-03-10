@@ -20,7 +20,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "pnpm clean && tsc -p tsconfig.json",
     "postbuild": "node ./scripts/link-global-bin.mjs",
     "prepack": "pnpm build",
     "link:global": "node ./scripts/link-global-bin.mjs",

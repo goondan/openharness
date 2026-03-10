@@ -441,7 +441,6 @@ export function createBaseExtensionManifests(): BaseExtensionManifest[] {
       }),
       createExtensionManifest('context-message', './src/extensions/context-message.ts', {
         includeAgentPrompt: true,
-        includeSwarmCatalog: false,
         includeRouteSummary: false,
         includeInboundInput: true,
       }),
@@ -449,7 +448,6 @@ export function createBaseExtensionManifests(): BaseExtensionManifest[] {
         requiredTools: [],
         errorMessage: '',
       }),
-      createExtensionManifest('inter-agent-response-format', './src/extensions/inter-agent-response-format.ts'),
     ])
   );
 }

@@ -1,5 +1,4 @@
-import type { ExtensionApi, IngressRegistry, JsonValue, ToolCatalogItem, ToolHandler } from "../types.js";
-import type { PipelineRegistry } from "../pipeline/registry.js";
+import type { ExtensionApi, IngressRegistry, JsonValue, PipelineRegistry, ToolCatalogItem, ToolHandler } from "../types.js";
 import type { IngressExecutionRegistry } from "../ingress/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ExtensionStateManager } from "./state-manager.js";

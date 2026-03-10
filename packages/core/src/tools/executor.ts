@@ -360,24 +360,22 @@ export function truncateErrorMessage(message: string, limit: number): string {
 
 export function createMinimalToolContext(input: {
   agentName: string;
-  instanceKey: string;
+  conversationId: string;
   turnId: string;
   traceId: string;
   toolCallId: string;
   message: Message;
   workdir: string;
   logger?: Console;
-  runtime?: import("../types.js").AgentToolRuntime;
 }): ToolContext {
   return {
     agentName: input.agentName,
-    instanceKey: input.instanceKey,
+    conversationId: input.conversationId,
     turnId: input.turnId,
     traceId: input.traceId,
     toolCallId: input.toolCallId,
     message: input.message,
     workdir: input.workdir,
     logger: input.logger ?? console,
-    runtime: input.runtime,
   };
 }

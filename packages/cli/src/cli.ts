@@ -10,7 +10,7 @@ interface CliOptions {
   workdir: string;
   entrypointFileName: string;
   agentName?: string;
-  instanceKey?: string;
+  conversationId?: string;
   stateRoot?: string;
   maxSteps?: number;
 }
@@ -38,7 +38,7 @@ function usage(): string {
     "  --workdir <path>       harness.yaml을 찾을 기준 디렉토리 (default: cwd)",
     "  --entrypoint <file>    엔트리포인트 파일명 (default: harness.yaml)",
     "  --agent <name>         실행할 Agent 이름",
-    "  --instance <key>       instanceKey",
+    "  --conversation <id>      conversationId",
     "  --state-root <path>    상태 저장 루트 (.goondan 대체)",
     "  --max-steps <n>        turn 당 최대 step",
     "  -h, --help             도움말",
@@ -208,9 +208,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         options.agentName = value;
         break;
       }
-      case "--instance": {
+      case "--conversation": {
         const value = readValue();
-        options.instanceKey = value;
+        options.conversationId = value;
         break;
       }
       case "--state-root": {
@@ -345,8 +345,8 @@ async function createRunner(options: CliOptions): Promise<{ processTurn: (text: 
   if (isNonEmptyString(options.agentName)) {
     runnerOptions.agentName = options.agentName;
   }
-  if (isNonEmptyString(options.instanceKey)) {
-    runnerOptions.instanceKey = options.instanceKey;
+  if (isNonEmptyString(options.conversationId)) {
+    runnerOptions.conversationId = options.conversationId;
   }
   if (isNonEmptyString(options.stateRoot)) {
     runnerOptions.stateRoot = options.stateRoot;

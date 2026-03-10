@@ -33,7 +33,7 @@ export interface InboundEnvelope {
   readonly name: string;
   readonly content: InboundContentPart[];
   readonly properties: Record<string, InboundPropertyValue>;
-  readonly instanceKey?: string;
+  readonly conversationId?: string;
   readonly auth?: TurnAuth;
   readonly rawPayload?: JsonValue;
   readonly source: EventSource;
@@ -73,7 +73,7 @@ export interface ConnectorEvent {
   readonly name: string;
   readonly message: ConnectorEventMessage;
   readonly properties: Record<string, string>;
-  readonly instanceKey: string;
+  readonly conversationId: string;
 }
 
 /**
@@ -130,7 +130,7 @@ function isEventSourceLike(value: unknown): value is EventSource {
   }
 
   const kind = value["kind"];
-  if (kind !== "agent" && kind !== "connector") {
+  if (kind !== "connector") {
     return false;
   }
 
@@ -156,7 +156,7 @@ export function isInboundEnvelope(value: unknown): value is InboundEnvelope {
     Array.isArray(value["content"]) &&
     value["content"].every((item) => isInboundContentPart(item)) &&
     isInboundProperties(value["properties"]) &&
-    (value["instanceKey"] === undefined || typeof value["instanceKey"] === "string") &&
+    (value["conversationId"] === undefined || typeof value["conversationId"] === "string") &&
     (value["rawPayload"] === undefined || isJsonValue(value["rawPayload"])) &&
     (value["metadata"] === undefined || isPlainObject(value["metadata"])) &&
     isEventSourceLike(value["source"])
@@ -171,6 +171,6 @@ export function isConnectorEvent(value: unknown): value is ConnectorEvent {
     typeof value["name"] === "string" &&
     isInboundContentPart(value["message"]) &&
     isPlainObject(value["properties"]) &&
-    typeof value["instanceKey"] === "string"
+    typeof value["conversationId"] === "string"
   );
 }

@@ -37,7 +37,7 @@ describe('logging extension', () => {
 
       const turnCtx: TurnMiddlewareContext = {
         agentName: 'agent-a',
-        instanceKey: 'instance-1',
+        conversationId: 'instance-1',
         turnId: 'turn-1',
         traceId: 'trace-1',
         inputEvent: {
@@ -60,7 +60,7 @@ describe('logging extension', () => {
 
       const stepCtx: StepMiddlewareContext = {
         agentName: 'agent-a',
-        instanceKey: 'instance-1',
+        conversationId: 'instance-1',
         turnId: 'turn-1',
         traceId: 'trace-1',
         turn: { id: 'turn-1', startedAt: new Date() },
@@ -84,7 +84,7 @@ describe('logging extension', () => {
 
       const toolCtx: ToolCallMiddlewareContext = {
         agentName: 'agent-a',
-        instanceKey: 'instance-1',
+        conversationId: 'instance-1',
         turnId: 'turn-1',
         traceId: 'trace-1',
         stepIndex: 0,
@@ -147,7 +147,7 @@ describe('tool-search extension', () => {
 
     const firstStep: StepMiddlewareContext = {
       agentName: 'agent-a',
-      instanceKey: 'instance-1',
+      conversationId: 'instance-1',
       turnId: 'turn-1',
       traceId: 'trace-1',
       turn: { id: 'turn-1', startedAt: new Date() },

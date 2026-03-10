@@ -1,5 +1,16 @@
 import type { JsonValue } from "../types.js";
-import { FileWorkspaceStorage } from "../workspace/storage.js";
+
+export interface ExtensionStateStorage {
+  readExtensionState(
+    conversationId: string,
+    extensionName: string,
+  ): Promise<Record<string, JsonValue> | undefined>;
+  writeExtensionState(
+    conversationId: string,
+    extensionName: string,
+    state: Record<string, JsonValue>,
+  ): Promise<void>;
+}
 
 export interface ExtensionStateManager {
   loadAll(): Promise<void>;
@@ -13,14 +24,14 @@ export class ExtensionStateManagerImpl implements ExtensionStateManager {
   private dirty: Set<string> = new Set();
 
   constructor(
-    private readonly storage: FileWorkspaceStorage,
-    private readonly instanceKey: string,
+    private readonly storage: ExtensionStateStorage,
+    private readonly conversationId: string,
     private readonly extensionNames: string[],
   ) {}
 
   async loadAll(): Promise<void> {
     for (const name of this.extensionNames) {
-      const state = await this.storage.readExtensionState(this.instanceKey, name);
+      const state = await this.storage.readExtensionState(this.conversationId, name);
       if (state !== undefined) {
         this.states.set(name, state);
       }
@@ -49,7 +60,7 @@ export class ExtensionStateManagerImpl implements ExtensionStateManager {
         throw new Error(`extension state must be JsonObject, got ${typeof state} for extension ${name}`);
       }
 
-      await this.storage.writeExtensionState(this.instanceKey, name, state);
+      await this.storage.writeExtensionState(this.conversationId, name, state);
     }
     this.dirty.clear();
   }

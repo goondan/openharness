@@ -21,7 +21,7 @@ export async function createTempWorkspace(prefix = "openharness-integrations-"):
 export function createToolContext(workdir: string): ToolContext {
   return {
     agentName: "agent-a",
-    instanceKey: "instance-1",
+    conversationId: "instance-1",
     turnId: "turn-1",
     traceId: "trace-1",
     toolCallId: "tool-call-1",

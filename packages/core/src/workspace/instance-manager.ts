@@ -5,7 +5,7 @@ import type { InstanceMetadata } from "./storage.js";
 import { isJsonObject } from "../types.js";
 
 export interface InstanceInfo {
-  readonly instanceKey: string;
+  readonly conversationId: string;
   readonly agentName: string;
   readonly status: "idle" | "processing";
   readonly createdAt: string;
@@ -14,7 +14,7 @@ export interface InstanceInfo {
 
 export interface InstanceManager {
   list(): Promise<InstanceInfo[]>;
-  delete(instanceKey: string): Promise<void>;
+  delete(conversationId: string): Promise<void>;
 }
 
 export class FileInstanceManager implements InstanceManager {
@@ -39,7 +39,7 @@ export class FileInstanceManager implements InstanceManager {
         }
 
         result.push({
-          instanceKey: metadata.instanceKey,
+          conversationId: metadata.conversationId,
           agentName: metadata.agentName,
           status: metadata.status,
           createdAt: metadata.createdAt,
@@ -53,8 +53,8 @@ export class FileInstanceManager implements InstanceManager {
     return result;
   }
 
-  async delete(instanceKey: string): Promise<void> {
-    const instanceDir = this.paths.instancePath(instanceKey);
+  async delete(conversationId: string): Promise<void> {
+    const instanceDir = this.paths.instancePath(conversationId);
 
     try {
       await fs.rm(instanceDir, { recursive: true, force: true });
@@ -88,7 +88,7 @@ function isInstanceMetadata(value: unknown): value is InstanceMetadata {
 
   return (
     typeof value.agentName === "string" &&
-    typeof value.instanceKey === "string" &&
+    typeof value.conversationId === "string" &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string"
   );

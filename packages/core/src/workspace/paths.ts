@@ -49,29 +49,29 @@ export class WorkspacePaths {
     return path.join(this.packagesDir, `${name}@${version}`);
   }
 
-  instancePath(instanceKey: string): string {
-    const safeKey = sanitizeInstanceKey(instanceKey);
+  instancePath(conversationId: string): string {
+    const safeKey = sanitizeConversationId(conversationId);
     return path.join(this.instancesRoot, safeKey);
   }
 
-  instanceMetadataPath(instanceKey: string): string {
-    return path.join(this.instancePath(instanceKey), "metadata.json");
+  instanceMetadataPath(conversationId: string): string {
+    return path.join(this.instancePath(conversationId), "metadata.json");
   }
 
-  instanceMessageBasePath(instanceKey: string): string {
-    return path.join(this.instancePath(instanceKey), "messages", "base.jsonl");
+  instanceMessageBasePath(conversationId: string): string {
+    return path.join(this.instancePath(conversationId), "messages", "base.jsonl");
   }
 
-  instanceMessageEventsPath(instanceKey: string): string {
-    return path.join(this.instancePath(instanceKey), "messages", "events.jsonl");
+  instanceMessageEventsPath(conversationId: string): string {
+    return path.join(this.instancePath(conversationId), "messages", "events.jsonl");
   }
 
-  instanceRuntimeEventsPath(instanceKey: string): string {
-    return path.join(this.instancePath(instanceKey), "messages", "runtime-events.jsonl");
+  instanceRuntimeEventsPath(conversationId: string): string {
+    return path.join(this.instancePath(conversationId), "messages", "runtime-events.jsonl");
   }
 
-  instanceExtensionStatePath(instanceKey: string, extensionName: string): string {
-    return path.join(this.instancePath(instanceKey), "extensions", `${extensionName}.json`);
+  instanceExtensionStatePath(conversationId: string, extensionName: string): string {
+    return path.join(this.instancePath(conversationId), "extensions", `${extensionName}.json`);
   }
 
   projectPath(...segments: string[]): string {
@@ -142,6 +142,6 @@ function normalizeWorkspaceId(workspaceName: string | undefined): string {
   return normalized.slice(0, 128);
 }
 
-export function sanitizeInstanceKey(instanceKey: string): string {
-  return instanceKey.replace(/[^a-zA-Z0-9_:-]/g, "-").slice(0, 128);
+export function sanitizeConversationId(conversationId: string): string {
+  return conversationId.replace(/[^a-zA-Z0-9_:-]/g, "-").slice(0, 128);
 }

@@ -22,13 +22,13 @@ describe("ExtensionStateManager", () => {
   });
 
   it("should load all extension states from storage", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    await storage.writeExtensionState(instanceKey, "ext1", { count: 1 });
-    await storage.writeExtensionState(instanceKey, "ext2", { value: "hello" });
+    await storage.writeExtensionState(conversationId, "ext1", { count: 1 });
+    await storage.writeExtensionState(conversationId, "ext2", { value: "hello" });
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1", "ext2"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1", "ext2"]);
     await manager.loadAll();
 
     const state1 = await manager.get("ext1");
@@ -39,10 +39,10 @@ describe("ExtensionStateManager", () => {
   });
 
   it("should return null for non-existent extension state", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, []);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, []);
     await manager.loadAll();
 
     const state = await manager.get("missing");
@@ -50,10 +50,10 @@ describe("ExtensionStateManager", () => {
   });
 
   it("should set and track dirty state", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1"]);
     await manager.loadAll();
 
     await manager.set("ext1", { updated: true });
@@ -63,30 +63,30 @@ describe("ExtensionStateManager", () => {
   });
 
   it("should save only dirty states", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    await storage.writeExtensionState(instanceKey, "ext1", { original: 1 });
-    await storage.writeExtensionState(instanceKey, "ext2", { original: 2 });
+    await storage.writeExtensionState(conversationId, "ext1", { original: 1 });
+    await storage.writeExtensionState(conversationId, "ext2", { original: 2 });
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1", "ext2"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1", "ext2"]);
     await manager.loadAll();
 
     await manager.set("ext1", { modified: true });
     await manager.saveAll();
 
-    const saved1 = await storage.readExtensionState(instanceKey, "ext1");
-    const saved2 = await storage.readExtensionState(instanceKey, "ext2");
+    const saved1 = await storage.readExtensionState(conversationId, "ext1");
+    const saved2 = await storage.readExtensionState(conversationId, "ext2");
 
     expect(saved1).toEqual({ modified: true });
     expect(saved2).toEqual({ original: 2 });
   });
 
   it("should clear dirty set after save", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1"]);
     await manager.loadAll();
 
     await manager.set("ext1", { count: 1 });
@@ -95,15 +95,15 @@ describe("ExtensionStateManager", () => {
     await manager.set("ext1", { count: 2 });
     await manager.saveAll();
 
-    const saved = await storage.readExtensionState(instanceKey, "ext1");
+    const saved = await storage.readExtensionState(conversationId, "ext1");
     expect(saved).toEqual({ count: 2 });
   });
 
   it("should throw error if state is not JsonObject", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1"]);
     await manager.loadAll();
 
     await manager.set("ext1", "invalid-string");
@@ -112,10 +112,10 @@ describe("ExtensionStateManager", () => {
   });
 
   it("should handle multiple extensions independently", async () => {
-    const instanceKey = "test-instance";
-    await storage.initializeInstanceState(instanceKey, "test-agent");
+    const conversationId = "test-instance";
+    await storage.initializeInstanceState(conversationId, "test-agent");
 
-    const manager = new ExtensionStateManagerImpl(storage, instanceKey, ["ext1", "ext2", "ext3"]);
+    const manager = new ExtensionStateManagerImpl(storage, conversationId, ["ext1", "ext2", "ext3"]);
     await manager.loadAll();
 
     await manager.set("ext1", { a: 1 });

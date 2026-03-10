@@ -37,22 +37,16 @@ interface SegmentResolution {
 
 export interface ContextMessageExtensionConfig {
   includeAgentPrompt?: boolean;
-  includeSwarmCatalog?: boolean;
   includeInboundContext?: boolean;
-  includeCallContext?: boolean;
   includeRouteSummary?: boolean;
   includeInboundInput?: boolean;
-  swarmCatalogInstruction?: string;
 }
 
 const DEFAULT_CONFIG: Required<ContextMessageExtensionConfig> = {
   includeAgentPrompt: true,
-  includeSwarmCatalog: false,
   includeInboundContext: false,
-  includeCallContext: false,
   includeRouteSummary: false,
   includeInboundInput: true,
-  swarmCatalogInstruction: '위 callableAgents를 참고해 위임 대상이 모호하면 최신 목록을 다시 확인한다.',
 };
 
 function readConfig(raw: unknown): Required<ContextMessageExtensionConfig> {
@@ -64,23 +58,14 @@ function readConfig(raw: unknown): Required<ContextMessageExtensionConfig> {
   if (typeof raw.includeAgentPrompt === 'boolean') {
     config.includeAgentPrompt = raw.includeAgentPrompt;
   }
-  if (typeof raw.includeSwarmCatalog === 'boolean') {
-    config.includeSwarmCatalog = raw.includeSwarmCatalog;
-  }
   if (typeof raw.includeInboundContext === 'boolean') {
     config.includeInboundContext = raw.includeInboundContext;
-  }
-  if (typeof raw.includeCallContext === 'boolean') {
-    config.includeCallContext = raw.includeCallContext;
   }
   if (typeof raw.includeRouteSummary === 'boolean') {
     config.includeRouteSummary = raw.includeRouteSummary;
   }
   if (typeof raw.includeInboundInput === 'boolean') {
     config.includeInboundInput = raw.includeInboundInput;
-  }
-  if (typeof raw.swarmCatalogInstruction === 'string' && raw.swarmCatalogInstruction.trim().length > 0) {
-    config.swarmCatalogInstruction = raw.swarmCatalogInstruction.trim();
   }
   return config;
 }
@@ -201,8 +186,8 @@ function createInboundInputMetadata(ctx: TurnMiddlewareContext): Record<string, 
   if (typeof inbound.connectionName === 'string' && inbound.connectionName.length > 0) {
     payload.connectionName = inbound.connectionName;
   }
-  if (typeof inbound.instanceKey === 'string' && inbound.instanceKey.length > 0) {
-    payload.instanceKey = inbound.instanceKey;
+  if (typeof inbound.conversationId === 'string' && inbound.conversationId.length > 0) {
+    payload.conversationId = inbound.conversationId;
   }
   if (inbound.kind === 'connector') {
     if (Object.keys(inbound.properties).length > 0) {
@@ -298,13 +283,6 @@ function resolveAgentPrompt(metadata: RuntimeAgentMetadata): string | null {
   return inlinePrompt;
 }
 
-function formatStringList(values: string[]): string {
-  if (values.length === 0) {
-    return '';
-  }
-  return values.join(', ');
-}
-
 function stringOrUndefined(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -314,31 +292,6 @@ function stringOrUndefined(value: unknown): string | undefined {
     return undefined;
   }
   return trimmed;
-}
-
-function resolveSwarmCatalogSegment(
-  ctx: TurnMiddlewareContext,
-  instruction: string,
-): ContextSegment {
-  const swarm = ctx.runtime.swarm;
-  const lines: string[] = [
-    '[runtime_catalog]',
-    `swarm=${swarm.swarmName}`,
-    `entryAgent=${swarm.entryAgent}`,
-    `selfAgent=${swarm.selfAgent}`,
-    `availableAgents=${formatStringList(swarm.availableAgents)}`,
-    `callableAgents=${formatStringList(swarm.callableAgents)}`,
-    '[/runtime_catalog]',
-  ];
-  if (instruction.length > 0) {
-    lines.push(instruction);
-  }
-
-  return {
-    id: 'runtime.swarm.catalog',
-    role: 'user',
-    content: lines.join('\n'),
-  };
 }
 
 function resolveInboundContextSegment(ctx: TurnMiddlewareContext): ContextSegment {
@@ -354,36 +307,17 @@ function resolveInboundContextSegment(ctx: TurnMiddlewareContext): ContextSegmen
   if (typeof inbound.connectionName === 'string' && inbound.connectionName.length > 0) {
     lines.push(`connectionName=${inbound.connectionName}`);
   }
-  if (typeof inbound.instanceKey === 'string' && inbound.instanceKey.length > 0) {
-    lines.push(`instanceKey=${inbound.instanceKey}`);
+  if (typeof inbound.conversationId === 'string' && inbound.conversationId.length > 0) {
+    lines.push(`conversationId=${inbound.conversationId}`);
   }
-  if (inbound.kind === 'connector') {
-    if (Object.keys(inbound.properties).length > 0) {
-      lines.push(`properties=${JSON.stringify(inbound.properties)}`);
-    }
-    if (inbound.content.length > 0) {
-      lines.push(`content=${JSON.stringify(inbound.content)}`);
-    }
-    if (inbound.rawPayload !== undefined) {
-      lines.push(`rawPayload=${JSON.stringify(inbound.rawPayload)}`);
-    }
-  } else {
-    lines.push(`caller.agent=${inbound.caller.agent}`);
-    if (typeof inbound.caller.instanceKey === 'string' && inbound.caller.instanceKey.length > 0) {
-      lines.push(`caller.instanceKey=${inbound.caller.instanceKey}`);
-    }
-    if (typeof inbound.caller.turnId === 'string' && inbound.caller.turnId.length > 0) {
-      lines.push(`caller.turnId=${inbound.caller.turnId}`);
-    }
-    if (typeof inbound.caller.callSource === 'string' && inbound.caller.callSource.length > 0) {
-      lines.push(`caller.callSource=${inbound.caller.callSource}`);
-    }
-    if (Array.isArray(inbound.caller.callStack) && inbound.caller.callStack.length > 0) {
-      lines.push(`caller.callStack=${inbound.caller.callStack.join(' -> ')}`);
-    }
-    if (inbound.payload && Object.keys(inbound.payload).length > 0) {
-      lines.push(`payload=${JSON.stringify(inbound.payload)}`);
-    }
+  if (Object.keys(inbound.properties).length > 0) {
+    lines.push(`properties=${JSON.stringify(inbound.properties)}`);
+  }
+  if (inbound.content.length > 0) {
+    lines.push(`content=${JSON.stringify(inbound.content)}`);
+  }
+  if (inbound.rawPayload !== undefined) {
+    lines.push(`rawPayload=${JSON.stringify(inbound.rawPayload)}`);
   }
   lines.push('[/runtime_inbound]');
 
@@ -394,90 +328,20 @@ function resolveInboundContextSegment(ctx: TurnMiddlewareContext): ContextSegmen
   };
 }
 
-function resolveCallContextSegment(ctx: TurnMiddlewareContext): ContextSegment | undefined {
-  const call = ctx.runtime.call;
-  if (!call) {
-    return undefined;
-  }
-
-  const lines: string[] = ['[runtime_call]'];
-  if (typeof call.callerAgent === 'string' && call.callerAgent.length > 0) {
-    lines.push(`callerAgent=${call.callerAgent}`);
-  }
-  if (typeof call.callerInstanceKey === 'string' && call.callerInstanceKey.length > 0) {
-    lines.push(`callerInstanceKey=${call.callerInstanceKey}`);
-  }
-  if (typeof call.callerTurnId === 'string' && call.callerTurnId.length > 0) {
-    lines.push(`callerTurnId=${call.callerTurnId}`);
-  }
-  if (typeof call.callSource === 'string' && call.callSource.length > 0) {
-    lines.push(`callSource=${call.callSource}`);
-  }
-  if (Array.isArray(call.callStack) && call.callStack.length > 0) {
-    lines.push(`callStack=${call.callStack.join(' -> ')}`);
-  }
-  if (call.replyTo) {
-    lines.push(`replyTo.target=${call.replyTo.target}`);
-    lines.push(`replyTo.correlationId=${call.replyTo.correlationId}`);
-  }
-  lines.push('[/runtime_call]');
-
-  if (lines.length <= 2) {
-    return undefined;
-  }
-
-  return {
-    id: 'runtime.call',
-    role: 'user',
-    content: lines.join('\n'),
-  };
-}
-
 function resolveRouteSummarySegment(ctx: TurnMiddlewareContext): ContextSegment {
   const inbound = ctx.runtime.inbound;
-  const call = ctx.runtime.call;
-  const callerAgent = stringOrUndefined(call?.callerAgent);
-  const callerInstanceKey = stringOrUndefined(call?.callerInstanceKey);
-  const callerTurnId = stringOrUndefined(call?.callerTurnId);
-  const callSource = stringOrUndefined(call?.callSource);
-  const inboundCallerAgent = inbound.kind === 'agent'
-    ? stringOrUndefined(inbound.caller.agent)
-    : undefined;
-  const inboundCallerInstanceKey = inbound.kind === 'agent'
-    ? stringOrUndefined(inbound.caller.instanceKey)
-    : undefined;
-  const inboundCallerTurnId = inbound.kind === 'agent'
-    ? stringOrUndefined(inbound.caller.turnId)
-    : undefined;
-  const inboundCallSource = inbound.kind === 'agent'
-    ? stringOrUndefined(inbound.caller.callSource)
-    : undefined;
-  const inboundInstanceKey = stringOrUndefined(inbound.instanceKey);
-
-  const senderKind = callerAgent || inboundCallerAgent ? 'agent' : inbound.kind;
-  const senderName = callerAgent ?? inboundCallerAgent ?? inbound.sourceName;
-  const senderInstanceKey = callerInstanceKey ?? inboundCallerInstanceKey ?? inboundInstanceKey;
+  const inboundConversationId = stringOrUndefined(inbound.conversationId);
 
   const lines: string[] = [
     '[runtime_route]',
-    'precedence=call>inbound',
-    `senderKind=${senderKind}`,
-    `senderName=${senderName}`,
+    'precedence=inbound',
+    `senderKind=${inbound.kind}`,
+    `senderName=${inbound.sourceName}`,
     `eventType=${inbound.eventType}`,
     `eventId=${inbound.eventId}`,
   ];
-  if (senderInstanceKey) {
-    lines.push(`senderInstanceKey=${senderInstanceKey}`);
-  }
-  if (callerTurnId) {
-    lines.push(`senderTurnId=${callerTurnId}`);
-  } else if (inboundCallerTurnId) {
-    lines.push(`senderTurnId=${inboundCallerTurnId}`);
-  }
-  if (callSource) {
-    lines.push(`senderSource=${callSource}`);
-  } else if (inboundCallSource) {
-    lines.push(`senderSource=${inboundCallSource}`);
+  if (inboundConversationId) {
+    lines.push(`senderConversationId=${inboundConversationId}`);
   }
   lines.push('[/runtime_route]');
 
@@ -490,9 +354,7 @@ function resolveRouteSummarySegment(ctx: TurnMiddlewareContext): ContextSegment 
 
 const SEGMENT_ORDER: string[] = [
   'agent.prompt.system',
-  'runtime.swarm.catalog',
   'runtime.inbound',
-  'runtime.call',
   'runtime.route.summary',
 ];
 
@@ -536,27 +398,12 @@ function resolveContextSegments(
     }
   }
 
-  if (config.includeSwarmCatalog) {
-    segments.push(resolveSwarmCatalogSegment(ctx, config.swarmCatalogInstruction));
-    resolutions.push({ id: 'runtime.swarm.catalog', included: true });
-  }
-
   if (config.includeInboundContext) {
     segments.push(resolveInboundContextSegment(ctx));
     resolutions.push({ id: 'runtime.inbound', included: true });
   }
 
-  if (config.includeCallContext) {
-    const callSegment = resolveCallContextSegment(ctx);
-    if (callSegment) {
-      segments.push(callSegment);
-      resolutions.push({ id: 'runtime.call', included: true });
-    } else {
-      resolutions.push({ id: 'runtime.call', included: false });
-    }
-  }
-
-  if (config.includeRouteSummary && (config.includeInboundContext || config.includeCallContext)) {
+  if (config.includeRouteSummary && config.includeInboundContext) {
     segments.push(resolveRouteSummarySegment(ctx));
     resolutions.push({ id: 'runtime.route.summary', included: true });
   }

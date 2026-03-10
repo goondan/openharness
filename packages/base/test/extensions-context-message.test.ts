@@ -8,7 +8,6 @@ import type {
   JsonValue,
   Message,
   MessageEvent,
-  MiddlewareAgentsApi,
   RuntimeContext,
   TurnMiddlewareContext,
   TurnResult,
@@ -19,22 +18,6 @@ import { createConversationState, createMessage, createMockExtensionApi } from '
 const EXTENSION_EVENTS_METADATA_KEY = 'extension.events';
 const CONTEXT_MESSAGE_MARKER_KEY = '__goondanContextMessage';
 const INBOUND_MESSAGE_METADATA_KEY = '__goondanInbound';
-
-const noopAgents: MiddlewareAgentsApi = {
-  async request() {
-    return {
-      target: 'noop',
-      response: '',
-      accepted: true,
-      async: false,
-    };
-  },
-  async send() {
-    return {
-      accepted: true,
-    };
-  },
-};
 
 function createInputEvent(turnId: string): AgentEvent {
   return {
@@ -61,23 +44,15 @@ function createTurnContext(input: {
 
   return {
     agentName: 'agent-a',
-    instanceKey: 'instance-1',
+    conversationId: 'instance-1',
     turnId,
     traceId: `trace-${turnId}`,
     inputEvent: input.inputEvent ?? createInputEvent(turnId),
     conversationState: createConversationState(messages),
-    agents: noopAgents,
     runtime: input.runtime ?? {
       agent: {
         name: 'agent-a',
         bundleRoot: '/tmp',
-      },
-      swarm: {
-        swarmName: 'default',
-        entryAgent: 'agent-a',
-        selfAgent: 'agent-a',
-        availableAgents: ['agent-a'],
-        callableAgents: [],
       },
       inbound: {
         eventId: `evt-${turnId}`,
@@ -147,13 +122,6 @@ describe('context-message extension', () => {
           bundleRoot: '/tmp',
           prompt: { system: 'You must follow policy A.' },
         },
-        swarm: {
-          swarmName: 'default',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator', 'worker'],
-          callableAgents: ['worker'],
-        },
         inbound: {
           eventId: 'evt-test',
           eventType: 'connector.message',
@@ -198,83 +166,10 @@ describe('context-message extension', () => {
     expect(eventNames).toContain('context.message.appended');
   });
 
-  it('includeSwarmCatalog=true면 runtime_catalog 세그먼트를 함께 합성한다', async () => {
-    const mock = createMockExtensionApi();
-    registerContextMessageExtension(mock.api, {
-      includeSwarmCatalog: true,
-      includeInboundInput: false,
-    });
-
-    const emitted: MessageEvent[] = [];
-    const ctx = createTurnContext({
-      emitted,
-      runtime: {
-        agent: {
-          name: 'coordinator',
-          bundleRoot: '/tmp',
-          prompt: { system: 'System prompt.' },
-        },
-        swarm: {
-          swarmName: 'brain',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator', 'worker', 'observer'],
-          callableAgents: ['worker', 'observer'],
-        },
-        inbound: {
-          eventId: 'evt-test',
-          eventType: 'connector.message',
-          kind: 'connector',
-          sourceName: 'cli',
-          createdAt: new Date().toISOString(),
-          properties: {},
-          content: [],
-        },
-      },
-    });
-
-    const middleware = mock.pipeline.turnMiddlewares[0];
-    if (!middleware) {
-      throw new Error('Missing context-message middleware');
-    }
-
-    await middleware(ctx);
-
-    expect(emitted.length).toBe(2);
-    const firstEvent = emitted[0];
-    if (!firstEvent || firstEvent.type !== 'append') {
-      throw new Error('Expected append event');
-    }
-    const secondEvent = emitted[1];
-    if (!secondEvent || secondEvent.type !== 'append') {
-      throw new Error('Expected append event');
-    }
-
-    expect(firstEvent.message.data.role).toBe('system');
-    expect(firstEvent.message.data.content).toContain('System prompt.');
-    expect(secondEvent.message.data.role).toBe('user');
-    expect(secondEvent.message.data.content).toContain('[runtime_catalog]');
-    expect(secondEvent.message.data.content).toContain('swarm=brain');
-    expect(secondEvent.message.data.content).toContain('callableAgents=worker, observer');
-
-    const marker = firstEvent.message.metadata[CONTEXT_MESSAGE_MARKER_KEY];
-    expect(isJsonObject(marker)).toBe(true);
-    if (isJsonObject(marker)) {
-      expect(marker.segmentIds).toEqual(['agent.prompt.system']);
-    }
-
-    const secondMarker = secondEvent.message.metadata[CONTEXT_MESSAGE_MARKER_KEY];
-    expect(isJsonObject(secondMarker)).toBe(true);
-    if (isJsonObject(secondMarker)) {
-      expect(secondMarker.segmentIds).toEqual(['runtime.swarm.catalog']);
-    }
-  });
-
   it('inbound input은 context 세그먼트 뒤(user tail)에 append한다', async () => {
     const mock = createMockExtensionApi();
     registerContextMessageExtension(mock.api, {
       includeAgentPrompt: true,
-      includeSwarmCatalog: true,
       includeInboundContext: true,
     });
 
@@ -288,13 +183,6 @@ describe('context-message extension', () => {
           name: 'coordinator',
           bundleRoot: '/tmp',
           prompt: { system: 'System prompt.' },
-        },
-        swarm: {
-          swarmName: 'brain',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator', 'worker'],
-          callableAgents: ['worker'],
         },
         inbound: {
           eventId: 'evt-test',
@@ -331,7 +219,6 @@ describe('context-message extension', () => {
       throw new Error('Expected runtime append event');
     }
     expect(secondEvent.message.data.role).toBe('user');
-    expect(secondEvent.message.data.content).toContain('[runtime_catalog]');
     expect(secondEvent.message.data.content).toContain('[runtime_inbound]');
 
     const thirdEvent = emitted[2];
@@ -357,7 +244,6 @@ describe('context-message extension', () => {
     const mock = createMockExtensionApi();
     registerContextMessageExtension(mock.api, {
       includeAgentPrompt: false,
-      includeSwarmCatalog: false,
       includeInboundContext: true,
       includeRouteSummary: false,
       includeInboundInput: true,
@@ -386,20 +272,13 @@ describe('context-message extension', () => {
           name: 'coordinator',
           bundleRoot: '/tmp',
         },
-        swarm: {
-          swarmName: 'brain',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator'],
-          callableAgents: [],
-        },
         inbound: {
           eventId: 'evt-multimodal',
           eventType: 'slack.message',
           kind: 'connector',
           sourceName: 'slack',
           connectionName: 'slack-main',
-          instanceKey: 'thread:1',
+          conversationId: 'thread:1',
           createdAt: new Date().toISOString(),
           properties: {
             channelId: 'C123',
@@ -440,7 +319,7 @@ describe('context-message extension', () => {
         sourceKind: 'connector',
         sourceName: 'slack',
         connectionName: 'slack-main',
-        instanceKey: 'thread:1',
+        conversationId: 'thread:1',
         eventName: 'slack.message',
         properties: {
           channelId: 'C123',
@@ -513,13 +392,6 @@ describe('context-message extension', () => {
           bundleRoot: '/tmp',
           prompt: { system: desiredContent },
         },
-        swarm: {
-          swarmName: 'brain',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator'],
-          callableAgents: [],
-        },
         inbound: {
           eventId: 'evt-test',
           eventType: 'connector.message',
@@ -557,12 +429,11 @@ describe('context-message extension', () => {
     expect(removedEvent).toBeDefined();
   });
 
-  it('includeRouteSummary=true면 call > inbound 우선순위로 runtime_route를 합성한다', async () => {
+  it('includeRouteSummary=true면 inbound 기준으로 runtime_route를 합성한다', async () => {
     const mock = createMockExtensionApi();
     registerContextMessageExtension(mock.api, {
       includeAgentPrompt: false,
       includeInboundContext: true,
-      includeCallContext: true,
       includeRouteSummary: true,
       includeInboundInput: false,
     });
@@ -575,28 +446,15 @@ describe('context-message extension', () => {
           name: 'worker',
           bundleRoot: '/tmp',
         },
-        swarm: {
-          swarmName: 'brain',
-          entryAgent: 'coordinator',
-          selfAgent: 'worker',
-          availableAgents: ['coordinator', 'worker'],
-          callableAgents: ['coordinator'],
-        },
         inbound: {
           eventId: 'evt-inbound',
-          eventType: 'agent.message',
+          eventType: 'telegram.message',
           kind: 'connector',
           sourceName: 'telegram',
           createdAt: new Date().toISOString(),
-          instanceKey: 'chat-1',
+          conversationId: 'chat-1',
           properties: {},
           content: [],
-        },
-        call: {
-          callerAgent: 'coordinator',
-          callerInstanceKey: 'swarm-shared',
-          callerTurnId: 'turn-55',
-          callSource: 'extension-middleware',
         },
       },
     });
@@ -616,20 +474,16 @@ describe('context-message extension', () => {
 
     expect(firstEvent.message.data.role).toBe('user');
     expect(firstEvent.message.data.content).toContain('[runtime_route]');
-    expect(firstEvent.message.data.content).toContain('precedence=call>inbound');
-    expect(firstEvent.message.data.content).toContain('senderKind=agent');
-    expect(firstEvent.message.data.content).toContain('senderName=coordinator');
-    expect(firstEvent.message.data.content).toContain('senderInstanceKey=swarm-shared');
-    expect(firstEvent.message.data.content).toContain('eventType=agent.message');
+    expect(firstEvent.message.data.content).toContain('precedence=inbound');
+    expect(firstEvent.message.data.content).toContain('senderKind=connector');
+    expect(firstEvent.message.data.content).toContain('senderName=telegram');
+    expect(firstEvent.message.data.content).toContain('senderConversationId=chat-1');
+    expect(firstEvent.message.data.content).toContain('eventType=telegram.message');
 
     const marker = firstEvent.message.metadata[CONTEXT_MESSAGE_MARKER_KEY];
     expect(isJsonObject(marker)).toBe(true);
     if (isJsonObject(marker)) {
-      expect(marker.segmentIds).toEqual([
-        'runtime.inbound',
-        'runtime.call',
-        'runtime.route.summary',
-      ]);
+      expect(marker.segmentIds).toEqual(['runtime.inbound', 'runtime.route.summary']);
     }
   });
 
@@ -674,13 +528,6 @@ describe('context-message extension', () => {
           bundleRoot: '/tmp',
           prompt: { system: content },
         },
-        swarm: {
-          swarmName: 'default',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator'],
-          callableAgents: [],
-        },
         inbound: {
           eventId: 'evt-test',
           eventType: 'connector.message',
@@ -709,9 +556,7 @@ describe('context-message extension', () => {
     const mock = createMockExtensionApi();
     registerContextMessageExtension(mock.api, {
       includeAgentPrompt: false,
-      includeSwarmCatalog: false,
       includeInboundContext: false,
-      includeCallContext: false,
       includeInboundInput: false,
     });
 
@@ -722,13 +567,6 @@ describe('context-message extension', () => {
         agent: {
           name: 'coordinator',
           bundleRoot: '/tmp',
-        },
-        swarm: {
-          swarmName: 'default',
-          entryAgent: 'coordinator',
-          selfAgent: 'coordinator',
-          availableAgents: ['coordinator'],
-          callableAgents: [],
         },
         inbound: {
           eventId: 'evt-test',

@@ -11,14 +11,9 @@ export interface EventEnvelope {
 }
 
 export interface EventSource {
-  readonly kind: "agent" | "connector";
+  readonly kind: "connector";
   readonly name: string;
   readonly [key: string]: JsonValue | undefined;
-}
-
-export interface ReplyChannel {
-  readonly target: string;
-  readonly correlationId: string;
 }
 
 interface TurnAuthPrincipal {
@@ -39,79 +34,10 @@ export interface AgentEvent extends EventEnvelope {
   readonly input?: string;
   readonly content?: InboundContentPart[];
   readonly properties?: Record<string, InboundPropertyValue>;
-  readonly instanceKey?: string;
+  readonly conversationId?: string;
   readonly source: EventSource;
   readonly auth?: TurnAuth;
-  readonly replyTo?: ReplyChannel;
   readonly rawPayload?: JsonValue;
-}
-
-export type ProcessStatus =
-  | "spawning"
-  | "idle"
-  | "processing"
-  | "draining"
-  | "terminated"
-  | "crashed"
-  | "crashLoopBackOff";
-
-export type IpcMessageType = "event" | "shutdown" | "shutdown_ack";
-
-export interface IpcMessage {
-  type: IpcMessageType;
-  from: string;
-  to: string;
-  payload: JsonValue;
-}
-
-export type ShutdownReason = "restart" | "config_change" | "orchestrator_shutdown";
-
-export function isProcessStatus(value: unknown): value is ProcessStatus {
-  if (typeof value !== "string") {
-    return false;
-  }
-  return (
-    value === "spawning" ||
-    value === "idle" ||
-    value === "processing" ||
-    value === "draining" ||
-    value === "terminated" ||
-    value === "crashed" ||
-    value === "crashLoopBackOff"
-  );
-}
-
-export function isIpcMessageType(value: unknown): value is IpcMessageType {
-  return value === "event" || value === "shutdown" || value === "shutdown_ack";
-}
-
-export function isShutdownReason(value: unknown): value is ShutdownReason {
-  return value === "restart" || value === "config_change" || value === "orchestrator_shutdown";
-}
-
-export function isIpcMessage(value: unknown): value is IpcMessage {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-
-  const typeValue = value["type"];
-  const fromValue = value["from"];
-  const toValue = value["to"];
-  const payloadValue = value["payload"];
-
-  if (!isIpcMessageType(typeValue)) {
-    return false;
-  }
-
-  if (typeof fromValue !== "string" || fromValue.length === 0) {
-    return false;
-  }
-
-  if (typeof toValue !== "string" || toValue.length === 0) {
-    return false;
-  }
-
-  return isJsonValue(payloadValue);
 }
 
 export function isEventEnvelope(value: unknown): value is EventEnvelope {
@@ -138,19 +64,6 @@ export function isEventEnvelope(value: unknown): value is EventEnvelope {
   }
 
   return true;
-}
-
-export function isReplyChannel(value: unknown): value is ReplyChannel {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-
-  return (
-    typeof value["target"] === "string" &&
-    typeof value["correlationId"] === "string" &&
-    value["target"].length > 0 &&
-    value["correlationId"].length > 0
-  );
 }
 
 export function isAgentEvent(value: unknown): value is AgentEvent {
@@ -206,13 +119,8 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
     }
   }
 
-  const instanceKeyValue = value["instanceKey"];
-  if (instanceKeyValue !== undefined && typeof instanceKeyValue !== "string") {
-    return false;
-  }
-
-  const replyToValue = value["replyTo"];
-  if (replyToValue !== undefined && !isReplyChannel(replyToValue)) {
+  const conversationIdValue = value["conversationId"];
+  if (conversationIdValue !== undefined && typeof conversationIdValue !== "string") {
     return false;
   }
 
@@ -230,7 +138,7 @@ function isEventSource(value: unknown): value is EventSource {
   }
 
   const kindValue = value["kind"];
-  if (kindValue !== "agent" && kindValue !== "connector") {
+  if (kindValue !== "connector") {
     return false;
   }
 

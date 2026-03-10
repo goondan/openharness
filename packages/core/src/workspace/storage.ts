@@ -14,7 +14,7 @@ import { WorkspacePaths } from "./paths.js";
 export interface InstanceMetadata {
   status: "idle" | "processing";
   agentName: string;
-  instanceKey: string;
+  conversationId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -42,35 +42,35 @@ export class FileWorkspaceStorage {
     await ensureFile(this.paths.workspaceRuntimeEventsPath);
   }
 
-  async initializeInstanceState(instanceKey: string, agentName: string): Promise<void> {
-    const instanceDir = this.paths.instancePath(instanceKey);
+  async initializeInstanceState(conversationId: string, agentName: string): Promise<void> {
+    const instanceDir = this.paths.instancePath(conversationId);
     const messagesDir = path.join(instanceDir, "messages");
     const extensionsDir = path.join(instanceDir, "extensions");
 
     await fs.mkdir(messagesDir, { recursive: true });
     await fs.mkdir(extensionsDir, { recursive: true });
 
-    const metadataPath = this.paths.instanceMetadataPath(instanceKey);
+    const metadataPath = this.paths.instanceMetadataPath(conversationId);
     const now = new Date().toISOString();
 
     const metadata: InstanceMetadata = {
       status: "idle",
       agentName,
-      instanceKey,
+      conversationId,
       createdAt: now,
       updatedAt: now,
     };
 
     await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
 
-    await ensureFile(this.paths.instanceMessageBasePath(instanceKey));
-    await ensureFile(this.paths.instanceMessageEventsPath(instanceKey));
-    await ensureFile(this.paths.instanceRuntimeEventsPath(instanceKey));
+    await ensureFile(this.paths.instanceMessageBasePath(conversationId));
+    await ensureFile(this.paths.instanceMessageEventsPath(conversationId));
+    await ensureFile(this.paths.instanceRuntimeEventsPath(conversationId));
   }
 
-  async loadConversation(instanceKey: string): Promise<LoadedConversation> {
-    const baseMessages = await this.readBaseMessages(instanceKey);
-    const events = await this.readEvents(instanceKey);
+  async loadConversation(conversationId: string): Promise<LoadedConversation> {
+    const baseMessages = await this.readBaseMessages(conversationId);
+    const events = await this.readEvents(conversationId);
     const applied = applyMessageEvents(baseMessages, events);
 
     return {
@@ -80,21 +80,21 @@ export class FileWorkspaceStorage {
     };
   }
 
-  async createConversationState(instanceKey: string): Promise<ConversationStateImpl> {
-    const loaded = await this.loadConversation(instanceKey);
+  async createConversationState(conversationId: string): Promise<ConversationStateImpl> {
+    const loaded = await this.loadConversation(conversationId);
     return new ConversationStateImpl(loaded.baseMessages, loaded.events);
   }
 
-  async appendMessageEvent(instanceKey: string, event: MessageEvent): Promise<void> {
-    const eventPath = this.paths.instanceMessageEventsPath(instanceKey);
+  async appendMessageEvent(conversationId: string, event: MessageEvent): Promise<void> {
+    const eventPath = this.paths.instanceMessageEventsPath(conversationId);
     await ensureParentDir(eventPath);
 
     const serialized = JSON.stringify(serializeMessageEvent(event));
     await fs.appendFile(eventPath, `${serialized}\n`, "utf8");
   }
 
-  async appendRuntimeEvent(instanceKey: string, event: RuntimeEvent): Promise<void> {
-    const runtimeEventPath = this.paths.instanceRuntimeEventsPath(instanceKey);
+  async appendRuntimeEvent(conversationId: string, event: RuntimeEvent): Promise<void> {
+    const runtimeEventPath = this.paths.instanceRuntimeEventsPath(conversationId);
     await ensureParentDir(runtimeEventPath);
 
     await fs.appendFile(runtimeEventPath, `${JSON.stringify(event)}\n`, "utf8");
@@ -107,13 +107,13 @@ export class FileWorkspaceStorage {
     await fs.appendFile(runtimeEventPath, `${JSON.stringify(event)}\n`, "utf8");
   }
 
-  async foldEventsToBase(instanceKey: string): Promise<void> {
-    const baseMessages = await this.readBaseMessages(instanceKey);
-    const events = await this.readEvents(instanceKey);
+  async foldEventsToBase(conversationId: string): Promise<void> {
+    const baseMessages = await this.readBaseMessages(conversationId);
+    const events = await this.readEvents(conversationId);
     const applied = applyMessageEvents(baseMessages, events);
 
-    await this.writeBaseMessages(instanceKey, applied.messages, baseMessages, events);
-    await this.clearEvents(instanceKey);
+    await this.writeBaseMessages(conversationId, applied.messages, baseMessages, events);
+    await this.clearEvents(conversationId);
   }
 
   /**
@@ -128,12 +128,12 @@ export class FileWorkspaceStorage {
    * - newMessages = oldMessages + appendedMessages
    */
   async writeBaseMessages(
-    instanceKey: string,
+    conversationId: string,
     newMessages: Message[],
     oldMessages?: Message[],
     events?: MessageEvent[],
   ): Promise<void> {
-    const basePath = this.paths.instanceMessageBasePath(instanceKey);
+    const basePath = this.paths.instanceMessageBasePath(conversationId);
     await ensureParentDir(basePath);
 
     // Check if we can use delta append
@@ -162,14 +162,14 @@ export class FileWorkspaceStorage {
     }
   }
 
-  async clearEvents(instanceKey: string): Promise<void> {
-    const eventPath = this.paths.instanceMessageEventsPath(instanceKey);
+  async clearEvents(conversationId: string): Promise<void> {
+    const eventPath = this.paths.instanceMessageEventsPath(conversationId);
     await ensureParentDir(eventPath);
     await fs.writeFile(eventPath, "", "utf8");
   }
 
-  async readExtensionState(instanceKey: string, extensionName: string): Promise<Record<string, JsonValue> | undefined> {
-    const statePath = this.paths.instanceExtensionStatePath(instanceKey, extensionName);
+  async readExtensionState(conversationId: string, extensionName: string): Promise<Record<string, JsonValue> | undefined> {
+    const statePath = this.paths.instanceExtensionStatePath(conversationId, extensionName);
 
     try {
       const raw = await fs.readFile(statePath, "utf8");
@@ -185,15 +185,15 @@ export class FileWorkspaceStorage {
   }
 
   async writeExtensionState(
-    instanceKey: string,
+    conversationId: string,
     extensionName: string,
     state: Record<string, JsonValue>,
   ): Promise<void> {
-    const statePath = this.paths.instanceExtensionStatePath(instanceKey, extensionName);
+    const statePath = this.paths.instanceExtensionStatePath(conversationId, extensionName);
     await ensureParentDir(statePath);
 
     const nextSerialized = JSON.stringify(state, null, 2);
-    const previous = await this.readExtensionState(instanceKey, extensionName);
+    const previous = await this.readExtensionState(conversationId, extensionName);
     if (previous !== undefined) {
       const previousSerialized = JSON.stringify(previous, null, 2);
       if (previousSerialized === nextSerialized) {
@@ -204,8 +204,8 @@ export class FileWorkspaceStorage {
     await fs.writeFile(statePath, `${nextSerialized}\n`, "utf8");
   }
 
-  async readMetadata(instanceKey: string): Promise<InstanceMetadata | undefined> {
-    const metadataPath = this.paths.instanceMetadataPath(instanceKey);
+  async readMetadata(conversationId: string): Promise<InstanceMetadata | undefined> {
+    const metadataPath = this.paths.instanceMetadataPath(conversationId);
 
     try {
       const raw = await fs.readFile(metadataPath, "utf8");
@@ -219,8 +219,8 @@ export class FileWorkspaceStorage {
     }
   }
 
-  async updateMetadataStatus(instanceKey: string, status: "idle" | "processing"): Promise<void> {
-    const metadata = await this.readMetadata(instanceKey);
+  async updateMetadataStatus(conversationId: string, status: "idle" | "processing"): Promise<void> {
+    const metadata = await this.readMetadata(conversationId);
     if (metadata === undefined) {
       return;
     }
@@ -228,18 +228,18 @@ export class FileWorkspaceStorage {
     metadata.status = status;
     metadata.updatedAt = new Date().toISOString();
 
-    const metadataPath = this.paths.instanceMetadataPath(instanceKey);
+    const metadataPath = this.paths.instanceMetadataPath(conversationId);
     await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   }
 
-  private async readBaseMessages(instanceKey: string): Promise<Message[]> {
-    const basePath = this.paths.instanceMessageBasePath(instanceKey);
+  private async readBaseMessages(conversationId: string): Promise<Message[]> {
+    const basePath = this.paths.instanceMessageBasePath(conversationId);
     await ensureFile(basePath);
     return readJsonl(basePath, deserializeMessage);
   }
 
-  private async readEvents(instanceKey: string): Promise<MessageEvent[]> {
-    const eventsPath = this.paths.instanceMessageEventsPath(instanceKey);
+  private async readEvents(conversationId: string): Promise<MessageEvent[]> {
+    const eventsPath = this.paths.instanceMessageEventsPath(conversationId);
     await ensureFile(eventsPath);
     return readJsonl(eventsPath, deserializeMessageEvent);
   }
@@ -337,7 +337,7 @@ function deserializeMessage(value: unknown): Message | undefined {
   }
 
   const role = value.data.role;
-  if (typeof role !== "string") {
+  if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") {
     return undefined;
   }
 
@@ -489,7 +489,7 @@ function isInstanceMetadata(value: unknown): value is InstanceMetadata {
 
   return (
     typeof value.agentName === "string" &&
-    typeof value.instanceKey === "string" &&
+    typeof value.conversationId === "string" &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string"
   );

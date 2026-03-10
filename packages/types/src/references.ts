@@ -37,7 +37,7 @@ export interface SelectorWithOverrides {
   };
 }
 
-/** Used in Agent.tools / Agent.extensions / Swarm.agents. */
+/** Used in Agent.tools / Agent.extensions / Connection.extensions. */
 export type RefOrSelector = RefItem | SelectorWithOverrides | ObjectRefLike;
 
 export function isRefItem(value: unknown): value is RefItem {
@@ -175,4 +175,3 @@ function normalizeObjectRefObject(value: ObjectRef): ObjectRef {
 
   return normalized;
 }
-

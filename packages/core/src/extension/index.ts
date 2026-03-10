@@ -1,3 +1,7 @@
 export { ExtensionApiImpl } from "./api-impl.js";
-export { ExtensionStateManagerImpl, type ExtensionStateManager } from "./state-manager.js";
-export { loadExtensions, ExtensionLoadError, type ExtensionSpec, type ExtensionModule } from "./loader.js";
+export {
+  ExtensionStateManagerImpl,
+  type ExtensionStateManager,
+  type ExtensionStateStorage,
+} from "./state-manager.js";
+export { loadExtensions, ExtensionLoadError, type ExtensionModule } from "./loader.js";

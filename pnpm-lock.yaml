@@ -18,7 +18,11 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/base: {}
+  packages/base:
+    dependencies:
+      '@goondan/openharness-types':
+        specifier: ^0.0.1-alpha1
+        version: link:../types
 
   packages/cli:
     dependencies:
@@ -50,7 +54,11 @@ importers:
         specifier: ^2.8.1
         version: 2.8.2
 
-  packages/integrations: {}
+  packages/integrations:
+    dependencies:
+      '@goondan/openharness-types':
+        specifier: ^0.0.1-alpha1
+        version: link:../types
 
   packages/types: {}
 
@@ -80,6 +88,10 @@ importers:
       yaml:
         specifier: ^2.8.1
         version: 2.8.2
+    devDependencies:
+      '@types/turndown':
+        specifier: ^5.0.5
+        version: 5.0.6
 
 packages:
 
@@ -411,6 +423,9 @@ packages:
 
   '@types/node@22.19.13':
     resolution: {integrity: sha512-akNQMv0wW5uyRpD2v2IEyRSZiR+BeGuoB6L310EgGObO44HSMNT8z1xzio28V8qOrgYaopIDNA18YgdXd+qTiw==}
+
+  '@types/turndown@5.0.6':
+    resolution: {integrity: sha512-ru00MoyeeouE5BX4gRL+6m/BsDfbRayOskWqUvh7CLGW+UXxHQItqALa38kKnOiZPqJrtzJUgAC2+F0rL1S4Pg==}
 
   '@vercel/oidc@3.1.0':
     resolution: {integrity: sha512-Fw28YZpRnA3cAHHDlkt7xQHiJ0fcL+NRcIqsocZQUSmbzeIKRpwttJjik5ZGanXP+vlA4SbTg+AbA3bP363l+w==}
@@ -855,6 +870,8 @@ snapshots:
   '@types/node@22.19.13':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/turndown@5.0.6': {}
 
   '@vercel/oidc@3.1.0': {}
 

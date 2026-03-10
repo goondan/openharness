@@ -3,7 +3,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
-  AgentToolRuntime,
   ConversationState,
   ExtensionApi,
   IngressDispatchMiddleware,
@@ -62,12 +61,11 @@ export function createConversationState(messages: Message[]): ConversationState 
 }
 
 export function createToolContext(
-  workdir: string,
-  runtime?: AgentToolRuntime
+  workdir: string
 ): ToolContext {
   return {
     agentName: 'agent-a',
-    instanceKey: 'instance-1',
+    conversationId: 'instance-1',
     turnId: 'turn-1',
     traceId: 'trace-1',
     toolCallId: 'tool-call-1',
@@ -86,7 +84,6 @@ export function createToolContext(
         stepId: 'step-1',
       },
     },
-    runtime,
   };
 }
 

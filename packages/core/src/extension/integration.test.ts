@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { loadExtensions, type ExtensionSpec } from "./loader.js";
 import type {
   ExtensionApi,
-  MiddlewareAgentsApi,
   RuntimeContext,
   RuntimeResource,
   TurnResult,
@@ -21,32 +20,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 
-const noopMiddlewareAgentsApi: MiddlewareAgentsApi = {
-  async request(params) {
-    return {
-      target: params.target,
-      response: "",
-    };
-  },
-  async send() {
-    return {
-      accepted: true,
-    };
-  },
-};
-
 function createRuntimeContext(agentName: string): RuntimeContext {
   return {
     agent: {
       name: agentName,
       bundleRoot: "/tmp",
-    },
-    swarm: {
-      swarmName: "default",
-      entryAgent: agentName,
-      selfAgent: agentName,
-      availableAgents: [agentName],
-      callableAgents: [],
     },
     inbound: {
       eventId: "evt-1",
@@ -170,7 +148,7 @@ describe("Extension Integration", () => {
     await pipelineRegistry.runTurn(
       {
         agentName: "test-agent",
-        instanceKey: "test-instance",
+        conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
         inputEvent: {
@@ -181,7 +159,6 @@ describe("Extension Integration", () => {
           createdAt: new Date(),
         },
         conversationState,
-        agents: noopMiddlewareAgentsApi,
         runtime: createRuntimeContext("test-agent"),
         emitMessageEvent: () => {},
         metadata,
@@ -213,7 +190,7 @@ describe("Extension Integration", () => {
     await pipelineRegistry.runTurn(
       {
         agentName: "test-agent",
-        instanceKey: "test-instance",
+        conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
         inputEvent: {
@@ -224,7 +201,6 @@ describe("Extension Integration", () => {
           createdAt: new Date(),
         },
         conversationState,
-        agents: noopMiddlewareAgentsApi,
         runtime: createRuntimeContext("test-agent"),
         emitMessageEvent: () => {},
         metadata: {},
@@ -288,7 +264,7 @@ describe("Extension Integration", () => {
     await pipelineRegistry.runTurn(
       {
         agentName: "test-agent",
-        instanceKey: "test-instance",
+        conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
         inputEvent: {
@@ -299,7 +275,6 @@ describe("Extension Integration", () => {
           createdAt: new Date(),
         },
         conversationState,
-        agents: noopMiddlewareAgentsApi,
         runtime: createRuntimeContext("test-agent"),
         emitMessageEvent: () => {},
         metadata: metadata1,
@@ -313,7 +288,7 @@ describe("Extension Integration", () => {
     await pipelineRegistry.runTurn(
       {
         agentName: "test-agent",
-        instanceKey: "test-instance",
+        conversationId: "test-instance",
         turnId: "turn-2",
         traceId: "trace-2",
         inputEvent: {
@@ -324,7 +299,6 @@ describe("Extension Integration", () => {
           createdAt: new Date(),
         },
         conversationState,
-        agents: noopMiddlewareAgentsApi,
         runtime: createRuntimeContext("test-agent"),
         emitMessageEvent: () => {},
         metadata: metadata2,

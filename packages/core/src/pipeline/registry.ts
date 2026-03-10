@@ -3,15 +3,21 @@ import type {
   AgentEvent,
   ConversationState,
   ExecutionContext,
+  PipelineRegistry,
   JsonObject,
   JsonValue,
-  MiddlewareAgentsApi,
   MessageEvent,
   RuntimeContext,
+  StepMiddleware,
+  StepMiddlewareContext,
   StepResult,
+  ToolCallMiddleware,
+  ToolCallMiddlewareContext,
   ToolCallResult,
   ToolCatalogItem,
   Turn,
+  TurnMiddleware,
+  TurnMiddlewareContext,
   TurnResult,
 } from "../types.js";
 import {
@@ -28,46 +34,19 @@ import {
 
 export type PipelineType = "turn" | "step" | "toolCall";
 
+export type {
+  PipelineRegistry,
+  StepMiddleware,
+  StepMiddlewareContext,
+  ToolCallMiddleware,
+  ToolCallMiddlewareContext,
+  TurnMiddleware,
+  TurnMiddlewareContext,
+} from "../types.js";
+
 export interface MiddlewareOptions {
   priority?: number;
 }
-
-export interface TurnMiddlewareContext extends ExecutionContext {
-  readonly inputEvent: AgentEvent;
-  readonly conversationState: ConversationState;
-  readonly agents: MiddlewareAgentsApi;
-  readonly runtime: RuntimeContext;
-  emitMessageEvent(event: MessageEvent): void;
-  metadata: Record<string, JsonValue>;
-  next(): Promise<TurnResult>;
-}
-
-export interface StepMiddlewareContext extends ExecutionContext {
-  readonly turn: Turn;
-  readonly stepIndex: number;
-  readonly conversationState: ConversationState;
-  readonly agents: MiddlewareAgentsApi;
-  readonly runtime: RuntimeContext;
-  emitMessageEvent(event: MessageEvent): void;
-  toolCatalog: ToolCatalogItem[];
-  metadata: Record<string, JsonValue>;
-  next(): Promise<StepResult>;
-}
-
-export interface ToolCallMiddlewareContext extends ExecutionContext {
-  readonly stepIndex: number;
-  readonly toolName: string;
-  readonly toolCallId: string;
-  readonly conversationState: ConversationState;
-  readonly runtime: RuntimeContext;
-  args: JsonObject;
-  metadata: Record<string, JsonValue>;
-  next(): Promise<ToolCallResult>;
-}
-
-export type TurnMiddleware = (ctx: TurnMiddlewareContext) => Promise<TurnResult>;
-export type StepMiddleware = (ctx: StepMiddlewareContext) => Promise<StepResult>;
-export type ToolCallMiddleware = (ctx: ToolCallMiddlewareContext) => Promise<ToolCallResult>;
 
 interface MiddlewareEntry<T> {
   readonly fn: T;
@@ -78,7 +57,6 @@ interface MiddlewareEntry<T> {
 interface TurnMutableState extends ExecutionContext {
   inputEvent: AgentEvent;
   conversationState: ConversationState;
-  agents: MiddlewareAgentsApi;
   runtime: RuntimeContext;
   emitMessageEvent(event: MessageEvent): void;
   metadata: Record<string, JsonValue>;
@@ -88,7 +66,6 @@ interface StepMutableState extends ExecutionContext {
   turn: Turn;
   stepIndex: number;
   conversationState: ConversationState;
-  agents: MiddlewareAgentsApi;
   runtime: RuntimeContext;
   emitMessageEvent(event: MessageEvent): void;
   toolCatalog: ToolCatalogItem[];
@@ -265,22 +242,6 @@ interface TurnScope {
   tokenUsage?: TokenUsage;
 }
 
-// ---------------------------------------------------------------------------
-// Public interfaces
-// ---------------------------------------------------------------------------
-
-export interface PipelineRegistry {
-  register(type: "turn", fn: TurnMiddleware, options?: MiddlewareOptions): void;
-  register(type: "step", fn: StepMiddleware, options?: MiddlewareOptions): void;
-  register(type: "toolCall", fn: ToolCallMiddleware, options?: MiddlewareOptions): void;
-  runTurn(ctx: Omit<TurnMiddlewareContext, "next">, core: TurnMiddleware): Promise<TurnResult>;
-  runStep(ctx: Omit<StepMiddlewareContext, "next">, core: StepMiddleware): Promise<StepResult>;
-  runToolCall(
-    ctx: Omit<ToolCallMiddlewareContext, "next">,
-    core: ToolCallMiddleware,
-  ): Promise<ToolCallResult>;
-}
-
 export class PipelineRegistryImpl implements PipelineRegistry {
   private turnMiddlewares: MiddlewareEntry<TurnMiddleware>[] = [];
   private stepMiddlewares: MiddlewareEntry<StepMiddleware>[] = [];
@@ -332,12 +293,11 @@ export class PipelineRegistryImpl implements PipelineRegistry {
     const ordered = this.sortEntries(this.turnMiddlewares);
     const state: TurnMutableState = {
       agentName: ctx.agentName,
-      instanceKey: ctx.instanceKey,
+      conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
       inputEvent: ctx.inputEvent,
       conversationState: ctx.conversationState,
-      agents: ctx.agents,
       runtime: ctx.runtime,
       emitMessageEvent: ctx.emitMessageEvent,
       metadata: ctx.metadata,
@@ -353,7 +313,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
         type: "turn.started",
         turnId: ctx.turnId,
         agentName: ctx.agentName,
-        instanceKey: ctx.instanceKey,
+        conversationId: ctx.conversationId,
         traceId: ctx.traceId,
         spanId: turnSpanId,
         parentSpanId: undefined,
@@ -382,7 +342,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           type: "turn.completed",
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: turnSpanId,
           parentSpanId: undefined,
@@ -400,7 +360,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           type: "turn.failed",
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: turnSpanId,
           parentSpanId: undefined,
@@ -419,13 +379,12 @@ export class PipelineRegistryImpl implements PipelineRegistry {
     const ordered = this.sortEntries(this.stepMiddlewares);
     const state: StepMutableState = {
       agentName: ctx.agentName,
-      instanceKey: ctx.instanceKey,
+      conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
       turn: ctx.turn,
       stepIndex: ctx.stepIndex,
       conversationState: ctx.conversationState,
-      agents: ctx.agents,
       runtime: ctx.runtime,
       emitMessageEvent: ctx.emitMessageEvent,
       toolCatalog: ctx.toolCatalog,
@@ -454,7 +413,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
         stepIndex: ctx.stepIndex,
         turnId: ctx.turnId,
         agentName: ctx.agentName,
-        instanceKey: ctx.instanceKey,
+        conversationId: ctx.conversationId,
         traceId: ctx.traceId,
         spanId: stepSpanId,
         parentSpanId: parentTurnSpanId,
@@ -504,7 +463,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           stepIndex: ctx.stepIndex,
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: stepSpanId,
           parentSpanId: parentTurnSpanId,
@@ -524,7 +483,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           stepIndex: ctx.stepIndex,
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: stepSpanId,
           parentSpanId: parentTurnSpanId,
@@ -546,7 +505,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
     const ordered = this.sortEntries(this.toolCallMiddlewares);
     const state: ToolCallMutableState = {
       agentName: ctx.agentName,
-      instanceKey: ctx.instanceKey,
+      conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
       stepIndex: ctx.stepIndex,
@@ -574,7 +533,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
         stepId,
         turnId: ctx.turnId,
         agentName: ctx.agentName,
-        instanceKey: ctx.instanceKey,
+        conversationId: ctx.conversationId,
         traceId: ctx.traceId,
         spanId: toolSpanId,
         parentSpanId: parentStepSpanId,
@@ -608,7 +567,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           stepId,
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: toolSpanId,
           parentSpanId: parentStepSpanId,
@@ -627,7 +586,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
           stepId,
           turnId: ctx.turnId,
           agentName: ctx.agentName,
-          instanceKey: ctx.instanceKey,
+          conversationId: ctx.conversationId,
           traceId: ctx.traceId,
           spanId: toolSpanId,
           parentSpanId: parentStepSpanId,
@@ -657,8 +616,8 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       get agentName() {
         return state.agentName;
       },
-      get instanceKey() {
-        return state.instanceKey;
+      get conversationId() {
+        return state.conversationId;
       },
       get turnId() {
         return state.turnId;
@@ -671,9 +630,6 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       },
       get conversationState() {
         return state.conversationState;
-      },
-      get agents() {
-        return state.agents;
       },
       get runtime() {
         return state.runtime;
@@ -696,8 +652,8 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       get agentName() {
         return state.agentName;
       },
-      get instanceKey() {
-        return state.instanceKey;
+      get conversationId() {
+        return state.conversationId;
       },
       get turnId() {
         return state.turnId;
@@ -713,9 +669,6 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       },
       get conversationState() {
         return state.conversationState;
-      },
-      get agents() {
-        return state.agents;
       },
       get runtime() {
         return state.runtime;
@@ -747,8 +700,8 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       get agentName() {
         return state.agentName;
       },
-      get instanceKey() {
-        return state.instanceKey;
+      get conversationId() {
+        return state.conversationId;
       },
       get turnId() {
         return state.turnId;

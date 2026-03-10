@@ -1848,7 +1848,7 @@ export async function task(ctx: ToolContext, args: JsonObject): Promise<JsonValu
       workdir: ctx.workdir,
       agentName: "opencode",
       entrypointFileName: "harness.yaml",
-      instanceKey: taskId,
+      conversationId: taskId,
       env: { ...dotenvEnv, ...process.env },
       logger: QUIET_LOGGER,
     });

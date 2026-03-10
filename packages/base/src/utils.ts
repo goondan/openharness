@@ -164,11 +164,15 @@ export function estimateMessageLength(message: Message): number {
   if (typeof content === 'string') {
     return content.length;
   }
+  if (!Array.isArray(content)) {
+    return 0;
+  }
 
   let total = 0;
   for (const part of content) {
-    if (isTextContentPart(part)) {
-      total += part.text.length;
+    if (isJsonObject(part) && isTextContentPart(part as MessageContentPart)) {
+      const textPart = part as MessageContentPart & { text: string };
+      total += textPart.text.length;
     }
   }
   return total;

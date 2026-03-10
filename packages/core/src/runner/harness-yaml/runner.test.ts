@@ -12,7 +12,7 @@ vi.mock("../../engine/run-turn.js", () => ({
   runTurn: runTurnMock,
 }));
 
-import { createHarnessRuntimeFromYaml } from "./runner.js";
+import { createHarnessRuntimeFromYaml, createRunnerFromHarnessYaml } from "./runner.js";
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -216,7 +216,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
         "export async function register(api) {",
         "  api.ingress.register('route', async (ctx) => {",
         "    const next = await ctx.next();",
-        "    return { ...next, instanceKey: `${next.instanceKey}:hooked` };",
+        "    return { ...next, conversationId: `${next.conversationId}:hooked` };",
         "  });",
         "  api.ingress.register('dispatch', async (ctx) => {",
         "    ctx.plan.runtime.inbound.properties.dispatchHook = 'enabled';",
@@ -240,13 +240,13 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
           "      route: primary",
           "  route:",
           "    agentRef: Agent/assistant",
-          "    instanceKeyProperty: threadTs",
-          "    instanceKeyPrefix: \"slack:\"",
+          "    conversationIdProperty: threadTs",
+          "    conversationIdPrefix: \"slack:\"",
           "- match:",
           "    event: slack.message",
           "  route:",
           "    agentRef: Agent/assistant",
-          "    instanceKey: fallback",
+          "    conversationId: fallback",
         ],
       }),
     );
@@ -259,7 +259,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
           turnId: input.turnId,
           finishReason: "text_response",
         },
-        finalResponseText: `ok:${input.instanceKey}`,
+        finalResponseText: `ok:${input.conversationId}`,
         stepCount: 1,
       };
     });
@@ -291,7 +291,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
 
       expect(accepted).toHaveLength(2);
       expect(accepted.map((item) => item.accepted)).toEqual([true, true]);
-      expect(accepted.map((item) => item.instanceKey)).toEqual(["slack:t-1:hooked", "fallback:hooked"]);
+      expect(accepted.map((item) => item.conversationId)).toEqual(["slack:t-1:hooked", "fallback:hooked"]);
       expect(accepted.map((item) => item.agentName)).toEqual(["assistant", "assistant"]);
       expect(new Set(accepted.map((item) => item.eventId)).size).toBe(2);
 
@@ -303,7 +303,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
       const primaryCall = calls.find((input) => input.inputEvent.properties?.route === "primary");
       const fallbackCall = calls.find((input) => input.inputEvent.properties?.route === "secondary");
 
-      expect(primaryCall?.instanceKey).toBe("slack:t-1:hooked");
+      expect(primaryCall?.conversationId).toBe("slack:t-1:hooked");
       expect(primaryCall?.inputEvent.input).toBe("hello from slack");
       expect(primaryCall?.runtime.inbound.properties).toMatchObject({
         route: "primary",
@@ -316,7 +316,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
         deliveryId: "raw-1",
       });
 
-      expect(fallbackCall?.instanceKey).toBe("fallback:hooked");
+      expect(fallbackCall?.conversationId).toBe("fallback:hooked");
       expect(fallbackCall?.inputEvent.input).toBeUndefined();
       expect(fallbackCall?.runtime.inbound.properties).toMatchObject({
         connectionHook: "normalized",
@@ -375,7 +375,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
           "    event: slack.message",
           "  route:",
           "    agentRef: Agent/assistant",
-          "    instanceKey: verify-failed",
+          "    conversationId: verify-failed",
         ],
       }),
     );
@@ -415,7 +415,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
     }
   });
 
-  it("dispatch route 단계에서 instanceKey를 못 찾으면 ingress.rejected를 남긴다", async () => {
+  it("dispatch route 단계에서 conversationId를 못 찾으면 ingress.rejected를 남긴다", async () => {
     await writeText(
       path.join(tempDir, "connector.js"),
       [
@@ -465,7 +465,7 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
             source: { kind: "connector", name: "slack" },
           },
         }),
-      ).rejects.toThrow(/instanceKey/);
+      ).rejects.toThrow(/conversationId/);
 
       expect(runTurnMock).not.toHaveBeenCalled();
 
@@ -480,6 +480,65 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
       });
     } finally {
       await runtime.close();
+    }
+  });
+});
+
+describe("createRunnerFromHarnessYaml", () => {
+  let tempDir: string;
+  let stateRoot: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openharness-runner-wrapper-test-"));
+    stateRoot = path.join(tempDir, ".state");
+    runTurnMock.mockReset();
+  });
+
+  it("agentName 없이 conversationId만 노출한다", async () => {
+    await writeText(
+      path.join(tempDir, "connector.js"),
+      [
+        "export default {",
+        "  async normalize() {",
+        "    return {",
+        "      name: 'slack.message',",
+        "      content: [{ type: 'text', text: 'hello' }],",
+        "      properties: {},",
+        "      source: { kind: 'connector', name: 'slack' },",
+        "    };",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    await writeText(
+      path.join(tempDir, "harness.yaml"),
+      createHarnessYaml({
+        connectorEntry: "connector.js",
+        connectionIngress: [
+          "- match:",
+          "    event: slack.message",
+          "  route:",
+          "    agentRef: Agent/assistant",
+          "    conversationId: default",
+        ],
+      }),
+    );
+
+    const runner = await createRunnerFromHarnessYaml({
+      workdir: tempDir,
+      stateRoot,
+      env: {
+        OPENAI_API_KEY: "test-key",
+      },
+    });
+
+    try {
+      expect("agentName" in runner).toBe(false);
+      expect(runner.conversationId).toBe("assistant");
+    } finally {
+      await runner.close();
     }
   });
 });

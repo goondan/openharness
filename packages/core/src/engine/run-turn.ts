@@ -3,12 +3,10 @@ import { Console } from "node:console";
 import {
   isJsonObject,
   type AgentEvent,
-  type AgentToolRuntime,
   type JsonObject,
   type JsonValue,
   type Message,
   type MessageEvent,
-  type MiddlewareAgentsApi,
   type RuntimeContext,
   type StepResult,
   type ToolCallResult,
@@ -42,13 +40,12 @@ export interface RunTurnModelConfig {
 
 export interface RunTurnInput {
   agentName: string;
-  instanceKey: string;
+  conversationId: string;
   turnId: string;
   traceId: string;
   inputEvent: AgentEvent;
   conversationState: ConversationStateImpl;
   pipelineRegistry: PipelineRegistryImpl;
-  agents: MiddlewareAgentsApi;
   runtime: RuntimeContext;
 
   model: RunTurnModelConfig;
@@ -61,7 +58,6 @@ export interface RunTurnInput {
 
   workdir: string;
   logger?: Console;
-  toolRuntime?: AgentToolRuntime;
 
   stepLimitResponse?: (input: StepLimitResponseInput) => string;
   beforeEachStep?: () => void | Promise<void>;
@@ -199,12 +195,11 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
   const turnResult = await input.pipelineRegistry.runTurn(
     {
       agentName: input.agentName,
-      instanceKey: input.instanceKey,
+      conversationId: input.conversationId,
       turnId: input.turnId,
       traceId: input.traceId,
       inputEvent: input.inputEvent,
       conversationState: input.conversationState,
-      agents: input.agents,
       runtime: input.runtime,
       emitMessageEvent(ev: MessageEvent): void {
         input.conversationState.emitMessageEvent(ev);
@@ -236,7 +231,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
         const stepResult = await input.pipelineRegistry.runStep(
           {
             agentName: input.agentName,
-            instanceKey: input.instanceKey,
+            conversationId: input.conversationId,
             turnId: input.turnId,
             traceId: input.traceId,
             turn: {
@@ -244,16 +239,15 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
               agentName: input.agentName,
               inputEvent: input.inputEvent,
               messages: input.conversationState.nextMessages,
-              steps: [],
-              status: "running",
-              metadata: {},
-            },
-            stepIndex: step,
-            conversationState: input.conversationState,
-            agents: input.agents,
-            runtime: input.runtime,
-            emitMessageEvent(ev: MessageEvent): void {
-              input.conversationState.emitMessageEvent(ev);
+            steps: [],
+            status: "running",
+            metadata: {},
+          },
+          stepIndex: step,
+          conversationState: input.conversationState,
+          runtime: input.runtime,
+          emitMessageEvent(ev: MessageEvent): void {
+            input.conversationState.emitMessageEvent(ev);
             },
             toolCatalog: baseToolCatalog,
             metadata: stepMetadata,
@@ -330,7 +324,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
               const toolResult = await input.pipelineRegistry.runToolCall(
                 {
                   agentName: input.agentName,
-                  instanceKey: input.instanceKey,
+                  conversationId: input.conversationId,
                   turnId: input.turnId,
                   traceId: input.traceId,
                   stepIndex: step,
@@ -344,14 +338,13 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
                 async (toolCallCtx): Promise<ToolCallResult> => {
                   const toolContext = createMinimalToolContext({
                     agentName: input.agentName,
-                    instanceKey: input.instanceKey,
+                    conversationId: input.conversationId,
                     turnId: input.turnId,
                     traceId: input.traceId,
                     toolCallId: toolCallCtx.toolCallId,
                     message: createToolContextMessage(userInputText),
                     workdir: input.workdir,
                     logger,
-                    runtime: input.toolRuntime,
                   });
 
                   const executor =

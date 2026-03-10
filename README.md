@@ -105,8 +105,8 @@ spec:
           event: slack.message
         route:
           agentRef: Agent/assistant
-          instanceKeyProperty: threadTs
-          instanceKeyPrefix: "slack:"
+          conversationIdProperty: threadTs
+          conversationIdPrefix: "slack:"
 ```
 
 ## Programmatic API
@@ -137,7 +137,8 @@ console.log(output.finalResponseText);
 ```
 
 - `createHarnessRuntimeFromYaml()` 반환값: `{ processTurn, ingress, close }`
-- `createRunnerFromHarnessYaml()`는 텍스트 입력 중심 convenience wrapper입니다.
+- `createHarnessRuntimeFromYaml()`는 ingress 포함 상위 runtime입니다. `processTurn()`은 기본 Agent가 결정되는 경우에만 사용합니다.
+- `createRunnerFromHarnessYaml()`는 내부적으로 runtime을 만든 뒤 기본 Agent를 고정하고, 텍스트 입력용 `conversationId`를 함께 제공하는 convenience wrapper입니다.
 
 ## 문서
 

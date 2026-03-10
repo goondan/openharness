@@ -40,7 +40,6 @@ import type {
   InboundContentPart,
   JsonValue,
   Message,
-  MiddlewareAgentsApi,
   RuntimeContext,
   RuntimeResource,
   ToolCatalogItem,
@@ -65,7 +64,7 @@ export interface CreateHarnessRuntimeFromYamlOptions {
   workdir: string;
   entrypointFileName?: string;
   agentName?: string;
-  instanceKey?: string;
+  conversationId?: string;
   stateRoot?: string;
   maxSteps?: number;
   logger?: Console;
@@ -106,16 +105,13 @@ export interface HarnessYamlIngressApi {
 }
 
 export interface HarnessYamlRuntime {
-  readonly workdir: string;
-  readonly stateRoot: string;
   processTurn(text: string): Promise<HarnessYamlRunnerTurnOutput>;
   readonly ingress: HarnessYamlIngressApi;
   close(): Promise<void>;
 }
 
 export interface HarnessYamlRunner extends HarnessYamlRuntime {
-  readonly agentName: string;
-  readonly instanceKey: string;
+  readonly conversationId: string;
 }
 
 interface LoadedConnection {
@@ -129,7 +125,7 @@ interface LoadedConnection {
 
 interface AgentSession {
   readonly agent: AgentRuntimeResource;
-  readonly instanceKey: string;
+  readonly conversationId: string;
   readonly systemPrompt: string;
   readonly model: RunTurnModelConfig;
   readonly pipelineRegistry: PipelineRegistryImpl;
@@ -164,15 +160,6 @@ class ManifestAwareToolExecutor extends ToolExecutor {
     return super.execute({ ...request, errorMessageLimit: limit });
   }
 }
-
-const noopAgentsApi: MiddlewareAgentsApi = {
-  async request(params) {
-    return { target: params.target, response: "" };
-  },
-  async send() {
-    return { accepted: true };
-  },
-};
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -596,13 +583,6 @@ function createRuntimeContext(input: {
         system: input.systemPrompt,
       },
     },
-    swarm: {
-      swarmName: "default",
-      entryAgent: input.agentName,
-      selfAgent: input.agentName,
-      availableAgents: [input.agentName],
-      callableAgents: [],
-    },
     inbound: {
       eventId: input.inputEvent.id,
       eventType: input.inputEvent.type,
@@ -610,7 +590,7 @@ function createRuntimeContext(input: {
       sourceName: input.inputEvent.source.name,
       connectionName: input.connectionName,
       createdAt: input.inputEvent.createdAt.toISOString(),
-      instanceKey: input.inputEvent.instanceKey,
+      conversationId: input.inputEvent.conversationId,
       properties: input.inputEvent.properties ?? {},
       content: normalizeInboundContent(input.inputEvent.content, input.inputEvent.input),
       rawPayload: input.inputEvent.rawPayload,
@@ -626,7 +606,7 @@ function createInputEventFromEnvelope(input: {
   eventId: string;
   traceId: string;
   envelope: InboundEnvelope;
-  instanceKey: string;
+  conversationId: string;
   receivedAt: string;
 }): AgentEvent {
   const content = normalizeInboundContent(input.envelope.content);
@@ -639,14 +619,14 @@ function createInputEventFromEnvelope(input: {
     input: deriveInputAliasFromContent(content),
     content,
     properties: input.envelope.properties,
-    instanceKey: input.instanceKey,
+    conversationId: input.conversationId,
     source: input.envelope.source,
     auth: input.envelope.auth,
     rawPayload: input.envelope.rawPayload,
   };
 }
 
-function createProcessTurnInputEvent(text: string, instanceKey: string): AgentEvent {
+function createProcessTurnInputEvent(text: string, conversationId: string): AgentEvent {
   const trimmed = text.trim();
   const content = trimmed.length > 0 ? [{ type: "text", text: trimmed } satisfies InboundContentPart] : [];
 
@@ -656,18 +636,18 @@ function createProcessTurnInputEvent(text: string, instanceKey: string): AgentEv
     input: trimmed,
     content,
     properties: {},
-    instanceKey,
+    conversationId,
     source: { kind: "connector", name: "cli" },
     createdAt: new Date(),
   };
 }
 
-async function ensureInstance(storage: FileWorkspaceStorage, instanceKey: string, agentName: string): Promise<void> {
-  const existing = await storage.readMetadata(instanceKey);
+async function ensureInstance(storage: FileWorkspaceStorage, conversationId: string, agentName: string): Promise<void> {
+  const existing = await storage.readMetadata(conversationId);
   if (existing) {
     return;
   }
-  await storage.initializeInstanceState(instanceKey, agentName);
+  await storage.initializeInstanceState(conversationId, agentName);
 }
 
 function matchesIngressRule(
@@ -696,30 +676,30 @@ function matchesIngressRule(
   return true;
 }
 
-function resolveInstanceKey(
+function resolveConversationId(
   route: NonNullable<NonNullable<ConnectionSpec["ingress"]>["rules"]>[number]["route"],
   event: InboundEnvelope,
 ): string {
-  if (typeof route.instanceKey === "string" && route.instanceKey.trim().length > 0) {
-    return route.instanceKey.trim();
+  if (typeof route.conversationId === "string" && route.conversationId.trim().length > 0) {
+    return route.conversationId.trim();
   }
 
-  if (typeof route.instanceKeyProperty === "string" && route.instanceKeyProperty.trim().length > 0) {
-    const propertyValue = event.properties[route.instanceKeyProperty];
+  if (typeof route.conversationIdProperty === "string" && route.conversationIdProperty.trim().length > 0) {
+    const propertyValue = event.properties[route.conversationIdProperty];
     if (propertyValue === undefined) {
-      throw new Error(`instanceKeyProperty 값을 찾을 수 없습니다: ${route.instanceKeyProperty}`);
+      throw new Error(`conversationIdProperty 값을 찾을 수 없습니다: ${route.conversationIdProperty}`);
     }
 
     const prefix =
-      typeof route.instanceKeyPrefix === "string" && route.instanceKeyPrefix.length > 0 ? route.instanceKeyPrefix : "";
+      typeof route.conversationIdPrefix === "string" && route.conversationIdPrefix.length > 0 ? route.conversationIdPrefix : "";
     return `${prefix}${String(propertyValue)}`;
   }
 
-  if (typeof event.instanceKey === "string" && event.instanceKey.trim().length > 0) {
-    return event.instanceKey.trim();
+  if (typeof event.conversationId === "string" && event.conversationId.trim().length > 0) {
+    return event.conversationId.trim();
   }
 
-  throw new Error("instanceKey를 결정할 수 없습니다. route.instanceKey / route.instanceKeyProperty / event.instanceKey 중 하나가 필요합니다.");
+  throw new Error("conversationId를 결정할 수 없습니다. route.conversationId / route.conversationIdProperty / event.conversationId 중 하나가 필요합니다.");
 }
 
 function createFallbackInboundMetadata(inputEvent: AgentEvent, runtime: RuntimeContext): Record<string, JsonValue> {
@@ -733,8 +713,8 @@ function createFallbackInboundMetadata(inputEvent: AgentEvent, runtime: RuntimeC
     payload.connectionName = runtime.inbound.connectionName;
   }
 
-  if (typeof runtime.inbound.instanceKey === "string" && runtime.inbound.instanceKey.length > 0) {
-    payload.instanceKey = runtime.inbound.instanceKey;
+  if (typeof runtime.inbound.conversationId === "string" && runtime.inbound.conversationId.length > 0) {
+    payload.conversationId = runtime.inbound.conversationId;
   }
 
   if (runtime.inbound.kind === "connector") {
@@ -798,7 +778,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   });
 
   const defaultAgent = resolveDefaultAgent(harnessResources.resources, options.agentName);
-  const defaultInstanceKey = options.instanceKey ?? defaultAgent?.metadata.name ?? "default";
+  const defaultConversationId = options.conversationId ?? defaultAgent?.metadata.name ?? "default";
   const maxSteps = typeof options.maxSteps === "number" && Number.isFinite(options.maxSteps) ? Math.max(1, options.maxSteps) : 8;
 
   const workspaceName = deriveWorkspaceName(workdir);
@@ -816,11 +796,11 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     runtimeEventBus.on(type, async (event) => {
       await storage.appendWorkspaceRuntimeEvent(event);
 
-      if (typeof event.instanceKey === "string" && event.instanceKey.length > 0) {
+      if (typeof event.conversationId === "string" && event.conversationId.length > 0) {
         try {
-          await storage.appendRuntimeEvent(event.instanceKey, event);
+          await storage.appendRuntimeEvent(event.conversationId, event);
         } catch {
-          // ingress.received/rejected 등 instance가 없는 경우를 포함해 workspace log만 남긴다.
+          // ingress.received/rejected 등 conversation이 아직 확정되지 않은 경우에는 workspace log만 남긴다.
         }
       }
     });
@@ -829,8 +809,8 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   const sessionCache = new Map<string, Promise<AgentSession>>();
   const pendingTurns = new Set<Promise<unknown>>();
 
-  async function createAgentSession(agent: AgentRuntimeResource, instanceKey: string): Promise<AgentSession> {
-    await ensureInstance(storage, instanceKey, agent.metadata.name);
+  async function createAgentSession(agent: AgentRuntimeResource, conversationId: string): Promise<AgentSession> {
+    await ensureInstance(storage, conversationId, agent.metadata.name);
 
     const systemPrompt = await resolveAgentSystemPrompt(agent, workdir);
     const modelResolved = resolveAgentModelConfig(agent, harnessResources.resources, {
@@ -852,7 +832,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     const hasContextMessage = extensionResources.some((ext) => ext.metadata.name === "context-message");
 
     const extensionNames = extensionResources.map((ext) => ext.metadata.name);
-    const extensionState = new ExtensionStateManagerImpl(storage, instanceKey, extensionNames);
+    const extensionState = new ExtensionStateManagerImpl(storage, conversationId, extensionNames);
     await extensionState.loadAll();
 
     const extensionEventBus = new EventEmitter();
@@ -876,11 +856,11 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       );
     }
 
-    const conversationState = await storage.createConversationState(instanceKey);
+    const conversationState = await storage.createConversationState(conversationId);
 
     const session: AgentSession = {
       agent,
-      instanceKey,
+      conversationId,
       systemPrompt,
       model: {
         provider: modelResolved.provider,
@@ -907,8 +887,8 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     return session;
   }
 
-  async function getOrCreateSession(agentName: string, instanceKey: string): Promise<AgentSession> {
-    const cacheKey = `${agentName}::${instanceKey}`;
+  async function getOrCreateSession(agentName: string, conversationId: string): Promise<AgentSession> {
+    const cacheKey = `${agentName}::${conversationId}`;
     const existing = sessionCache.get(cacheKey);
     if (existing) {
       return existing;
@@ -919,7 +899,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       throw new Error(`Agent 리소스를 찾을 수 없습니다: ${agentName}`);
     }
 
-    const created = createAgentSession(agent, instanceKey);
+    const created = createAgentSession(agent, conversationId);
     sessionCache.set(cacheKey, created);
 
     try {
@@ -933,24 +913,23 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   async function persistSessionMessageEvents(session: AgentSession, startIndex: number): Promise<void> {
     const events = session.conversationState.events.slice(startIndex);
     for (const event of events) {
-      await storage.appendMessageEvent(session.instanceKey, event);
+      await storage.appendMessageEvent(session.conversationId, event);
     }
   }
 
   async function executeTurn(session: AgentSession, inputEvent: AgentEvent, runtime: RuntimeContext, turnId: string, traceId: string): Promise<HarnessYamlRunnerTurnOutput> {
     const startedEventIndex = session.conversationState.events.length;
-    await storage.updateMetadataStatus(session.instanceKey, "processing");
+    await storage.updateMetadataStatus(session.conversationId, "processing");
 
     try {
       const output = await runTurn({
         agentName: session.agent.metadata.name,
-        instanceKey: session.instanceKey,
+        conversationId: session.conversationId,
         turnId,
         traceId,
         inputEvent,
         conversationState: session.conversationState,
         pipelineRegistry: session.pipelineRegistry,
-        agents: noopAgentsApi,
         runtime,
         model: session.model,
         maxSteps,
@@ -970,7 +949,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     } finally {
       await persistSessionMessageEvents(session, startedEventIndex);
       await session.extensionState.saveAll();
-      await storage.updateMetadataStatus(session.instanceKey, "idle");
+      await storage.updateMetadataStatus(session.conversationId, "idle");
     }
   }
 
@@ -1077,7 +1056,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     eventName?: string;
     turnId?: string;
     agentName?: string;
-    instanceKey?: string;
+    conversationId?: string;
   }): Promise<void> {
     const errorMessage = input.error instanceof Error ? input.error.message : String(input.error);
     const errorCode = input.error instanceof Error ? (input.error as { code?: string }).code : undefined;
@@ -1092,7 +1071,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       errorMessage,
       errorCode,
       agentName: input.agentName,
-      instanceKey: input.instanceKey,
+      conversationId: input.conversationId,
       traceId: input.traceId,
       spanId: createSpanId(),
       timestamp: new Date().toISOString(),
@@ -1128,7 +1107,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
         connectorName: connection.connector.metadata.name,
         ruleIndex: index,
         agentName: agentRef.name,
-        instanceKey: resolveInstanceKey(rule.route, event),
+        conversationId: resolveConversationId(rule.route, event),
         event,
       };
     }
@@ -1137,7 +1116,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   }
 
   async function dispatchPreparedPlan(plan: IngressDispatchPlan): Promise<IngressAcceptResult> {
-    const session = await getOrCreateSession(plan.agentName, plan.instanceKey);
+    const session = await getOrCreateSession(plan.agentName, plan.conversationId);
     const queuedTurn = trackPendingTurn(
       queueSessionTurn(session, async () => {
         await executeTurn(session, plan.inputEvent, plan.runtime, plan.turnId, plan.traceId);
@@ -1154,7 +1133,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
         eventName: plan.event.name,
         turnId: plan.turnId,
         agentName: plan.agentName,
-        instanceKey: plan.instanceKey,
+        conversationId: plan.conversationId,
       });
     });
 
@@ -1163,7 +1142,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       connectionName: plan.connectionName,
       connectorName: plan.connectorName,
       agentName: plan.agentName,
-      instanceKey: plan.instanceKey,
+      conversationId: plan.conversationId,
       eventId: plan.eventId,
       eventName: plan.event.name,
       turnId: plan.turnId,
@@ -1179,7 +1158,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       turnId: plan.turnId,
       accepted: true,
       agentName: plan.agentName,
-      instanceKey: plan.instanceKey,
+      conversationId: plan.conversationId,
       traceId: plan.traceId,
       spanId: createSpanId(),
       timestamp: new Date().toISOString(),
@@ -1202,16 +1181,16 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       eventId: ids.eventId,
       traceId: ids.traceId,
       envelope: route.event,
-      instanceKey: route.instanceKey,
+      conversationId: route.conversationId,
       receivedAt,
     });
 
-    const session = await getOrCreateSession(route.agentName, route.instanceKey);
+    const session = await getOrCreateSession(route.agentName, route.conversationId);
     return {
       connectionName: connection.connection.metadata.name,
       connectorName: connection.connector.metadata.name,
       agentName: route.agentName,
-      instanceKey: route.instanceKey,
+      conversationId: route.conversationId,
       event: route.event,
       eventId: ids.eventId,
       turnId: ids.turnId,
@@ -1282,7 +1261,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
 
   async function runRoute(connection: LoadedConnection, event: InboundEnvelope): Promise<IngressRouteResolution> {
     const initial = await resolveRoute(connection, event);
-    const session = await getOrCreateSession(initial.agentName, initial.instanceKey);
+    const session = await getOrCreateSession(initial.agentName, initial.conversationId);
 
     return await session.ingressRegistry.runRoute(
       {
@@ -1296,7 +1275,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   }
 
   async function runDispatch(plan: IngressDispatchPlan): Promise<IngressAcceptResult> {
-    const session = await getOrCreateSession(plan.agentName, plan.instanceKey);
+    const session = await getOrCreateSession(plan.agentName, plan.conversationId);
     return await session.ingressRegistry.runDispatch(
       {
         plan,
@@ -1374,7 +1353,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
           eventName: input.event.name,
           turnId: plan?.turnId,
           agentName: routeResolution?.agentName ?? plan?.agentName,
-          instanceKey: routeResolution?.instanceKey ?? plan?.instanceKey,
+          conversationId: routeResolution?.conversationId ?? plan?.conversationId,
         });
         throw error;
       }
@@ -1389,15 +1368,13 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   };
 
   return {
-    workdir,
-    stateRoot: paths.goondanHome,
     async processTurn(text: string): Promise<HarnessYamlRunnerTurnOutput> {
       if (!defaultAgent) {
         throw new Error("기본 Agent를 결정할 수 없습니다. processTurn을 사용하려면 --agent 또는 단일 Agent 리소스가 필요합니다.");
       }
 
-      const session = await getOrCreateSession(defaultAgent.metadata.name, defaultInstanceKey);
-      const inputEvent = createProcessTurnInputEvent(text, defaultInstanceKey);
+      const session = await getOrCreateSession(defaultAgent.metadata.name, defaultConversationId);
+      const inputEvent = createProcessTurnInputEvent(text, defaultConversationId);
       const turnId = createId("turn");
       const traceId = createId("trace");
       const runtime = createRuntimeContext({
@@ -1433,13 +1410,10 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
     entrypointFileName: options.entrypointFileName,
   });
   const agent = selectEntryAgent(harnessResources.resources, options.agentName);
-  const instanceKey = options.instanceKey ?? agent.metadata.name;
+  const conversationId = options.conversationId ?? agent.metadata.name;
 
   return {
-    agentName: agent.metadata.name,
-    instanceKey,
-    workdir: runtime.workdir,
-    stateRoot: runtime.stateRoot,
+    conversationId,
     processTurn: runtime.processTurn,
     ingress: runtime.ingress,
     close: runtime.close,

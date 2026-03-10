@@ -9,16 +9,16 @@
 
 ## 구조적 결정
 
-1. PipelineRegistryImpl이 모든 RuntimeEvent emit을 담당하며, 각 이벤트에 TraceContext(traceId/spanId/parentSpanId)와 instanceKey를 포함한다.
+1. PipelineRegistryImpl이 모든 RuntimeEvent emit을 담당하며, 각 이벤트에 TraceContext(traceId/spanId/parentSpanId)와 conversationId를 포함한다.
 이유: OTel 호환 span hierarchy 구성을 위해 모든 이벤트에 추적 정보가 필수.
 2. span hierarchy: Turn span -> Step span -> Tool Call span 순서로 parentSpanId를 연결한다.
 이유: 인과 체인 추적의 정확성을 보장하기 위해.
-3. ExecutionContext 인터페이스가 agentName, instanceKey, turnId, traceId를 공통으로 제공한다.
+3. ExecutionContext 인터페이스가 agentName, conversationId, turnId, traceId를 공통으로 제공한다.
 이유: 미들웨어가 추적 정보에 접근할 수 있어야 관측성이 보장됨.
 
 ## 불변 규칙
 
-- 모든 RuntimeEvent에 traceId, spanId, parentSpanId, agentName, instanceKey를 포함한다.
+- 모든 RuntimeEvent에 traceId, spanId, parentSpanId, agentName, conversationId를 포함한다.
 - turn.completed.stepCount는 실제 step 수를 반영한다 (0으로 고정하지 않음).
 - tokenUsage 메트릭이 있으면 step.completed/turn.completed에 포함한다.
 

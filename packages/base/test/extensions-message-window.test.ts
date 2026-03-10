@@ -14,7 +14,7 @@ function createTurnContext(events: MessageEvent[]): TurnMiddlewareContext {
 
   return {
     agentName: 'agent-a',
-    instanceKey: 'instance-1',
+    conversationId: 'instance-1',
     turnId: 'turn-1',
     traceId: 'trace-1',
     inputEvent: {
@@ -158,7 +158,7 @@ describe('message-window extension', () => {
     const emitted: MessageEvent[] = [];
     const ctx: TurnMiddlewareContext = {
       agentName: 'agent-a',
-      instanceKey: 'instance-1',
+      conversationId: 'instance-1',
       turnId: 'turn-1',
       traceId: 'trace-1',
       inputEvent: {
@@ -211,7 +211,7 @@ describe('message-window extension', () => {
     const emitted: MessageEvent[] = [];
     const ctx: TurnMiddlewareContext = {
       agentName: 'agent-a',
-      instanceKey: 'instance-1',
+      conversationId: 'instance-1',
       turnId: 'turn-1',
       traceId: 'trace-1',
       inputEvent: {
@@ -263,7 +263,7 @@ describe('message-window extension', () => {
     const emitted: MessageEvent[] = [];
     const ctx: TurnMiddlewareContext = {
       agentName: 'agent-a',
-      instanceKey: 'instance-1',
+      conversationId: 'instance-1',
       turnId: 'turn-1',
       traceId: 'trace-1',
       inputEvent: {

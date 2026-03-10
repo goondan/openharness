@@ -28,7 +28,7 @@ export interface RuntimeEventBase {
   /** 이벤트를 발행한 에이전트 이름. ingress 단계에서는 아직 없을 수 있다. */
   agentName?: string;
   /** 에이전트 인스턴스 키. ingress 단계에서는 아직 없을 수 있다. */
-  instanceKey?: string;
+  conversationId?: string;
   /** OTel 호환 추적 컨텍스트 */
   traceId: string;
   spanId: string;

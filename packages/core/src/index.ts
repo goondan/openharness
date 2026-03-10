@@ -22,7 +22,3 @@ export * from "./runner/harness-yaml/runner.js";
 export * from "./llm/model-step.js";
 
 export * from "./engine/run-turn.js";
-
-export * from "./workspace/paths.js";
-export * from "./workspace/storage.js";
-export * from "./workspace/instance-manager.js";
