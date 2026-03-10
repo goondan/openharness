@@ -6,6 +6,7 @@ export interface ExecutionContext {
   readonly conversationId: string;
   readonly turnId: string;
   readonly traceId: string;
+  readonly abortSignal: AbortSignal;
 }
 
 export interface LoggerLike {

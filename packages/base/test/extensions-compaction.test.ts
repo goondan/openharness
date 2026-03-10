@@ -21,6 +21,7 @@ function createTurnContext(events: MessageEvent[]): TurnMiddlewareContext {
     conversationId: 'instance-1',
     turnId: 'turn-1',
     traceId: 'trace-1',
+    abortSignal: new AbortController().signal,
     inputEvent: {
       id: 'evt-1',
       type: 'connector.message',
@@ -161,6 +162,7 @@ describe('compaction extension', () => {
       conversationId: 'instance-1',
       turnId: 'turn-1',
       traceId: 'trace-1',
+      abortSignal: new AbortController().signal,
       inputEvent: {
         id: 'evt-1',
         type: 'connector.message',

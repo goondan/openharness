@@ -16,6 +16,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { formatToolArgumentValidationIssues, validateToolArguments } from "../tools/executor.js";
 import { isJsonObject, type JsonObject, type JsonSchemaObject, type JsonValue, type ToolCatalogItem } from "../types.js";
 import type { ConversationTurn } from "../runner/conversation-state.js";
+import { throwIfAborted, toAbortError } from "../utils/abort.js";
 
 export interface ToolUseBlock {
   id: string;
@@ -546,16 +547,27 @@ export async function requestModelMessage(input: {
   maxTokens: number;
   toolCatalog: ToolCatalogItem[];
   turns: ConversationTurn[];
+  abortSignal: AbortSignal;
 }): Promise<ModelStepParseResult> {
+  throwIfAborted(input.abortSignal);
   const model = createLanguageModel(input.provider, input.model, input.apiKey);
-  const result = await generateText({
-    model,
-    messages: toModelMessages(input.turns),
-    tools: toRunnerToolSet(input.toolCatalog),
-    stopWhen: stepCountIs(1),
-    temperature: input.temperature,
-    maxOutputTokens: input.maxTokens,
-  });
+  let result;
+  try {
+    result = await generateText({
+      model,
+      messages: toModelMessages(input.turns),
+      tools: toRunnerToolSet(input.toolCatalog),
+      stopWhen: stepCountIs(1),
+      temperature: input.temperature,
+      maxOutputTokens: input.maxTokens,
+      abortSignal: input.abortSignal,
+    });
+  } catch (error) {
+    if (input.abortSignal.aborted) {
+      throw toAbortError(error, input.abortSignal.reason);
+    }
+    throw error;
+  }
 
   const toolUseBlocks: ToolUseBlock[] = [];
   const toolCallInputIssues: ToolCallInputIssue[] = [];
@@ -597,4 +609,3 @@ export async function requestModelMessage(input: {
     rawFinishReason: result.rawFinishReason,
   });
 }
-

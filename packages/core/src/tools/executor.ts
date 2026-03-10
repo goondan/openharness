@@ -9,6 +9,7 @@ import type {
   ToolCatalogItem,
 } from "../types.js";
 import type { ToolRegistry } from "./registry.js";
+import { isAbortLikeError, throwIfAborted, toAbortError } from "../utils/abort.js";
 
 export interface ToolExecutionRequest {
   toolCallId: string;
@@ -26,6 +27,8 @@ export class ToolExecutor {
   constructor(private readonly registry: ToolRegistry) {}
 
   async execute(request: ToolExecutionRequest): Promise<ToolCallResult> {
+    throwIfAborted(request.context.abortSignal);
+
     const catalogItem = findToolInCatalog(request.toolName, request.catalog);
 
     if (!request.allowRegistryBypass && !catalogItem) {
@@ -86,6 +89,9 @@ export class ToolExecutor {
         output,
       };
     } catch (error) {
+      if (isAbortLikeError(error) || request.context.abortSignal.aborted) {
+        throw toAbortError(error, request.context.abortSignal.reason);
+      }
       const limit = request.errorMessageLimit ?? DEFAULT_ERROR_MESSAGE_LIMIT;
       return {
         toolCallId: request.toolCallId,
@@ -363,6 +369,7 @@ export function createMinimalToolContext(input: {
   conversationId: string;
   turnId: string;
   traceId: string;
+  abortSignal: AbortSignal;
   toolCallId: string;
   message: Message;
   workdir: string;
@@ -373,6 +380,7 @@ export function createMinimalToolContext(input: {
     conversationId: input.conversationId,
     turnId: input.turnId,
     traceId: input.traceId,
+    abortSignal: input.abortSignal,
     toolCallId: input.toolCallId,
     message: input.message,
     workdir: input.workdir,

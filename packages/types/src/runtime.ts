@@ -197,6 +197,20 @@ export interface IngressAcceptResult {
   traceId: string;
 }
 
+export interface AbortConversationInput {
+  conversationId: string;
+  agentName?: string;
+  reason?: string;
+}
+
+export interface AbortConversationResult {
+  conversationId: string;
+  agentNames: string[];
+  matchedSessions: number;
+  abortedTurns: number;
+  reason?: string;
+}
+
 export interface IngressDispatchContext {
   plan: IngressDispatchPlan;
   metadata: Record<string, JsonValue>;

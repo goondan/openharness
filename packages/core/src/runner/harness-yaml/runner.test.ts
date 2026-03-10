@@ -541,4 +541,106 @@ describe("createRunnerFromHarnessYaml", () => {
       await runner.close();
     }
   });
+
+  it("control.abortConversation이 실행 중인 turn을 중단한다", async () => {
+    await writeText(
+      path.join(tempDir, "connector.js"),
+      [
+        "export default {",
+        "  async normalize() {",
+        "    return {",
+        "      name: 'slack.message',",
+        "      content: [{ type: 'text', text: 'hello' }],",
+        "      properties: {},",
+        "      source: { kind: 'connector', name: 'slack' },",
+        "    };",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    await writeText(
+      path.join(tempDir, "harness.yaml"),
+      createHarnessYaml({
+        connectorEntry: "connector.js",
+        connectionIngress: [
+          "- match:",
+          "    event: slack.message",
+          "  route:",
+          "    agentRef: Agent/assistant",
+          "    conversationId: assistant",
+        ],
+      }),
+    );
+
+    const started = createDeferred<void>();
+    runTurnMock.mockImplementation(async (input: { abortSignal: AbortSignal; turnId: string }) => {
+      started.resolve();
+
+      if (!input.abortSignal.aborted) {
+        await new Promise<void>((resolve) => {
+          input.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+
+      const message =
+        input.abortSignal.reason instanceof Error
+          ? input.abortSignal.reason.message
+          : typeof input.abortSignal.reason === "string"
+            ? input.abortSignal.reason
+            : "OpenHarness turn aborted";
+
+      return {
+        turnResult: {
+          turnId: input.turnId,
+          finishReason: "aborted",
+          error: {
+            code: "E_OPENHARNESS_ABORTED",
+            message,
+          },
+        },
+        finalResponseText: "",
+        stepCount: 0,
+      };
+    });
+
+    const runtime = await createHarnessRuntimeFromYaml({
+      workdir: tempDir,
+      stateRoot,
+      env: {
+        OPENAI_API_KEY: "test-key",
+      },
+    });
+
+    try {
+      const turnPromise = runtime.processTurn("중단 테스트");
+      await started.promise;
+
+      const abortResult = await runtime.control.abortConversation({
+        conversationId: "assistant",
+        reason: "stop requested",
+      });
+
+      expect(abortResult).toEqual({
+        conversationId: "assistant",
+        agentNames: ["assistant"],
+        matchedSessions: 1,
+        abortedTurns: 1,
+        reason: "stop requested",
+      });
+
+      await expect(turnPromise).resolves.toMatchObject({
+        turnResult: {
+          finishReason: "aborted",
+          error: {
+            code: "E_OPENHARNESS_ABORTED",
+            message: "stop requested",
+          },
+        },
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
 });

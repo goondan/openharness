@@ -38,6 +38,10 @@ function createRuntimeContext(agentName: string): RuntimeContext {
   };
 }
 
+function createAbortSignal(): AbortSignal {
+  return new AbortController().signal;
+}
+
 describe("Extension Integration", () => {
   let tempDir: string;
   let storage: FileWorkspaceStorage;
@@ -116,6 +120,7 @@ describe("Extension Integration", () => {
       export function register(api) {
         api.pipeline.register('turn', async (ctx) => {
           ctx.metadata.extensionRan = true;
+          ctx.metadata.abortSignalPresent = ctx.abortSignal instanceof AbortSignal;
           return ctx.next();
         });
       }
@@ -151,6 +156,7 @@ describe("Extension Integration", () => {
         conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
+        abortSignal: createAbortSignal(),
         inputEvent: {
           id: "evt-1",
           type: "user.input",
@@ -172,6 +178,7 @@ describe("Extension Integration", () => {
     );
 
     expect(metadata.extensionRan).toBe(true);
+    expect(metadata.abortSignalPresent).toBe(true);
   });
 
   it("should emit runtime events through pipeline", async () => {
@@ -193,6 +200,7 @@ describe("Extension Integration", () => {
         conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
+        abortSignal: createAbortSignal(),
         inputEvent: {
           id: "evt-1",
           type: "user.input",
@@ -267,6 +275,7 @@ describe("Extension Integration", () => {
         conversationId: "test-instance",
         turnId: "turn-1",
         traceId: "trace-1",
+        abortSignal: createAbortSignal(),
         inputEvent: {
           id: "evt-1",
           type: "user.input",
@@ -291,6 +300,7 @@ describe("Extension Integration", () => {
         conversationId: "test-instance",
         turnId: "turn-2",
         traceId: "trace-2",
+        abortSignal: createAbortSignal(),
         inputEvent: {
           id: "evt-2",
           type: "user.input",

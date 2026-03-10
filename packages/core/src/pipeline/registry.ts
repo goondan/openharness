@@ -296,6 +296,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
+      abortSignal: ctx.abortSignal,
       inputEvent: ctx.inputEvent,
       conversationState: ctx.conversationState,
       runtime: ctx.runtime,
@@ -382,6 +383,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
+      abortSignal: ctx.abortSignal,
       turn: ctx.turn,
       stepIndex: ctx.stepIndex,
       conversationState: ctx.conversationState,
@@ -508,6 +510,7 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       conversationId: ctx.conversationId,
       turnId: ctx.turnId,
       traceId: ctx.traceId,
+      abortSignal: ctx.abortSignal,
       stepIndex: ctx.stepIndex,
       toolName: ctx.toolName,
       toolCallId: ctx.toolCallId,
@@ -625,6 +628,9 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       get traceId() {
         return state.traceId;
       },
+      get abortSignal() {
+        return state.abortSignal;
+      },
       get inputEvent() {
         return state.inputEvent;
       },
@@ -660,6 +666,9 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       },
       get traceId() {
         return state.traceId;
+      },
+      get abortSignal() {
+        return state.abortSignal;
       },
       get turn() {
         return state.turn;
@@ -708,6 +717,9 @@ export class PipelineRegistryImpl implements PipelineRegistry {
       },
       get traceId() {
         return state.traceId;
+      },
+      get abortSignal() {
+        return state.abortSignal;
       },
       get stepIndex() {
         return state.stepIndex;

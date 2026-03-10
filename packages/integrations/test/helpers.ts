@@ -19,11 +19,13 @@ export async function createTempWorkspace(prefix = "openharness-integrations-"):
 }
 
 export function createToolContext(workdir: string): ToolContext {
+  const abortController = new AbortController();
   return {
     agentName: "agent-a",
     conversationId: "instance-1",
     turnId: "turn-1",
     traceId: "trace-1",
+    abortSignal: abortController.signal,
     toolCallId: "tool-call-1",
     workdir,
     logger: console,
@@ -41,4 +43,3 @@ export function createToolContext(workdir: string): ToolContext {
     },
   };
 }
-

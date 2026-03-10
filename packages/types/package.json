@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-types",
-  "version": "0.0.1-alpha1",
+  "version": "0.0.1-alpha2",
   "description": "Shared type contracts for OpenHarness runtimes and extensions",
   "type": "module",
   "main": "./dist/index.js",

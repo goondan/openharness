@@ -19,6 +19,7 @@ import { createMinimalToolContext, type ToolExecutor } from "../tools/executor.j
 import type { ToolRegistryImpl } from "../tools/registry.js";
 import { toConversationTurns } from "../runner/conversation-state.js";
 import { buildMalformedToolCallRetryMessage, classifyModelStepRetryKind, requestModelMessage } from "../llm/model-step.js";
+import { createAbortError, isAbortLikeError, throwIfAborted } from "../utils/abort.js";
 
 export interface StepLimitResponseInput {
   maxSteps: number;
@@ -58,6 +59,7 @@ export interface RunTurnInput {
 
   workdir: string;
   logger?: Console;
+  abortSignal: AbortSignal;
 
   stepLimitResponse?: (input: StepLimitResponseInput) => string;
   beforeEachStep?: () => void | Promise<void>;
@@ -205,204 +207,230 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
         input.conversationState.emitMessageEvent(ev);
       },
       metadata: {},
+      abortSignal: input.abortSignal,
     },
     async (): Promise<TurnResult> => {
-      while (true) {
-        if (input.beforeEachStep) {
-          await input.beforeEachStep();
-        }
+      try {
+        while (true) {
+          throwIfAborted(input.abortSignal);
 
-        if (step >= input.maxSteps) {
-          const responseText = stepLimit({ maxSteps: input.maxSteps, lastText });
-          finalResponseText = responseText;
-          return {
-            turnId: input.turnId,
-            finishReason: "max_steps",
-            responseMessage: createConversationAssistantMessage(responseText, `${input.turnId}-step-limit`),
-          };
-        }
+          if (input.beforeEachStep) {
+            await input.beforeEachStep();
+          }
 
-        step += 1;
-        const extensionCatalog = input.extensionToolRegistry ? input.extensionToolRegistry.getCatalog() : [];
-        const baseToolCatalog = mergeToolCatalog(input.baseToolCatalog, extensionCatalog);
+          if (step >= input.maxSteps) {
+            const responseText = stepLimit({ maxSteps: input.maxSteps, lastText });
+            finalResponseText = responseText;
+            return {
+              turnId: input.turnId,
+              finishReason: "max_steps",
+              responseMessage: createConversationAssistantMessage(responseText, `${input.turnId}-step-limit`),
+            };
+          }
 
-        const stepMetadata: Record<string, JsonValue> = {};
+          step += 1;
+          const extensionCatalog = input.extensionToolRegistry ? input.extensionToolRegistry.getCatalog() : [];
+          const baseToolCatalog = mergeToolCatalog(input.baseToolCatalog, extensionCatalog);
 
-        const stepResult = await input.pipelineRegistry.runStep(
-          {
-            agentName: input.agentName,
-            conversationId: input.conversationId,
-            turnId: input.turnId,
-            traceId: input.traceId,
-            turn: {
-              id: input.turnId,
+          const stepMetadata: Record<string, JsonValue> = {};
+
+          const stepResult = await input.pipelineRegistry.runStep(
+            {
               agentName: input.agentName,
-              inputEvent: input.inputEvent,
-              messages: input.conversationState.nextMessages,
-            steps: [],
-            status: "running",
-            metadata: {},
-          },
-          stepIndex: step,
-          conversationState: input.conversationState,
-          runtime: input.runtime,
-          emitMessageEvent(ev: MessageEvent): void {
-            input.conversationState.emitMessageEvent(ev);
+              conversationId: input.conversationId,
+              turnId: input.turnId,
+              traceId: input.traceId,
+              abortSignal: input.abortSignal,
+              turn: {
+                id: input.turnId,
+                agentName: input.agentName,
+                inputEvent: input.inputEvent,
+                messages: input.conversationState.nextMessages,
+                steps: [],
+                status: "running",
+                metadata: {},
+              },
+              stepIndex: step,
+              conversationState: input.conversationState,
+              runtime: input.runtime,
+              emitMessageEvent(ev: MessageEvent): void {
+                input.conversationState.emitMessageEvent(ev);
+              },
+              toolCatalog: baseToolCatalog,
+              metadata: stepMetadata,
             },
-            toolCatalog: baseToolCatalog,
-            metadata: stepMetadata,
-          },
-          async (stepCtx): Promise<StepResult> => {
-            const response = await requestModelMessage({
-              provider: input.model.provider,
-              apiKey: input.model.apiKey,
-              model: input.model.modelName,
-              temperature: input.model.temperature,
-              maxTokens: input.model.maxTokens,
-              toolCatalog: stepCtx.toolCatalog,
-              turns: toConversationTurns(input.conversationState.nextMessages),
-            });
-
-            if (response.assistantContent.length > 0) {
-              input.conversationState.emitMessageEvent({
-                type: "append",
-                message: createConversationAssistantMessage(response.assistantContent, `${input.turnId}-step-${step}`),
+            async (stepCtx): Promise<StepResult> => {
+              const response = await requestModelMessage({
+                provider: input.model.provider,
+                apiKey: input.model.apiKey,
+                model: input.model.modelName,
+                temperature: input.model.temperature,
+                maxTokens: input.model.maxTokens,
+                toolCatalog: stepCtx.toolCatalog,
+                turns: toConversationTurns(input.conversationState.nextMessages),
+                abortSignal: stepCtx.abortSignal,
               });
-            }
 
-            if (response.textBlocks.length > 0) {
-              lastText = response.textBlocks.join("\n").trim();
-            }
-
-            const retryKind = classifyModelStepRetryKind({
-              assistantContent: response.assistantContent,
-              textBlocks: response.textBlocks,
-              toolUseBlocks: response.toolUseBlocks,
-              toolCallInputIssues: response.toolCallInputIssues,
-              finishReason: response.finishReason,
-            });
-            if (retryKind !== undefined) {
-              if (retryKind === "malformed_tool_calls") {
+              if (response.assistantContent.length > 0) {
                 input.conversationState.emitMessageEvent({
                   type: "append",
-                  message: createConversationUserMessage(buildMalformedToolCallRetryMessage(response.toolCallInputIssues)),
-                });
-              } else {
-                input.conversationState.emitMessageEvent({
-                  type: "append",
-                  message: createConversationUserMessage(
-                    "직전 응답이 비어 있습니다. 다음 응답에서는 텍스트 또는 tool-call 중 최소 하나를 반드시 생성하세요.",
-                  ),
+                  message: createConversationAssistantMessage(response.assistantContent, `${input.turnId}-step-${step}`),
                 });
               }
-              return {
-                status: "completed",
-                shouldContinue: true,
-                toolCalls: [],
-                toolResults: [],
-                metadata: {},
-              };
-            }
 
-            if (response.toolUseBlocks.length === 0) {
-              return {
-                status: "completed",
-                shouldContinue: false,
-                toolCalls: [],
-                toolResults: [],
-                metadata: {},
-              };
-            }
+              if (response.textBlocks.length > 0) {
+                lastText = response.textBlocks.join("\n").trim();
+              }
 
-            const toolCalls: Array<{ id: string; name: string; args: JsonObject }> = [];
-            const toolResults: ToolCallResult[] = [];
-
-            for (const toolUse of response.toolUseBlocks) {
-              const toolArgs = cloneAsJsonObject(toolUse.input);
-              toolCalls.push({ id: toolUse.id, name: toolUse.name, args: toolArgs });
-
-              const toolResult = await input.pipelineRegistry.runToolCall(
-                {
-                  agentName: input.agentName,
-                  conversationId: input.conversationId,
-                  turnId: input.turnId,
-                  traceId: input.traceId,
-                  stepIndex: step,
-                  toolName: toolUse.name,
-                  toolCallId: toolUse.id,
-                  conversationState: input.conversationState,
-                  runtime: input.runtime,
-                  args: toolArgs,
+              const retryKind = classifyModelStepRetryKind({
+                assistantContent: response.assistantContent,
+                textBlocks: response.textBlocks,
+                toolUseBlocks: response.toolUseBlocks,
+                toolCallInputIssues: response.toolCallInputIssues,
+                finishReason: response.finishReason,
+              });
+              if (retryKind !== undefined) {
+                if (retryKind === "malformed_tool_calls") {
+                  input.conversationState.emitMessageEvent({
+                    type: "append",
+                    message: createConversationUserMessage(buildMalformedToolCallRetryMessage(response.toolCallInputIssues)),
+                  });
+                } else {
+                  input.conversationState.emitMessageEvent({
+                    type: "append",
+                    message: createConversationUserMessage(
+                      "직전 응답이 비어 있습니다. 다음 응답에서는 텍스트 또는 tool-call 중 최소 하나를 반드시 생성하세요.",
+                    ),
+                  });
+                }
+                return {
+                  status: "completed",
+                  shouldContinue: true,
+                  toolCalls: [],
+                  toolResults: [],
                   metadata: {},
-                },
-                async (toolCallCtx): Promise<ToolCallResult> => {
-                  const toolContext = createMinimalToolContext({
+                };
+              }
+
+              if (response.toolUseBlocks.length === 0) {
+                return {
+                  status: "completed",
+                  shouldContinue: false,
+                  toolCalls: [],
+                  toolResults: [],
+                  metadata: {},
+                };
+              }
+
+              const toolCalls: Array<{ id: string; name: string; args: JsonObject }> = [];
+              const toolResults: ToolCallResult[] = [];
+
+              for (const toolUse of response.toolUseBlocks) {
+                const toolArgs = cloneAsJsonObject(toolUse.input);
+                toolCalls.push({ id: toolUse.id, name: toolUse.name, args: toolArgs });
+
+                const toolResult = await input.pipelineRegistry.runToolCall(
+                  {
                     agentName: input.agentName,
                     conversationId: input.conversationId,
                     turnId: input.turnId,
                     traceId: input.traceId,
-                    toolCallId: toolCallCtx.toolCallId,
-                    message: createToolContextMessage(userInputText),
-                    workdir: input.workdir,
-                    logger,
-                  });
+                    abortSignal: input.abortSignal,
+                    stepIndex: step,
+                    toolName: toolUse.name,
+                    toolCallId: toolUse.id,
+                    conversationState: input.conversationState,
+                    runtime: input.runtime,
+                    args: toolArgs,
+                    metadata: {},
+                  },
+                  async (toolCallCtx): Promise<ToolCallResult> => {
+                    const toolContext = createMinimalToolContext({
+                      agentName: input.agentName,
+                      conversationId: input.conversationId,
+                      turnId: input.turnId,
+                      traceId: input.traceId,
+                      abortSignal: toolCallCtx.abortSignal,
+                      toolCallId: toolCallCtx.toolCallId,
+                      message: createToolContextMessage(userInputText),
+                      workdir: input.workdir,
+                      logger,
+                    });
 
-                  const executor =
-                    input.extensionToolRegistry?.has(toolCallCtx.toolName) === true && input.extensionToolExecutor
-                      ? input.extensionToolExecutor
-                      : input.toolExecutor;
+                    const executor =
+                      input.extensionToolRegistry?.has(toolCallCtx.toolName) === true && input.extensionToolExecutor
+                        ? input.extensionToolExecutor
+                        : input.toolExecutor;
 
-                  return executor.execute({
-                    toolCallId: toolCallCtx.toolCallId,
-                    toolName: toolCallCtx.toolName,
-                    args: toolCallCtx.args,
-                    catalog: stepCtx.toolCatalog,
-                    context: toolContext,
-                  });
-                },
-              );
+                    return executor.execute({
+                      toolCallId: toolCallCtx.toolCallId,
+                      toolName: toolCallCtx.toolName,
+                      args: toolCallCtx.args,
+                      catalog: stepCtx.toolCatalog,
+                      context: toolContext,
+                    });
+                  },
+                );
 
-              toolResults.push(toolResult);
-            }
+                toolResults.push(toolResult);
+              }
 
-            const toolResultBlocks: unknown[] = toolResults.map((tr, idx) => ({
-              type: "tool-result",
-              toolCallId: toolCalls[idx]?.id,
-              toolName: toolCalls[idx]?.name,
-              output:
-                tr.status === "ok"
-                  ? {
-                      type: "text",
-                      value: typeof tr.output === "string" ? tr.output : JSON.stringify(tr.output),
-                    }
-                  : { type: "text", value: tr.error?.message ?? "error" },
-            }));
+              const toolResultBlocks: unknown[] = toolResults.map((tr, idx) => ({
+                type: "tool-result",
+                toolCallId: toolCalls[idx]?.id,
+                toolName: toolCalls[idx]?.name,
+                output:
+                  tr.status === "ok"
+                    ? {
+                        type: "text",
+                        value: typeof tr.output === "string" ? tr.output : JSON.stringify(tr.output),
+                      }
+                    : { type: "text", value: tr.error?.message ?? "error" },
+              }));
 
-            input.conversationState.emitMessageEvent({
-              type: "append",
-              message: createConversationUserMessage(toolResultBlocks),
-            });
+              input.conversationState.emitMessageEvent({
+                type: "append",
+                message: createConversationUserMessage(toolResultBlocks),
+              });
 
-            return {
-              status: "completed",
-              shouldContinue: true,
-              toolCalls,
-              toolResults,
-              metadata: {},
-            };
-          },
-        );
+              throwIfAborted(stepCtx.abortSignal);
 
-        if (stepResult.shouldContinue) {
-          continue;
+              return {
+                status: "completed",
+                shouldContinue: true,
+                toolCalls,
+                toolResults,
+                metadata: {},
+              };
+            },
+          );
+
+          if (stepResult.shouldContinue) {
+            continue;
+          }
+
+          const responseText = deriveFinalResponseText(input.conversationState, stepResult, lastText);
+          finalResponseText = responseText;
+          return {
+            turnId: input.turnId,
+            finishReason: "text_response",
+            responseMessage: createConversationAssistantMessage(responseText, `${input.turnId}-final`),
+          };
+        }
+      } catch (error) {
+        if (!isAbortLikeError(error) && !input.abortSignal.aborted) {
+          throw error;
         }
 
-        const responseText = deriveFinalResponseText(input.conversationState, stepResult, lastText);
-        finalResponseText = responseText;
+        const abortError = createAbortError(input.abortSignal.reason ?? error);
+        finalResponseText = "";
         return {
           turnId: input.turnId,
-          finishReason: "text_response",
-          responseMessage: createConversationAssistantMessage(responseText, `${input.turnId}-final`),
+          finishReason: "aborted",
+          error: {
+            code: abortError.code,
+            message: abortError.message,
+          },
         };
       }
     },

@@ -34,6 +34,8 @@ import { runTurn, type RunTurnModelConfig } from "../../engine/run-turn.js";
 
 import type {
   AgentEvent,
+  AbortConversationInput,
+  AbortConversationResult,
   IngressAcceptResult,
   IngressDispatchPlan,
   IngressRouteResolution,
@@ -47,6 +49,7 @@ import type {
   TurnResult,
 } from "../../types.js";
 import { ConversationStateImpl } from "../../conversation/state.js";
+import { createAbortError, isAbortLikeError } from "../../utils/abort.js";
 
 import { loadHarnessYamlResources } from "./loader.js";
 import {
@@ -107,6 +110,9 @@ export interface HarnessYamlIngressApi {
 export interface HarnessYamlRuntime {
   processTurn(text: string): Promise<HarnessYamlRunnerTurnOutput>;
   readonly ingress: HarnessYamlIngressApi;
+  readonly control: {
+    abortConversation(input: AbortConversationInput): Promise<AbortConversationResult>;
+  };
   close(): Promise<void>;
 }
 
@@ -137,6 +143,12 @@ interface AgentSession {
   readonly extensionToolExecutor: ToolExecutor;
   readonly extensionState: ExtensionStateManagerImpl;
   queue: Promise<void>;
+  activeTurn:
+    | {
+        turnId: string;
+        abortController: AbortController;
+      }
+    | null;
 }
 
 class ManifestAwareToolExecutor extends ToolExecutor {
@@ -878,6 +890,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       extensionToolExecutor,
       extensionState,
       queue: Promise.resolve(),
+      activeTurn: null,
     };
 
     if (!hasContextMessage) {
@@ -919,6 +932,11 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
 
   async function executeTurn(session: AgentSession, inputEvent: AgentEvent, runtime: RuntimeContext, turnId: string, traceId: string): Promise<HarnessYamlRunnerTurnOutput> {
     const startedEventIndex = session.conversationState.events.length;
+    const abortController = new AbortController();
+    session.activeTurn = {
+      turnId,
+      abortController,
+    };
     await storage.updateMetadataStatus(session.conversationId, "processing");
 
     try {
@@ -939,6 +957,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
         toolExecutor: session.toolExecutor,
         workdir,
         logger,
+        abortSignal: abortController.signal,
       });
 
       return {
@@ -947,6 +966,9 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
         stepCount: output.stepCount,
       };
     } finally {
+      if (session.activeTurn?.turnId === turnId) {
+        session.activeTurn = null;
+      }
       await persistSessionMessageEvents(session, startedEventIndex);
       await session.extensionState.saveAll();
       await storage.updateMetadataStatus(session.conversationId, "idle");
@@ -1124,6 +1146,9 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     );
 
     queuedTurn.catch(async (error) => {
+      if (isAbortLikeError(error)) {
+        return;
+      }
       await emitIngressRejected({
         connectionName: plan.connectionName,
         connectorName: plan.connectorName,
@@ -1367,6 +1392,41 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     },
   };
 
+  const control = {
+    async abortConversation(input: AbortConversationInput): Promise<AbortConversationResult> {
+      const settled = await Promise.allSettled([...sessionCache.values()].map(async (sessionPromise) => await sessionPromise));
+      const sessions = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      const matchedSessions = sessions.filter((session) => {
+        if (session.conversationId !== input.conversationId) {
+          return false;
+        }
+        if (typeof input.agentName === "string" && input.agentName.length > 0) {
+          return session.agent.metadata.name === input.agentName;
+        }
+        return true;
+      });
+
+      let abortedTurns = 0;
+      for (const session of matchedSessions) {
+        const activeTurn = session.activeTurn;
+        if (!activeTurn || activeTurn.abortController.signal.aborted) {
+          continue;
+        }
+
+        activeTurn.abortController.abort(createAbortError(input.reason));
+        abortedTurns += 1;
+      }
+
+      return {
+        conversationId: input.conversationId,
+        agentNames: [...new Set(matchedSessions.map((session) => session.agent.metadata.name))],
+        matchedSessions: matchedSessions.length,
+        abortedTurns,
+        reason: input.reason,
+      };
+    },
+  };
+
   return {
     async processTurn(text: string): Promise<HarnessYamlRunnerTurnOutput> {
       if (!defaultAgent) {
@@ -1387,13 +1447,26 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
         connectionName: "cli",
       });
 
-      return await queueSessionTurn(session, async () => executeTurn(session, inputEvent, runtime, turnId, traceId));
+      return await trackPendingTurn(
+        queueSessionTurn(session, async () => executeTurn(session, inputEvent, runtime, turnId, traceId)),
+      );
     },
     ingress,
+    control,
     async close(): Promise<void> {
+      const settledSessions = await Promise.allSettled([...sessionCache.values()]);
+      for (const settled of settledSessions) {
+        if (settled.status !== "fulfilled") {
+          continue;
+        }
+        const activeTurn = settled.value.activeTurn;
+        if (activeTurn && !activeTurn.abortController.signal.aborted) {
+          activeTurn.abortController.abort(createAbortError("Harness runtime closed"));
+        }
+      }
+
       await Promise.allSettled([...pendingTurns]);
-      const sessions = await Promise.allSettled([...sessionCache.values()]);
-      for (const settled of sessions) {
+      for (const settled of settledSessions) {
         if (settled.status === "fulfilled") {
           await settled.value.extensionState.saveAll();
         }
@@ -1416,6 +1489,7 @@ export async function createRunnerFromHarnessYaml(options: CreateRunnerFromHarne
     conversationId,
     processTurn: runtime.processTurn,
     ingress: runtime.ingress,
+    control: runtime.control,
     close: runtime.close,
   };
 }

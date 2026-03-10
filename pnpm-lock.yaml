@@ -21,13 +21,13 @@ importers:
   packages/base:
     dependencies:
       '@goondan/openharness-types':
-        specifier: ^0.0.1-alpha1
+        specifier: ^0.0.1-alpha2
         version: link:../types
 
   packages/cli:
     dependencies:
       '@goondan/openharness':
-        specifier: ^0.0.1-alpha1
+        specifier: ^0.0.1-alpha2
         version: link:../core
 
   packages/core:
@@ -42,7 +42,7 @@ importers:
         specifier: ^3.0.29
         version: 3.0.37(zod@4.3.6)
       '@goondan/openharness-types':
-        specifier: ^0.0.1-alpha1
+        specifier: ^0.0.1-alpha2
         version: link:../types
       ai:
         specifier: ^6.0.86
@@ -57,7 +57,7 @@ importers:
   packages/integrations:
     dependencies:
       '@goondan/openharness-types':
-        specifier: ^0.0.1-alpha1
+        specifier: ^0.0.1-alpha2
         version: link:../types
 
   packages/types: {}

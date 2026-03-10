@@ -47,6 +47,7 @@ function createTurnContext(input: {
     conversationId: 'instance-1',
     turnId,
     traceId: `trace-${turnId}`,
+    abortSignal: new AbortController().signal,
     inputEvent: input.inputEvent ?? createInputEvent(turnId),
     conversationState: createConversationState(messages),
     runtime: input.runtime ?? {

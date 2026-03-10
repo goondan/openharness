@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-integrations",
-  "version": "0.0.1-alpha1",
+  "version": "0.0.1-alpha2",
   "description": "Optional integration tools (e.g. Slack, Telegram) for OpenHarness",
   "type": "module",
   "main": "./dist/index.js",
@@ -41,6 +41,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness-types": "^0.0.1-alpha1"
+    "@goondan/openharness-types": "^0.0.1-alpha2"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-base",
-  "version": "0.0.1-alpha1",
+  "version": "0.0.1-alpha2",
   "description": "Barebone harness with reference tools and extensions",
   "type": "module",
   "main": "./dist/index.js",
@@ -40,6 +40,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness-types": "^0.0.1-alpha1"
+    "@goondan/openharness-types": "^0.0.1-alpha2"
   }
 }
