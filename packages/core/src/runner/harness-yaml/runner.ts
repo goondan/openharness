@@ -14,7 +14,6 @@ import {
   type ConnectorAdapter,
   type ConnectorSpec,
   type InboundEnvelope,
-  type RefOrSelector,
   type ToolSpec,
   type ValueSource,
 } from "@goondan/openharness-types";
@@ -40,8 +39,6 @@ import type {
   IngressDispatchPlan,
   IngressRouteResolution,
   InboundContentPart,
-  JsonValue,
-  Message,
   RuntimeContext,
   RuntimeResource,
   ToolCatalogItem,
@@ -222,55 +219,6 @@ function deriveInputAliasFromContent(parts: InboundContentPart[]): string | unde
   return texts.join("\n\n");
 }
 
-function renderInboundContent(parts: InboundContentPart[]): string {
-  const textBlocks: string[] = [];
-  const attachmentBlocks: string[] = [];
-
-  for (const part of parts) {
-    if (part.type === "text") {
-      const trimmed = part.text.trim();
-      if (trimmed.length > 0) {
-        textBlocks.push(trimmed);
-      }
-      continue;
-    }
-
-    if (part.type === "image") {
-      const label = typeof part.alt === "string" && part.alt.trim().length > 0 ? ` ${part.alt.trim()}` : "";
-      attachmentBlocks.push(`[image]${label} ${part.url}`.trim());
-      continue;
-    }
-
-    const mimeLabel = typeof part.mimeType === "string" && part.mimeType.trim().length > 0 ? ` (${part.mimeType.trim()})` : "";
-    attachmentBlocks.push(`[file] ${part.name}${mimeLabel}: ${part.url}`);
-  }
-
-  return [...textBlocks, ...attachmentBlocks].join("\n\n").trim();
-}
-
-function createSystemMessage(text: string): Message {
-  return {
-    id: createId("msg"),
-    data: { role: "system", content: text },
-    metadata: {
-      pinned: true,
-      "__openharness.runner.system": true,
-    },
-    createdAt: new Date(),
-    source: { type: "system" },
-  };
-}
-
-function createUserMessage(text: string, metadata: Record<string, JsonValue> = {}): Message {
-  return {
-    id: createId("msg"),
-    data: { role: "user", content: text },
-    metadata,
-    createdAt: new Date(),
-    source: { type: "user" },
-  };
-}
-
 function isToolHandler(value: unknown): value is ToolHandler {
   return typeof value === "function";
 }
@@ -302,33 +250,13 @@ function deriveWorkspaceName(workdir: string): string {
   return `${base}-${hash}`;
 }
 
-function buildDefaultToolRefs(): RefOrSelector[] {
-  return [
-    {
-      selector: {
-        kind: "Tool",
-        matchLabels: {
-          tier: "base",
-        },
-      },
-    },
-  ];
-}
-
-function buildDefaultExtensionRefs(resources: RuntimeResource[]): RefOrSelector[] {
-  const hasContextMessage = resources.some((res) => res.kind === "Extension" && res.metadata.name === "context-message");
-  return hasContextMessage ? ["Extension/context-message"] : [];
-}
-
 function selectTools(agent: AgentRuntimeResource, resources: RuntimeResource[]): ToolRuntimeResource[] {
-  const toolsSpecified = hasOwnProperty(agent.spec, "tools");
-  const refs = toolsSpecified ? (agent.spec.tools ?? []) : buildDefaultToolRefs();
+  const refs = hasOwnProperty(agent.spec, "tools") ? (agent.spec.tools ?? []) : [];
   return resolveRefOrSelectorList(resources, refs, "Tool") as ToolRuntimeResource[];
 }
 
 function selectExtensions(agent: AgentRuntimeResource, resources: RuntimeResource[]): ExtensionRuntimeResource[] {
-  const extensionsSpecified = hasOwnProperty(agent.spec, "extensions");
-  const refs = extensionsSpecified ? (agent.spec.extensions ?? []) : buildDefaultExtensionRefs(resources);
+  const refs = hasOwnProperty(agent.spec, "extensions") ? (agent.spec.extensions ?? []) : [];
   return resolveRefOrSelectorList(resources, refs, "Extension") as ExtensionRuntimeResource[];
 }
 
@@ -714,72 +642,6 @@ function resolveConversationId(
   throw new Error("conversationId를 결정할 수 없습니다. route.conversationId / route.conversationIdProperty / event.conversationId 중 하나가 필요합니다.");
 }
 
-function createFallbackInboundMetadata(inputEvent: AgentEvent, runtime: RuntimeContext): Record<string, JsonValue> {
-  const payload: Record<string, JsonValue> = {
-    sourceKind: runtime.inbound.kind,
-    sourceName: runtime.inbound.sourceName,
-    eventName: runtime.inbound.eventType,
-  };
-
-  if (typeof runtime.inbound.connectionName === "string" && runtime.inbound.connectionName.length > 0) {
-    payload.connectionName = runtime.inbound.connectionName;
-  }
-
-  if (typeof runtime.inbound.conversationId === "string" && runtime.inbound.conversationId.length > 0) {
-    payload.conversationId = runtime.inbound.conversationId;
-  }
-
-  if (runtime.inbound.kind === "connector") {
-    if (Object.keys(runtime.inbound.properties).length > 0) {
-      payload.properties = runtime.inbound.properties as unknown as JsonValue;
-    }
-    if (inputEvent.rawPayload !== undefined) {
-      payload.rawPayload = inputEvent.rawPayload;
-    }
-  }
-
-  return {
-    "__openharness.runner.inbound": payload,
-  };
-}
-
-function installFallbackTurnMiddleware(session: AgentSession): void {
-  session.pipelineRegistry.register("turn", async (ctx) => {
-    const runtimeSystemPrompt =
-      typeof ctx.runtime.agent.prompt?.system === "string" ? ctx.runtime.agent.prompt.system : "";
-    const effectiveSystemPrompt = runtimeSystemPrompt.trim().length > 0 ? runtimeSystemPrompt : session.systemPrompt;
-
-    if (effectiveSystemPrompt.trim().length > 0) {
-      const nextMessages = ctx.conversationState.nextMessages;
-      const nonSystemMessages = nextMessages.filter((message) => message.data.role !== "system");
-      const firstMessage = nextMessages[0];
-      const hasTrailingSystemMessage = nextMessages.slice(1).some((message) => message.data.role === "system");
-      const shouldNormalizeSystem =
-        nextMessages.length !== nonSystemMessages.length + 1 ||
-        firstMessage?.data.role !== "system" ||
-        typeof firstMessage.data.content !== "string" ||
-        firstMessage.data.content !== effectiveSystemPrompt ||
-        hasTrailingSystemMessage ||
-        firstMessage.metadata["__openharness.runner.system"] !== true;
-
-      if (shouldNormalizeSystem) {
-        session.conversationState.replaceBase([createSystemMessage(effectiveSystemPrompt), ...nonSystemMessages]);
-      }
-    }
-
-    const content = normalizeInboundContent(ctx.inputEvent.content, ctx.inputEvent.input);
-    const inboundText = renderInboundContent(content);
-    if (inboundText.length > 0) {
-      ctx.emitMessageEvent({
-        type: "append",
-        message: createUserMessage(inboundText, createFallbackInboundMetadata(ctx.inputEvent, ctx.runtime)),
-      });
-    }
-
-    return ctx.next();
-  });
-}
-
 export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntimeFromYamlOptions): Promise<HarnessYamlRuntime> {
   const logger = options.logger ?? new Console({ stdout: process.stdout, stderr: process.stderr });
   const workdir = path.resolve(options.workdir);
@@ -841,7 +703,6 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     const extensionToolExecutor = new ToolExecutor(extensionToolRegistry);
 
     const extensionResources = selectExtensions(agent, harnessResources.resources);
-    const hasContextMessage = extensionResources.some((ext) => ext.metadata.name === "context-message");
 
     const extensionNames = extensionResources.map((ext) => ext.metadata.name);
     const extensionState = new ExtensionStateManagerImpl(storage, conversationId, extensionNames);
@@ -892,10 +753,6 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       queue: Promise.resolve(),
       activeTurn: null,
     };
-
-    if (!hasContextMessage) {
-      installFallbackTurnMiddleware(session);
-    }
 
     return session;
   }

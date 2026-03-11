@@ -72,11 +72,24 @@ async function waitForAssertion(assertion: () => void | Promise<void>, timeoutMs
 
 function createHarnessYaml(input: {
   agentExtensions?: string[];
+  agentTools?: string[];
+  availableExtensions?: string[];
+  availableTools?: Array<{
+    name: string;
+    entry: string;
+    exportName?: string;
+    labels?: Record<string, string>;
+  }>;
   connectionExtensions?: string[];
+  includeEmptyAgentExtensions?: boolean;
+  includeEmptyAgentTools?: boolean;
   connectorEntry: string;
   connectionIngress: string[];
+  promptSystem?: string;
 }): string {
-  const extensionNames = [...new Set([...(input.agentExtensions ?? []), ...(input.connectionExtensions ?? [])])];
+  const extensionNames = [
+    ...new Set([...(input.availableExtensions ?? []), ...(input.agentExtensions ?? []), ...(input.connectionExtensions ?? [])]),
+  ];
   const extensionDocs = extensionNames
     .map((name) =>
       [
@@ -90,14 +103,48 @@ function createHarnessYaml(input: {
       ].join("\n"),
     )
     .join("\n");
+  const toolDocs = (input.availableTools ?? [])
+    .map((tool) => {
+      const labelLines = Object.entries(tool.labels ?? {}).map(([key, value]) => `    ${key}: ${value}`);
+      return [
+        "---",
+        "apiVersion: goondan.ai/v1",
+        "kind: Tool",
+        "metadata:",
+        `  name: ${tool.name}`,
+        ...(labelLines.length > 0 ? ["  labels:", ...labelLines] : []),
+        "spec:",
+        `  entry: ./${tool.entry}`,
+        "  exports:",
+        `    - name: ${tool.exportName ?? "run"}`,
+        "      description: test tool",
+        "      parameters:",
+        "        type: object",
+        "        properties: {}",
+        "        additionalProperties: false",
+      ].join("\n");
+    })
+    .join("\n");
 
   const agentExtensionBlock =
-    input.agentExtensions && input.agentExtensions.length > 0
+    input.includeEmptyAgentExtensions
+      ? "  extensions: []"
+      : input.agentExtensions && input.agentExtensions.length > 0
       ? ["  extensions:", ...input.agentExtensions.map((name) => `    - Extension/${name}`)].join("\n")
       : "";
+  const agentToolBlock =
+    input.includeEmptyAgentTools
+      ? "  tools: []"
+      : input.agentTools && input.agentTools.length > 0
+        ? ["  tools:", ...input.agentTools.map((name) => `    - Tool/${name}`)].join("\n")
+        : "";
   const connectionExtensionBlock =
     input.connectionExtensions && input.connectionExtensions.length > 0
       ? ["  extensions:", ...input.connectionExtensions.map((name) => `    - Extension/${name}`)].join("\n")
+      : "";
+  const promptBlock =
+    typeof input.promptSystem === "string" && input.promptSystem.length > 0
+      ? ["  prompt:", `    system: ${JSON.stringify(input.promptSystem)}`].join("\n")
       : "";
 
   return [
@@ -119,7 +166,10 @@ function createHarnessYaml(input: {
     "spec:",
     "  modelConfig:",
     "    modelRef: Model/test-model",
+    agentToolBlock,
     agentExtensionBlock,
+    promptBlock,
+    toolDocs,
     "---",
     "apiVersion: goondan.ai/v1",
     "kind: Connector",
@@ -478,6 +528,252 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
         expect(rejected).toHaveLength(1);
         expect(rejected[0]?.eventName).toBe("slack.message");
       });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("agent tools/extensions를 생략하면 로드된 리소스를 자동 활성화하지 않는다", async () => {
+    await writeText(
+      path.join(tempDir, "connector.js"),
+      [
+        "export default {",
+        "  async normalize() {",
+        "    return {",
+        "      name: 'slack.message',",
+        "      content: [{ type: 'text', text: 'hello' }],",
+        "      properties: {},",
+        "      source: { kind: 'connector', name: 'slack' },",
+        "    };",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "implicit-extension.js"),
+      [
+        "export async function register(api) {",
+        "  api.pipeline.register('turn', async (ctx) => {",
+        "    ctx.metadata.autoLoaded = true;",
+        "    return ctx.next();",
+        "  });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "implicit-tool.js"),
+      [
+        "export async function run() {",
+        "  return 'implicit';",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "harness.yaml"),
+      createHarnessYaml({
+        availableExtensions: ["implicit-extension"],
+        availableTools: [
+          {
+            name: "implicit-tool",
+            entry: "implicit-tool.js",
+            labels: { tier: "base" },
+          },
+        ],
+        connectorEntry: "connector.js",
+        connectionIngress: [
+          "- match:",
+          "    event: slack.message",
+          "  route:",
+          "    agentRef: Agent/assistant",
+          "    conversationId: assistant",
+        ],
+        promptSystem: "system prompt",
+      }),
+    );
+
+    let observed: {
+      metadata: Record<string, unknown>;
+      messages: unknown[];
+      promptSystem?: string;
+    } | null = null;
+
+    runTurnMock.mockImplementation(async (input: Record<string, any>) => {
+      const turnResult = await input.pipelineRegistry.runTurn(
+        {
+          agentName: input.agentName,
+          conversationId: input.conversationId,
+          turnId: input.turnId,
+          traceId: input.traceId,
+          inputEvent: input.inputEvent,
+          conversationState: input.conversationState,
+          runtime: input.runtime,
+          emitMessageEvent(event: Record<string, unknown>) {
+            input.conversationState.emitMessageEvent(event);
+          },
+          metadata: {},
+          abortSignal: input.abortSignal,
+        },
+        async (ctx: Record<string, any>) => {
+          observed = {
+            metadata: { ...ctx.metadata },
+            messages: [...input.conversationState.nextMessages],
+            promptSystem: ctx.runtime.agent.prompt?.system,
+          };
+          return {
+            turnId: input.turnId,
+            finishReason: "text_response",
+          };
+        },
+      );
+
+      return {
+        turnResult,
+        finalResponseText: "",
+        stepCount: 0,
+      };
+    });
+
+    const runtime = await createHarnessRuntimeFromYaml({
+      workdir: tempDir,
+      stateRoot,
+      env: {
+        OPENAI_API_KEY: "test-key",
+      },
+    });
+
+    try {
+      await runtime.processTurn("명시적 선택만 사용");
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      const runTurnInput = runTurnMock.mock.calls[0]?.[0] as Record<string, any>;
+      expect(runTurnInput.baseToolCatalog).toEqual([]);
+      expect(runTurnInput.extensionToolRegistry.getCatalog()).toEqual([]);
+      expect(observed).toEqual({
+        metadata: {},
+        messages: [],
+        promptSystem: "system prompt",
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("agent tools/extensions가 빈 배열이면 자동 기본값을 주입하지 않는다", async () => {
+    await writeText(
+      path.join(tempDir, "connector.js"),
+      [
+        "export default {",
+        "  async normalize() {",
+        "    return {",
+        "      name: 'slack.message',",
+        "      content: [{ type: 'text', text: 'hello' }],",
+        "      properties: {},",
+        "      source: { kind: 'connector', name: 'slack' },",
+        "    };",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "implicit-extension.js"),
+      [
+        "export async function register(api) {",
+        "  api.pipeline.register('turn', async (ctx) => {",
+        "    ctx.metadata.autoLoaded = true;",
+        "    return ctx.next();",
+        "  });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "implicit-tool.js"),
+      [
+        "export async function run() {",
+        "  return 'implicit';",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeText(
+      path.join(tempDir, "harness.yaml"),
+      createHarnessYaml({
+        availableExtensions: ["implicit-extension"],
+        availableTools: [
+          {
+            name: "implicit-tool",
+            entry: "implicit-tool.js",
+            labels: { tier: "base" },
+          },
+        ],
+        includeEmptyAgentExtensions: true,
+        includeEmptyAgentTools: true,
+        connectorEntry: "connector.js",
+        connectionIngress: [
+          "- match:",
+          "    event: slack.message",
+          "  route:",
+          "    agentRef: Agent/assistant",
+          "    conversationId: assistant",
+        ],
+        promptSystem: "system prompt",
+      }),
+    );
+
+    let observedMetadata: Record<string, unknown> | null = null;
+
+    runTurnMock.mockImplementation(async (input: Record<string, any>) => {
+      const turnResult = await input.pipelineRegistry.runTurn(
+        {
+          agentName: input.agentName,
+          conversationId: input.conversationId,
+          turnId: input.turnId,
+          traceId: input.traceId,
+          inputEvent: input.inputEvent,
+          conversationState: input.conversationState,
+          runtime: input.runtime,
+          emitMessageEvent(event: Record<string, unknown>) {
+            input.conversationState.emitMessageEvent(event);
+          },
+          metadata: {},
+          abortSignal: input.abortSignal,
+        },
+        async (ctx: Record<string, any>) => {
+          observedMetadata = { ...ctx.metadata };
+          return {
+            turnId: input.turnId,
+            finishReason: "text_response",
+          };
+        },
+      );
+
+      return {
+        turnResult,
+        finalResponseText: "",
+        stepCount: 0,
+      };
+    });
+
+    const runtime = await createHarnessRuntimeFromYaml({
+      workdir: tempDir,
+      stateRoot,
+      env: {
+        OPENAI_API_KEY: "test-key",
+      },
+    });
+
+    try {
+      await runtime.processTurn("빈 배열도 자동 주입 금지");
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      const runTurnInput = runTurnMock.mock.calls[0]?.[0] as Record<string, any>;
+      expect(runTurnInput.baseToolCatalog).toEqual([]);
+      expect(runTurnInput.extensionToolRegistry.getCatalog()).toEqual([]);
+      expect(observedMetadata).toEqual({});
     } finally {
       await runtime.close();
     }
