@@ -5,7 +5,7 @@ metadata:
 spec:
   dependencies:
     - name: "@goondan/openharness-base"
-      version: "0.0.1-alpha2"
+      version: "0.0.1-alpha3"
 ---
 apiVersion: goondan.ai/v1
 kind: Model

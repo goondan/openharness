@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-cli",
-  "version": "0.0.1-alpha2",
+  "version": "0.0.1-alpha3",
   "description": "CLI for running and debugging OpenHarness agents locally",
   "type": "module",
   "main": "./dist/index.js",
@@ -46,6 +46,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness": "^0.0.1-alpha2"
+    "@goondan/openharness": "^0.0.1-alpha3"
   }
 }

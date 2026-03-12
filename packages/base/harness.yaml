@@ -5,4 +5,4 @@ kind: Package
 metadata:
   name: "@goondan/openharness-base"
 spec:
-  version: "0.0.1-alpha2"
+  version: "0.0.1-alpha3"
