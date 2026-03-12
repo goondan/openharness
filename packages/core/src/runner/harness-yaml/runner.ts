@@ -10,6 +10,7 @@ import {
   parseObjectRef,
   resolveValueSource,
   type AgentSpec,
+  type ConversationStore,
   type ConnectionSpec,
   type ConnectorAdapter,
   type ConnectorSpec,
@@ -17,10 +18,11 @@ import {
   type RefOrSelector,
   type ToolSpec,
   type ValueSource,
+  type WorkspacePersistence,
 } from "@goondan/openharness-types";
 
-import { WorkspacePaths } from "../../workspace/paths.js";
-import { FileWorkspaceStorage } from "../../workspace/storage.js";
+import { normalizeWorkspaceId } from "../../workspace/paths.js";
+import { FileWorkspacePersistence } from "../../workspace/persistence.js";
 import { PipelineRegistryImpl } from "../../pipeline/registry.js";
 import { RUNTIME_EVENT_TYPES, RuntimeEventBusImpl } from "../../events/runtime-events.js";
 import { IngressRegistryImpl } from "../../ingress/registry.js";
@@ -73,6 +75,7 @@ export interface CreateHarnessRuntimeFromYamlOptions {
   logger?: Console;
   env?: Readonly<Record<string, string | undefined>>;
   resolveSecretRef?: (secretRef: { ref: string; key: string }) => string | undefined;
+  persistence?: WorkspacePersistence;
 }
 
 export interface CreateRunnerFromHarnessYamlOptions extends CreateHarnessRuntimeFromYamlOptions {}
@@ -654,12 +657,8 @@ function createProcessTurnInputEvent(text: string, conversationId: string): Agen
   };
 }
 
-async function ensureInstance(storage: FileWorkspaceStorage, conversationId: string, agentName: string): Promise<void> {
-  const existing = await storage.readMetadata(conversationId);
-  if (existing) {
-    return;
-  }
-  await storage.initializeInstanceState(conversationId, agentName);
+async function ensureConversation(store: ConversationStore, conversationId: string, agentName: string): Promise<void> {
+  await store.ensureConversation({ conversationId, agentName });
 }
 
 function matchesIngressRule(
@@ -794,27 +793,32 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   const maxSteps = typeof options.maxSteps === "number" && Number.isFinite(options.maxSteps) ? Math.max(1, options.maxSteps) : 8;
 
   const workspaceName = deriveWorkspaceName(workdir);
-  const paths = new WorkspacePaths({
-    stateRoot: options.stateRoot,
-    projectRoot: workdir,
-    workspaceName,
-  });
-
-  const storage = new FileWorkspaceStorage(paths);
-  await storage.initializeSystemRoot();
+  const workspaceId = normalizeWorkspaceId(workspaceName);
+  const persistence =
+    options.persistence ??
+    new FileWorkspacePersistence({
+      stateRoot: options.stateRoot,
+      projectRoot: workdir,
+      workspaceName,
+    });
+  if (persistence instanceof FileWorkspacePersistence) {
+    await persistence.initialize();
+  }
+  const conversations = persistence.conversations;
+  const runtimeEvents = persistence.runtimeEvents;
 
   const runtimeEventBus = new RuntimeEventBusImpl();
   for (const type of RUNTIME_EVENT_TYPES) {
     runtimeEventBus.on(type, async (event) => {
-      await storage.appendWorkspaceRuntimeEvent(event);
-
-      if (typeof event.conversationId === "string" && event.conversationId.length > 0) {
-        try {
-          await storage.appendRuntimeEvent(event.conversationId, event);
-        } catch {
-          // ingress.received/rejected 등 conversation이 아직 확정되지 않은 경우에는 workspace log만 남긴다.
-        }
-      }
+      await runtimeEvents.append({
+        records: [
+          {
+            workspaceId,
+            conversationId: typeof event.conversationId === "string" && event.conversationId.length > 0 ? event.conversationId : undefined,
+            event,
+          },
+        ],
+      });
     });
   }
 
@@ -822,7 +826,7 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
   const pendingTurns = new Set<Promise<unknown>>();
 
   async function createAgentSession(agent: AgentRuntimeResource, conversationId: string): Promise<AgentSession> {
-    await ensureInstance(storage, conversationId, agent.metadata.name);
+    await ensureConversation(conversations, conversationId, agent.metadata.name);
 
     const systemPrompt = await resolveAgentSystemPrompt(agent, workdir);
     const modelResolved = resolveAgentModelConfig(agent, harnessResources.resources, {
@@ -844,7 +848,24 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
     const hasContextMessage = extensionResources.some((ext) => ext.metadata.name === "context-message");
 
     const extensionNames = extensionResources.map((ext) => ext.metadata.name);
-    const extensionState = new ExtensionStateManagerImpl(storage, conversationId, extensionNames);
+    const extensionState = new ExtensionStateManagerImpl(
+      {
+        readExtensionState: async (extensionConversationId, extensionName) =>
+          (await conversations.readExtensionState({
+            conversationId: extensionConversationId,
+            extensionName,
+          })) ?? undefined,
+        writeExtensionState: async (extensionConversationId, extensionName, state) => {
+          await conversations.writeExtensionState({
+            conversationId: extensionConversationId,
+            extensionName,
+            value: state,
+          });
+        },
+      },
+      conversationId,
+      extensionNames,
+    );
     await extensionState.loadAll();
 
     const extensionEventBus = new EventEmitter();
@@ -868,7 +889,8 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       );
     }
 
-    const conversationState = await storage.createConversationState(conversationId);
+    const loadedConversation = await conversations.loadState({ conversationId });
+    const conversationState = new ConversationStateImpl(loadedConversation.baseMessages, loadedConversation.events);
 
     const session: AgentSession = {
       agent,
@@ -925,9 +947,13 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
 
   async function persistSessionMessageEvents(session: AgentSession, startIndex: number): Promise<void> {
     const events = session.conversationState.events.slice(startIndex);
-    for (const event of events) {
-      await storage.appendMessageEvent(session.conversationId, event);
+    if (events.length === 0) {
+      return;
     }
+    await conversations.appendMessageEvents({
+      conversationId: session.conversationId,
+      events,
+    });
   }
 
   async function executeTurn(session: AgentSession, inputEvent: AgentEvent, runtime: RuntimeContext, turnId: string, traceId: string): Promise<HarnessYamlRunnerTurnOutput> {
@@ -937,7 +963,10 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       turnId,
       abortController,
     };
-    await storage.updateMetadataStatus(session.conversationId, "processing");
+    await conversations.updateStatus({
+      conversationId: session.conversationId,
+      status: "processing",
+    });
 
     try {
       const output = await runTurn({
@@ -971,7 +1000,10 @@ export async function createHarnessRuntimeFromYaml(options: CreateHarnessRuntime
       }
       await persistSessionMessageEvents(session, startedEventIndex);
       await session.extensionState.saveAll();
-      await storage.updateMetadataStatus(session.conversationId, "idle");
+      await conversations.updateStatus({
+        conversationId: session.conversationId,
+        status: "idle",
+      });
     }
   }
 

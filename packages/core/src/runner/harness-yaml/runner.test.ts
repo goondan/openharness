@@ -482,6 +482,130 @@ describe("createHarnessRuntimeFromYaml ingress", () => {
       await runtime.close();
     }
   });
+
+  it("custom persistence를 주면 file storage 대신 주입된 포트만 사용한다", async () => {
+    await writeText(
+      path.join(tempDir, "connector.js"),
+      [
+        "export default {",
+        "  async normalize() {",
+        "    return {",
+        "      name: 'slack.message',",
+        "      content: [{ type: 'text', text: 'hello from injected persistence' }],",
+        "      properties: { threadTs: 'custom-1' },",
+        "      source: { kind: 'connector', name: 'slack' },",
+        "    };",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    await writeText(
+      path.join(tempDir, "harness.yaml"),
+      createHarnessYaml({
+        connectorEntry: "connector.js",
+        connectionIngress: [
+          "- match:",
+          "    event: slack.message",
+          "  route:",
+          "    agentRef: Agent/assistant",
+          "    conversationIdProperty: threadTs",
+          "    conversationIdPrefix: \"slack:\"",
+        ],
+      }),
+    );
+
+    const unusedStateRoot = path.join(tempDir, ".unused-state");
+    const statusTransitions: string[] = [];
+    const runtimeRecords: Array<Record<string, unknown>> = [];
+    const metadata = new Map<string, { conversationId: string; agentName: string; status: "idle" | "processing"; createdAt: string; updatedAt: string }>();
+    const appendMessageEvents = vi.fn(async () => {});
+
+    runTurnMock.mockResolvedValue({
+      turnResult: {
+        turnId: "turn-test",
+        finishReason: "text_response",
+      },
+      finalResponseText: "ok",
+      stepCount: 1,
+    });
+
+    const runtime = await createHarnessRuntimeFromYaml({
+      workdir: tempDir,
+      stateRoot: unusedStateRoot,
+      persistence: {
+        conversations: {
+          ensureConversation: async ({ conversationId, agentName }) => {
+            const existing = metadata.get(conversationId);
+            if (existing) {
+              return existing;
+            }
+
+            const created = {
+              conversationId,
+              agentName,
+              status: "idle" as const,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            metadata.set(conversationId, created);
+            return created;
+          },
+          loadState: async () => ({
+            baseMessages: [],
+            events: [],
+          }),
+          appendMessageEvents,
+          readExtensionState: async () => null,
+          writeExtensionState: async () => {},
+          readMetadata: async ({ conversationId }) => metadata.get(conversationId) ?? null,
+          updateStatus: async ({ conversationId, status }) => {
+            const existing = metadata.get(conversationId);
+            if (!existing) {
+              throw new Error(`missing metadata for ${conversationId}`);
+            }
+            statusTransitions.push(status);
+            metadata.set(conversationId, {
+              ...existing,
+              status,
+              updatedAt: new Date().toISOString(),
+            });
+          },
+        },
+        runtimeEvents: {
+          append: async ({ records }) => {
+            runtimeRecords.push(...records.map((record) => ({ ...record, event: { ...record.event } })));
+          },
+        },
+      },
+      env: {
+        OPENAI_API_KEY: "test-key",
+      },
+    });
+
+    try {
+      const accepted = await runtime.ingress.receive({
+        connectionName: "slack-main",
+        payload: { deliveryId: "raw-custom" },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.conversationId).toBe("slack:custom-1");
+
+      await waitForAssertion(() => {
+        expect(runTurnMock).toHaveBeenCalledTimes(1);
+        expect(statusTransitions).toEqual(["processing", "idle"]);
+        expect(runtimeRecords.some((record) => record.event && (record.event as { type?: string }).type === "ingress.received")).toBe(true);
+        expect(runtimeRecords.some((record) => record.conversationId === "slack:custom-1")).toBe(true);
+      });
+
+      await expect(fs.access(unusedStateRoot)).rejects.toThrow();
+      expect(appendMessageEvents).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close();
+    }
+  });
 });
 
 describe("createRunnerFromHarnessYaml", () => {

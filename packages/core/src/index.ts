@@ -22,3 +22,4 @@ export * from "./runner/harness-yaml/runner.js";
 export * from "./llm/model-step.js";
 
 export * from "./engine/run-turn.js";
+export * from "./workspace/persistence.js";

@@ -2,6 +2,7 @@ export * from "./connector.js";
 export * from "./events.js";
 export * from "./json.js";
 export * from "./message.js";
+export * from "./persistence.js";
 export * from "./references.js";
 export * from "./resources.js";
 export * from "./runtime.js";

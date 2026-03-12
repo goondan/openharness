@@ -118,7 +118,7 @@ function normalizeEntrypointFileName(entrypointFileName: string | undefined): st
   return baseName;
 }
 
-function normalizeWorkspaceId(workspaceName: string | undefined): string {
+export function normalizeWorkspaceId(workspaceName: string | undefined): string {
   if (typeof workspaceName !== "string") {
     return "default";
   }
