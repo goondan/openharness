@@ -17,6 +17,8 @@
 
 CLI나 테스트처럼 텍스트 한 줄을 바로 턴으로 넣고 싶을 때는 기존 `processTurn(text)`를 그대로 사용할 수 있습니다.
 
+이 경로도 별도 source kind를 만들지 않고 `source.kind = "connector"`, `source.name = "cli"`인 synthetic event로 같은 runtime inbound 표면에 합류합니다.
+
 ### 2. `ingress.receive()` / `ingress.dispatch()`는 외부 입력용 API
 
 - `receive({ connectionName, payload })`
