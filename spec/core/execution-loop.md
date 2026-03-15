@@ -21,7 +21,7 @@
 #### Flow ID: EXEC-TURN-01 — Turn 실행
 
 - **Actor:** 코어 런타임
-- **Trigger:** `processTurn(agentName, input: string | InboundEnvelope)` 호출 또는 Ingress dispatch
+- **Trigger:** `processTurn(agentName, input: string | InboundEnvelope, options?)` 호출 또는 Ingress dispatch
 - **Preconditions:**
   - 해당 agentName에 대응하는 AgentConfig가 등록되어 있다.
   - 런타임이 close되지 않은 상태다.

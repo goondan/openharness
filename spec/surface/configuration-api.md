@@ -93,8 +93,8 @@
 - **Main Flow:**
   1. CONFIG-CLI-RUN-01의 1~4 단계와 동일하게 런타임 생성 + 에이전트 선택.
   2. readline 프롬프트를 시작한다.
-  3. 사용자 입력마다 `processTurn()`을 실행하고 결과를 출력한다.
-  4. 같은 conversationId를 유지한다 (--conversation이 있으면 해당 값, 없으면 자동 생성).
+  3. 사용자 입력마다 `processTurn(agentName, text, { conversationId })`를 실행하고 결과를 출력한다.
+  4. 같은 conversationId를 유지한다 (`--conversation`이 있으면 해당 값, 없으면 자동 생성하여 `options.conversationId`로 전달).
   5. 사용자가 종료 신호(Ctrl+C, exit)를 보내면 `runtime.close()`를 호출한다.
 - **Outputs:** 대화형 세션.
 
@@ -189,10 +189,18 @@ function createHarness(config: HarnessConfig): Promise<HarnessRuntime>;
 
 ```ts
 interface HarnessRuntime {
-  processTurn(agentName: string, input: string | InboundEnvelope): Promise<TurnResult>;
+  processTurn(
+    agentName: string,
+    input: string | InboundEnvelope,
+    options?: ProcessTurnOptions,
+  ): Promise<TurnResult>;
   ingress: IngressApi;
   control: ControlApi;
   close(): Promise<void>;
+}
+
+interface ProcessTurnOptions {
+  conversationId?: string;  // 미지정 시 코어가 자동 생성. 같은 ID로 재호출하면 기존 대화를 이어간다.
 }
 
 interface ControlApi {
