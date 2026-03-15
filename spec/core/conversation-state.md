@@ -29,11 +29,11 @@
   2. 이벤트가 events 스트림에 추가된다.
   3. messages가 재계산된다 (events를 처음부터 replay하거나, 증분 적용).
 - **Alternative Flow:**
-  - 유효하지 않은 이벤트 (예: 존재하지 않는 메시지 ID를 참조하는 replace/remove): 이벤트를 무시하거나 에러를 반환. 정책은 구현에서 결정하되, events 스트림의 무결성은 보장한다.
+  - 유효하지 않은 이벤트 (예: 존재하지 않는 메시지 ID를 참조하는 replace/remove): 에러를 던진다. events 스트림에 추가하지 않는다. events 스트림의 무결성을 보장한다.
 - **Outputs:** 갱신된 events와 messages.
 - **Side Effects:** 없음 (인메모리 상태 변경만).
 - **Failure Modes:**
-  - 유효하지 않은 이벤트 참조: 에러 또는 무시 (구현 정책).
+  - 유효하지 않은 이벤트 참조: 에러를 던진다 (events에 추가하지 않음).
 
 #### Flow ID: STATE-RESTORE-01 — 외부 상태 복원
 
@@ -125,6 +125,7 @@ interface ConversationState {
   restore(events: MessageEvent[]): void;
 
   // 이벤트 발생 (Extension이 메시지 목록을 조작하는 유일한 경로)
+  // Turn 실행 중(미들웨어 컨텍스트 내부)에서만 호출 가능. 등록 시점에는 사용 불가.
   emit(event: MessageEvent): void;
 }
 ```

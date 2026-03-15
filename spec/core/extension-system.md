@@ -71,22 +71,12 @@ Extension과 Tool이 표준 인터페이스(팩토리 함수 + register/handler)
 
 #### Flow ID: EXT-TOOL-EXEC-01 — Tool 실행
 
+> 상세 흐름은 `execution-loop.md`의 **EXEC-TOOLCALL-01**을 참조한다. 여기서는 Tool 시스템 관점의 요약만 기술한다.
+
 - **Actor:** 코어 런타임 (ToolCall 시)
 - **Trigger:** LLM이 도구 호출을 요청
-- **Preconditions:**
-  - Tool이 Registry에 등록되어 있다.
-- **Main Flow:**
-  1. LLM이 제공한 인자를 Tool의 JSON Schema로 검증한다.
-  2. ToolCall 미들웨어 체인을 실행한다.
-  3. 최내부에서 `tool.handler(args, toolContext)`를 호출한다.
-  4. 결과를 반환한다.
-- **Alternative Flow:**
-  - JSON Schema 검증 실패: LLM에 검증 에러 반환. 핸들러 호출하지 않음.
-  - Tool이 Registry에 없음: LLM에 "도구를 찾을 수 없음" 에러 반환.
-  - 핸들러 예외: LLM에 에러 반환. Turn은 계속.
-- **Outputs:** ToolResult
-- **Failure Modes:**
-  - 핸들러 예외: 캐치하여 LLM에 에러 형태로 전달. Turn은 중단되지 않음.
+- **Main Flow:** JSON Schema 검증 → ToolCall 미들웨어 체인 → `tool.handler(args, toolContext)` 호출 → 결과 반환. (상세: EXEC-TOOLCALL-01)
+- **Failure Modes:** 검증 실패/핸들러 예외 시 LLM에 에러 반환. Turn은 계속.
 
 ---
 
@@ -151,9 +141,15 @@ interface Extension {
 interface ExtensionApi {
   // 1. 미들웨어 훅 등록
   pipeline: {
+    // 실행 미들웨어
     register(level: "turn", handler: TurnMiddleware, options?: MiddlewareOptions): void;
     register(level: "step", handler: StepMiddleware, options?: MiddlewareOptions): void;
     register(level: "toolCall", handler: ToolCallMiddleware, options?: MiddlewareOptions): void;
+    // Ingress 미들웨어 (Connection 수준 Extension: verify/normalize, Agent 수준 Extension: route/dispatch)
+    register(level: "verify", handler: VerifyMiddleware, options?: MiddlewareOptions): void;
+    register(level: "normalize", handler: NormalizeMiddleware, options?: MiddlewareOptions): void;
+    register(level: "route", handler: RouteMiddleware, options?: MiddlewareOptions): void;
+    register(level: "dispatch", handler: DispatchMiddleware, options?: MiddlewareOptions): void;
   };
 
   // 2. 도구 동적 관리
@@ -166,7 +162,7 @@ interface ExtensionApi {
   // 3. 이벤트 구독 (관찰 전용)
   on(event: string, listener: (payload: EventPayload) => void): void;
 
-  // 4. 대화 상태 접근
+  // 4. 대화 상태 접근 (현재 Turn에 바인딩된 프록시. emit()은 Turn 실행 중에서만 호출 가능.)
   conversation: ConversationState;
 
   // 5. 런타임 구성 읽기 (읽기 전용)
@@ -185,7 +181,6 @@ interface RuntimeInfo {
     extensions: readonly ExtensionInfo[];
     tools: readonly ToolInfo[];
     maxSteps?: number;
-    systemPrompt?: string;
   };
 
   // 전체 에이전트 목록

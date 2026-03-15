@@ -76,7 +76,7 @@
      - `--agent`가 있으면 해당 에이전트.
      - 없고 에이전트가 1개면 그 에이전트.
      - 없고 2개 이상이면 에러.
-  5. `runtime.processTurn(agentName, text)`를 실행한다.
+  5. `runtime.processTurn(agentName, text)`를 실행한다. 코어가 `string`을 `InboundEnvelope`로 래핑한다.
   6. 결과 텍스트를 stdout에 출력한다.
   7. `runtime.close()`를 호출한다.
 - **Outputs:** stdout에 Turn 결과 텍스트.
@@ -176,7 +176,6 @@ interface AgentConfig {
   extensions?: Extension[];
   tools?: ToolDefinition[];
   maxSteps?: number;      // Step 무한루프 방지. 기본값: 구현에서 정의.
-  systemPrompt?: string;  // ContextMessage Extension이 사용.
 }
 ```
 
@@ -190,7 +189,7 @@ function createHarness(config: HarnessConfig): Promise<HarnessRuntime>;
 
 ```ts
 interface HarnessRuntime {
-  processTurn(agentName: string, input: string): Promise<TurnResult>;
+  processTurn(agentName: string, input: string | InboundEnvelope): Promise<TurnResult>;
   ingress: IngressApi;
   control: ControlApi;
   close(): Promise<void>;

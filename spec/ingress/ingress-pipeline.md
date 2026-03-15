@@ -26,7 +26,7 @@
   - 해당 connectionName에 대응하는 Connection이 등록되어 있다.
 - **Main Flow:**
   1. Connection의 Connector를 조회한다.
-  2. **Verify 단계:** Connection 수준 미들웨어를 실행한 후, `connector.verify(ctx)`를 호출한다. 서명 확인, 중복 체크 등.
+  2. **Verify 단계:** Connection 수준 미들웨어를 실행한 후, `connector.verify`가 정의되어 있으면 `connector.verify(ctx)`를 호출한다. 서명 확인, 중복 체크 등. verify가 미정의면 이 단계를 통과한다.
   3. **Normalize 단계:** `connector.normalize(ctx)`를 호출한다. 소스별 페이로드를 InboundEnvelope 표준 형식으로 변환한다. 1:N fan-out을 허용한다 (배열 반환).
   4. **Route 단계:** 각 InboundEnvelope에 대해 Connection의 라우팅 규칙을 선언 순서대로 평가한다 (first-match-wins).
      - 매칭된 규칙에서 대상 agentName과 conversationId를 결정한다.
@@ -48,7 +48,7 @@
 #### Flow ID: INGRESS-DISPATCH-01 — 직접 접수 (verify/normalize 건너뜀)
 
 - **Actor:** 외부 코드
-- **Trigger:** `runtime.ingress.dispatch({ connectionName, event })` 호출
+- **Trigger:** `runtime.ingress.dispatch({ connectionName, envelope })` 호출
 - **Preconditions:**
   - 이미 정규화된 InboundEnvelope가 전달된다.
 - **Main Flow:**
@@ -114,7 +114,7 @@
 ### Constraint ID: INGRESS-CONST-005 — 미들웨어 범위 분리
 
 - **Category:** 아키텍처
-- **Description:** Connection 수준 Extension은 verify/normalize(pre-route)에 개입한다. Agent 수준 Extension은 route/dispatch(post-route)에 개입한다. 범위를 넘어서는 개입은 불가.
+- **Description:** Connection 수준 Extension은 verify/normalize(pre-route)에 개입한다. Agent 수준 Extension은 route/dispatch(post-route)에 개입한다. 범위를 넘어서는 개입은 불가. Extension은 `api.pipeline.register("verify" | "normalize" | "route" | "dispatch", handler)`로 Ingress 미들웨어를 등록한다.
 - **Scope:** 전체
 - **Measurement:** Connection Extension이 dispatch에 개입하지 못하는 테스트.
 - **Verification:** 유닛 테스트.
@@ -198,7 +198,7 @@ interface IngressApi {
 
   dispatch(input: {
     connectionName: string;
-    event: InboundEnvelope;
+    envelope: InboundEnvelope;
     receivedAt?: string;
   }): Promise<IngressAcceptResult>;
 

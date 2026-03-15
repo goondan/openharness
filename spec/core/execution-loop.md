@@ -9,7 +9,7 @@
 ## 2. 상위 스펙 연결
 
 - **Related Goals:** G-1 (순수한 코어), G-2 (Composable Extension), G-5 (명시적 선택)
-- **Related Requirements:** FR-CORE-001~006, FR-OBS-001~004
+- **Related Requirements:** FR-CORE-001~007, FR-OBS-001~004
 - **Related AC:** AC-1, AC-2, AC-7, AC-8, AC-13
 
 ---
@@ -21,17 +21,19 @@
 #### Flow ID: EXEC-TURN-01 — Turn 실행
 
 - **Actor:** 코어 런타임
-- **Trigger:** `processTurn(agentName, input)` 호출 또는 Ingress dispatch
+- **Trigger:** `processTurn(agentName, input: string | InboundEnvelope)` 호출 또는 Ingress dispatch
 - **Preconditions:**
   - 해당 agentName에 대응하는 AgentConfig가 등록되어 있다.
   - 런타임이 close되지 않은 상태다.
 - **Main Flow:**
   1. Turn ID를 생성한다.
-  2. AbortController를 생성하고, AbortSignal을 Turn 컨텍스트에 바인딩한다.
-  3. Turn 미들웨어 체인을 실행한다.
-  4. 체인의 최내부(코어 로직)에서 Step 루프를 시작한다.
-  5. Step 루프가 종료되면 (LLM이 도구를 요청하지 않거나 maxSteps 도달), Turn 결과를 반환한다.
-  6. `turn.done` 이벤트를 발행한다.
+  2. `input`이 `string`이면 코어가 `InboundEnvelope`로 래핑한다 (name: `"direct"`, content: `[{ type: "text", text: input }]`). Ingress 경유 시 이미 `InboundEnvelope`이므로 그대로 사용한다.
+  3. 인바운드 메시지를 대화 상태에 `append` 이벤트로 추가한다 (FR-CORE-007). 코어가 LLM 응답과 도구 결과도 동일하게 append한다. 이것이 코어가 대화 상태에 직접 쓰는 유일한 동작이다.
+  4. AbortController를 생성하고, AbortSignal을 Turn 컨텍스트에 바인딩한다.
+  5. Turn 미들웨어 체인을 실행한다.
+  6. 체인의 최내부(코어 로직)에서 Step 루프를 시작한다.
+  7. Step 루프가 종료되면 (LLM이 도구를 요청하지 않거나 maxSteps 도달), Turn 결과를 반환한다.
+  8. `turn.done` 이벤트를 발행한다.
 - **Alternative Flow:**
   - AbortSignal이 활성화되면 현재 진행 중인 Step/ToolCall/LLM 호출을 중단하고, Turn을 abort 상태로 종료한다. `turn.error` 이벤트 발행.
   - 미들웨어에서 예외가 발생하면 Turn을 error 상태로 종료한다. `turn.error` 이벤트 발행.
@@ -184,9 +186,9 @@ interface TurnContext {
   turnId: string;
   agentName: string;
   conversationId: string;
-  conversation: ConversationState;
+  conversation: ConversationState;  // 현재 Turn에 바인딩된 프록시. emit()은 Turn 실행 중(미들웨어 내부)에서만 호출 가능.
   abortSignal: AbortSignal;
-  input: InboundEnvelope;
+  input: InboundEnvelope;           // processTurn(string)이면 코어가 래핑한 InboundEnvelope.
 }
 
 interface StepContext extends TurnContext {
@@ -214,6 +216,7 @@ api.on(event: string, listener: (payload: EventPayload) => void): void;
 | `turn.error` | turnId, error |
 | `step.start` | turnId, stepNumber |
 | `step.done` | turnId, stepNumber, result |
+| `step.error` | turnId, stepNumber, error |
 | `tool.start` | turnId, stepNumber, toolName, toolArgs |
 | `tool.done` | turnId, stepNumber, toolName, toolResult |
 | `tool.error` | turnId, stepNumber, toolName, error |
