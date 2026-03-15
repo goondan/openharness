@@ -236,6 +236,42 @@ function buildPermissionError(input: {
   };
 }
 
+function isTerminalToolError(code: string | undefined): boolean {
+  return code === "E_PERMISSION_REJECTED" || code === "E_PERMISSION_DENIED" || code === "E_DOOM_LOOP";
+}
+
+function buildTerminalToolErrorMessage(toolResult: ToolCallResult): string | undefined {
+  if (toolResult.status !== "error") {
+    return undefined;
+  }
+
+  const code = toolResult.error?.code;
+  if (!isTerminalToolError(code)) {
+    const rawMessage = toolResult.error?.message ?? "";
+    if (/^Permission rejected\b/i.test(rawMessage)) {
+      return "권한 요청이 거부되어 작업을 중단했습니다.";
+    }
+    if (/^Permission denied\b/i.test(rawMessage)) {
+      return "허용된 권한 규칙에 막혀 작업을 진행하지 않았습니다.";
+    }
+    return undefined;
+  }
+
+  if (code === "E_PERMISSION_REJECTED") {
+    return "권한 요청이 거부되어 작업을 중단했습니다.";
+  }
+
+  if (code === "E_PERMISSION_DENIED") {
+    return "허용된 권한 규칙에 막혀 작업을 진행하지 않았습니다.";
+  }
+
+  if (code === "E_DOOM_LOOP") {
+    return "같은 도구 호출이 반복되어 작업을 중단했습니다.";
+  }
+
+  return toolResult.error?.message;
+}
+
 function readToolCallSignature(part: unknown): { toolName: string; argsText: string } | undefined {
   if (typeof part !== "object" || part === null || Array.isArray(part)) {
     return undefined;
@@ -548,7 +584,21 @@ export function register(api: ExtensionApi): void {
     if (typeof modelName === "string" && modelName.trim().length > 0) {
       ctx.toolCatalog = filterToolCatalogForModel(ctx.toolCatalog, modelName);
     }
-    return ctx.next();
+
+    const stepResult = await ctx.next();
+    const terminalToolError = stepResult.toolResults
+      .map((toolResult) => buildTerminalToolErrorMessage(toolResult))
+      .find((message): message is string => typeof message === "string" && message.length > 0);
+
+    if (terminalToolError) {
+      stepResult.shouldContinue = false;
+      stepResult.metadata = {
+        ...stepResult.metadata,
+        "opencode.finalResponseText": terminalToolError,
+      };
+    }
+
+    return stepResult;
   });
 
   api.pipeline.register("toolCall", async (ctx) => {

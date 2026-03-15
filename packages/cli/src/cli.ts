@@ -385,17 +385,24 @@ async function runOneShot(text: string, options: CliOptions): Promise<number> {
   }
 }
 
+async function readReplLine(prompt: string): Promise<string | null> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(prompt);
+  } catch {
+    return null;
+  } finally {
+    rl.close();
+  }
+}
+
 async function runRepl(options: CliOptions): Promise<number> {
   const runner = await createRunner(options);
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-
   const prompt = "oh> ";
   try {
     while (true) {
-      let line: string;
-      try {
-        line = await rl.question(prompt);
-      } catch {
+      const line = await readReplLine(prompt);
+      if (line === null) {
         break;
       }
 
@@ -415,7 +422,6 @@ async function runRepl(options: CliOptions): Promise<number> {
 
     return 0;
   } finally {
-    rl.close();
     await runner.close();
   }
 }
