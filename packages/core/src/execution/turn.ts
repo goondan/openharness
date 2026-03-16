@@ -213,6 +213,25 @@ export async function executeTurn(
     // Set turnActive to false
     conversationState._turnActive = false;
 
+    // Check if this was an abort (AbortError from aborted signal)
+    if (turnCtx.abortSignal.aborted || error.name === "AbortError") {
+      eventBus.emit("turn.error", {
+        type: "turn.error",
+        turnId,
+        agentName,
+        conversationId,
+        error,
+      });
+
+      return {
+        turnId,
+        agentName,
+        conversationId,
+        status: "aborted",
+        steps: [],
+      };
+    }
+
     // Emit turn.error
     eventBus.emit("turn.error", {
       type: "turn.error",

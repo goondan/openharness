@@ -125,13 +125,14 @@ vi.mock("../env-loader.js", async (importOriginal) => {
 });
 
 describe("runCommand agent-selection", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let exitSpy: any;
 
   beforeEach(async () => {
     // Make process.exit throw so runCommand stops executing after exit is called
-    exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number | string | null) => {
       throw new Error(`process.exit(${code})`);
-    });
+    }) as () => never);
 
     // Override loadConfig to return controlled configs (don't hit the filesystem)
     const { loadConfig } = await import("../config-loader.js");

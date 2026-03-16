@@ -142,6 +142,52 @@ describe("Logging", () => {
     consoleSpy.mockRestore();
   });
 
+  it("logs step.start event with custom logger", () => {
+    const conversation = makeMockConversationState();
+    const { api, eventListeners } = makeMockApi(conversation);
+    const logger = vi.fn();
+
+    const ext = Logging({ logger });
+    ext.register(api);
+
+    emit(eventListeners, "step.start", { stepIndex: 0 });
+
+    expect(logger).toHaveBeenCalledOnce();
+    expect(logger.mock.calls[0][0]).toContain("step.start");
+    expect(logger.mock.calls[0][0]).toContain("stepIndex");
+  });
+
+  it("logs step.done event with custom logger", () => {
+    const conversation = makeMockConversationState();
+    const { api, eventListeners } = makeMockApi(conversation);
+    const logger = vi.fn();
+
+    const ext = Logging({ logger });
+    ext.register(api);
+
+    emit(eventListeners, "step.done", { stepIndex: 0, toolCallCount: 2 });
+
+    expect(logger).toHaveBeenCalledOnce();
+    expect(logger.mock.calls[0][0]).toContain("step.done");
+  });
+
+  it("logs tool.start and tool.done events with custom logger", () => {
+    const conversation = makeMockConversationState();
+    const { api, eventListeners } = makeMockApi(conversation);
+    const logger = vi.fn();
+
+    const ext = Logging({ logger });
+    ext.register(api);
+
+    emit(eventListeners, "tool.start", { toolName: "bash", toolCallId: "tc-1" });
+    emit(eventListeners, "tool.done", { toolName: "bash", toolCallId: "tc-1", result: { type: "text", text: "ok" } });
+
+    expect(logger).toHaveBeenCalledTimes(2);
+    expect(logger.mock.calls[0][0]).toContain("tool.start");
+    expect(logger.mock.calls[0][0]).toContain("bash");
+    expect(logger.mock.calls[1][0]).toContain("tool.done");
+  });
+
   it("does NOT call pipeline.register (event-based, no middleware)", () => {
     const conversation = makeMockConversationState();
     const { api } = makeMockApi(conversation);

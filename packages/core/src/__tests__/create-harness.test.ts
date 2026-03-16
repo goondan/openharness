@@ -47,13 +47,18 @@ describe("createHarness", () => {
   // -----------------------------------------------------------------------
   // Test 1: createHarness with minimal config → returns HarnessRuntime
   // -----------------------------------------------------------------------
-  it("returns a HarnessRuntime with minimal config", async () => {
+  it("returns a HarnessRuntime with all required surfaces", async () => {
     const runtime = await createHarness(minimalConfig());
 
-    expect(runtime).toBeDefined();
-    expect(typeof runtime.processTurn).toBe("function");
-    expect(typeof runtime.close).toBe("function");
+    // Verify runtime has all required API surfaces
+    const result = await runtime.processTurn("default", "verify surfaces");
+    expect(result.status).toBe("completed");
+
+    // Ingress pipeline is functional
     expect(runtime.ingress).toBeDefined();
+    expect(typeof runtime.ingress.receive).toBe("function");
+
+    // Control surface is functional
     expect(runtime.control).toBeDefined();
     expect(typeof runtime.control.abortConversation).toBe("function");
 
@@ -177,17 +182,19 @@ describe("createHarness", () => {
   // -----------------------------------------------------------------------
   // Test 6: runtime.processTurn → calls executeTurn, returns TurnResult
   // -----------------------------------------------------------------------
-  it("processTurn returns a TurnResult with correct shape", async () => {
+  it("processTurn returns a TurnResult with correct values", async () => {
     const runtime = await createHarness(minimalConfig());
 
     const result = await runtime.processTurn("default", "test input");
 
-    expect(result).toBeDefined();
-    expect(result.turnId).toBeDefined();
     expect(result.agentName).toBe("default");
-    expect(result.conversationId).toBeDefined();
-    expect(result.status).toBeDefined();
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("Hello from mock");
+    expect(typeof result.turnId).toBe("string");
+    expect(result.turnId.length).toBeGreaterThan(0);
+    expect(typeof result.conversationId).toBe("string");
     expect(Array.isArray(result.steps)).toBe(true);
+    expect(result.steps.length).toBeGreaterThanOrEqual(1);
 
     await runtime.close();
   });
@@ -291,9 +298,9 @@ describe("createHarness", () => {
     expect(abortResult.conversationId).toBe("conv-to-abort");
     expect(abortResult.abortedTurns).toBeGreaterThanOrEqual(1);
 
-    // The turn should resolve (with error or aborted status)
+    // The turn should resolve with aborted status
     const result = await turnPromise;
-    expect(["aborted", "error"]).toContain(result.status);
+    expect(result.status).toBe("aborted");
 
     await runtime.close();
   });

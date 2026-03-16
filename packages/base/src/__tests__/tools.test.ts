@@ -23,19 +23,43 @@ function makeCtx(abortSignal?: AbortSignal): ToolContext {
 }
 
 // ---------------------------------------------------------------------------
+// All tools — consolidated schema validation
+// ---------------------------------------------------------------------------
+
+describe("All tools — schema structure", () => {
+  it("every tool has name, description, non-empty required params, and a handler function", () => {
+    const tools = [
+      { factory: BashTool, expectedName: "bash", expectedRequired: ["command"] },
+      { factory: FileReadTool, expectedName: "file_read", expectedRequired: ["path"] },
+      { factory: FileWriteTool, expectedName: "file_write", expectedRequired: ["path", "content"] },
+      { factory: FileListTool, expectedName: "file_list", expectedRequired: ["path"] },
+      { factory: HttpFetchTool, expectedName: "http_fetch", expectedRequired: ["url"] },
+      { factory: JsonQueryTool, expectedName: "json_query", expectedRequired: ["data", "path"] },
+      { factory: TextTransformTool, expectedName: "text_transform", expectedRequired: ["text", "operation"] },
+      { factory: WaitTool, expectedName: "wait", expectedRequired: ["ms"] },
+    ];
+
+    for (const { factory, expectedName, expectedRequired } of tools) {
+      const tool = factory();
+      expect(tool.name).toBe(expectedName);
+      expect(typeof tool.description).toBe("string");
+      expect(tool.description.length).toBeGreaterThan(0);
+      expect(typeof tool.handler).toBe("function");
+
+      const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
+      for (const req of expectedRequired) {
+        expect(params.properties).toHaveProperty(req);
+        expect(params.required).toContain(req);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // BashTool
 // ---------------------------------------------------------------------------
 
 describe("BashTool", () => {
-  it("has correct schema structure", () => {
-    const tool = BashTool();
-    expect(tool.name).toBe("bash");
-    expect(typeof tool.description).toBe("string");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("command");
-    expect(params.required).toContain("command");
-  });
-
   it("returns stdout as text result on success", async () => {
     const tool = BashTool();
     const result = await tool.handler({ command: "echo hello" }, makeCtx());
@@ -67,14 +91,6 @@ describe("FileReadTool", () => {
     await writeFile(tmpFile, "hello file", "utf8");
   });
 
-  it("has correct schema structure", () => {
-    const tool = FileReadTool();
-    expect(tool.name).toBe("file_read");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("path");
-    expect(params.required).toContain("path");
-  });
-
   it("reads file content successfully", async () => {
     const tool = FileReadTool();
     const result = await tool.handler({ path: tmpFile }, makeCtx());
@@ -96,16 +112,6 @@ describe("FileReadTool", () => {
 // ---------------------------------------------------------------------------
 
 describe("FileWriteTool", () => {
-  it("has correct schema structure", () => {
-    const tool = FileWriteTool();
-    expect(tool.name).toBe("file_write");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("path");
-    expect(params.properties).toHaveProperty("content");
-    expect(params.required).toContain("path");
-    expect(params.required).toContain("content");
-  });
-
   it("writes file successfully and returns text result", async () => {
     const tmpFile = join(tmpdir(), `openharness-write-${Date.now()}.txt`);
     const tool = FileWriteTool();
@@ -137,14 +143,6 @@ describe("FileListTool", () => {
     await writeFile(join(tmpDir, "b.txt"), "b");
   });
 
-  it("has correct schema structure", () => {
-    const tool = FileListTool();
-    expect(tool.name).toBe("file_list");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("path");
-    expect(params.required).toContain("path");
-  });
-
   it("lists directory entries as json result", async () => {
     const tool = FileListTool();
     const result = await tool.handler({ path: tmpDir }, makeCtx());
@@ -172,14 +170,6 @@ describe("FileListTool", () => {
 describe("HttpFetchTool", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  it("has correct schema structure", () => {
-    const tool = HttpFetchTool();
-    expect(tool.name).toBe("http_fetch");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("url");
-    expect(params.required).toContain("url");
   });
 
   it("returns json result with status, headers, body on success", async () => {
@@ -223,16 +213,6 @@ describe("HttpFetchTool", () => {
 // ---------------------------------------------------------------------------
 
 describe("JsonQueryTool", () => {
-  it("has correct schema structure", () => {
-    const tool = JsonQueryTool();
-    expect(tool.name).toBe("json_query");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("data");
-    expect(params.properties).toHaveProperty("path");
-    expect(params.required).toContain("data");
-    expect(params.required).toContain("path");
-  });
-
   it("queries nested object with dot notation", async () => {
     const tool = JsonQueryTool();
     const data = { user: { name: "Alice", age: 30 } };
@@ -279,16 +259,6 @@ describe("JsonQueryTool", () => {
 // ---------------------------------------------------------------------------
 
 describe("TextTransformTool", () => {
-  it("has correct schema structure", () => {
-    const tool = TextTransformTool();
-    expect(tool.name).toBe("text_transform");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("text");
-    expect(params.properties).toHaveProperty("operation");
-    expect(params.required).toContain("text");
-    expect(params.required).toContain("operation");
-  });
-
   it("uppercase operation", async () => {
     const tool = TextTransformTool();
     const result = await tool.handler({ text: "hello world", operation: "uppercase" }, makeCtx());
@@ -334,14 +304,6 @@ describe("TextTransformTool", () => {
 // ---------------------------------------------------------------------------
 
 describe("WaitTool", () => {
-  it("has correct schema structure", () => {
-    const tool = WaitTool();
-    expect(tool.name).toBe("wait");
-    const params = tool.parameters as { properties: Record<string, unknown>; required: string[] };
-    expect(params.properties).toHaveProperty("ms");
-    expect(params.required).toContain("ms");
-  });
-
   it("waits and returns text result", async () => {
     const tool = WaitTool();
     const result = await tool.handler({ ms: 10 }, makeCtx());

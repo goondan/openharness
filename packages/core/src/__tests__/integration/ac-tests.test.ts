@@ -916,9 +916,9 @@ describe("AC-13: Abort control — abortConversation stops in-flight turn", () =
     expect(abortResult.conversationId).toBe(convId);
     expect(abortResult.abortedTurns).toBeGreaterThanOrEqual(1);
 
-    // Turn should resolve with aborted or error status
+    // Turn should resolve with aborted status
     const result = await turnPromise;
-    expect(["aborted", "error"]).toContain(result.status);
+    expect(result.status).toBe("aborted");
 
     await runtime.close();
   });

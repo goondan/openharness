@@ -28,9 +28,9 @@ describe("Anthropic()", () => {
     expect(config.apiKey).toEqual({ name: "ANTHROPIC_API_KEY" });
   });
 
-  it("does not include baseUrl when not provided", () => {
+  it("omits baseUrl when not provided", () => {
     const config = Anthropic({ model: "claude-3-5-sonnet-20241022", apiKey: "key" });
-    expect(config.baseUrl).toBeUndefined();
+    expect("baseUrl" in config).toBe(false);
   });
 });
 
@@ -68,9 +68,9 @@ describe("Google()", () => {
     expect(config.apiKey).toBe(ref);
   });
 
-  it("does not include baseUrl field", () => {
+  it("omits baseUrl (Google does not support custom endpoints)", () => {
     const config = Google({ model: "gemini-1.5-pro", apiKey: "key" });
-    expect(config.baseUrl).toBeUndefined();
+    expect("baseUrl" in config).toBe(false);
   });
 });
 
@@ -85,25 +85,21 @@ describe("createLlmClient()", () => {
     expect(() => createLlmClient(config, "resolved-key")).toThrow("Unknown model provider: unknown");
   });
 
-  it("returns an object with a chat method for anthropic", () => {
-    const config = Anthropic({ model: "claude-3-5-sonnet-20241022", apiKey: "key" });
-    const client = createLlmClient(config, "resolved-key");
-    expect(client).toBeDefined();
-    expect(typeof client.chat).toBe("function");
-  });
+  it("creates a functional client for each supported provider", () => {
+    const providers = [
+      { factory: Anthropic, model: "claude-3-5-sonnet-20241022", provider: "anthropic" },
+      { factory: OpenAI, model: "gpt-4o", provider: "openai" },
+      { factory: Google, model: "gemini-1.5-pro", provider: "google" },
+    ] as const;
 
-  it("returns an object with a chat method for openai", () => {
-    const config = OpenAI({ model: "gpt-4o", apiKey: "key" });
-    const client = createLlmClient(config, "resolved-key");
-    expect(client).toBeDefined();
-    expect(typeof client.chat).toBe("function");
-  });
-
-  it("returns an object with a chat method for google", () => {
-    const config = Google({ model: "gemini-1.5-pro", apiKey: "key" });
-    const client = createLlmClient(config, "resolved-key");
-    expect(client).toBeDefined();
-    expect(typeof client.chat).toBe("function");
+    for (const { factory, model, provider } of providers) {
+      const config = factory({ model, apiKey: "key" });
+      const client = createLlmClient(config, "resolved-key");
+      // Verify the client has a callable chat method (adapter was created successfully)
+      expect(typeof client.chat).toBe("function");
+      // Verify the config provider matches expectations
+      expect(config.provider).toBe(provider);
+    }
   });
 });
 
