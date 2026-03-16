@@ -14,6 +14,7 @@ import type {
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import { routeEnvelope } from "./router.js";
+import { randomUUID } from "node:crypto";
 
 // -----------------------------------------------------------------------
 // Config
@@ -33,13 +34,16 @@ export interface IngressPipelineConfig {
   eventBus: EventBus;
   /**
    * Fires a turn for the given agent/conversation.
-   * Returns the turnId (the turn itself runs asynchronously).
+   * The pipeline provides the turnId; the callback starts the turn
+   * asynchronously (fire-and-forget). Errors are handled via events,
+   * not propagated to the caller.
    */
   dispatchTurn: (
+    turnId: string,
     agentName: string,
     envelope: InboundEnvelope,
-    conversationId: string
-  ) => Promise<string>;
+    conversationId: string,
+  ) => void;
 }
 
 // -----------------------------------------------------------------------
@@ -107,22 +111,9 @@ export class IngressPipeline implements IngressApi {
       } catch (err) {
         const reason =
           err instanceof Error ? err.message : String(err);
-        // Verification failed — emit rejection and return empty results
-        // There's no envelope yet, so we emit with a placeholder
-        const placeholder: InboundEnvelope = {
-          name: "_verify_failed_",
-          content: [],
-          properties: {},
-          source: {
-            connector: connector.name,
-            connectionName,
-            receivedAt,
-          },
-        };
         eventBus.emit("ingress.rejected", {
           type: "ingress.rejected",
           connectionName,
-          envelope: placeholder,
           reason,
         });
         return [];
@@ -259,7 +250,6 @@ export class IngressPipeline implements IngressApi {
       eventBus.emit("ingress.rejected", {
         type: "ingress.rejected",
         connectionName,
-        envelope,
         reason,
       });
       return null;
@@ -268,14 +258,14 @@ export class IngressPipeline implements IngressApi {
     const { agentName, conversationId } = routeResult;
 
     // Stage 4: Dispatch (agent-level middleware)
+    // Pipeline generates turnId and fires turn as fire-and-forget (INGRESS-CONST-004).
     const dispatchCore = async (
       ctx: DispatchContext
     ): Promise<IngressAcceptResult> => {
-      const turnId = await dispatchTurn(
-        ctx.agentName,
-        ctx.envelope,
-        ctx.conversationId
-      );
+      const turnId = randomUUID();
+      // Fire-and-forget: start the turn asynchronously.
+      // Turn errors are handled via events, not propagated here.
+      dispatchTurn(turnId, ctx.agentName, ctx.envelope, ctx.conversationId);
       return {
         accepted: true,
         connectionName: ctx.connectionName,
@@ -300,12 +290,13 @@ export class IngressPipeline implements IngressApi {
 
     const acceptResult = await dispatchChain(dispatchCtx);
 
-    // Emit ingress.accepted
+    // Emit ingress.accepted (payload per spec: connectionName, agentName, conversationId, turnId)
     eventBus.emit("ingress.accepted", {
       type: "ingress.accepted",
       connectionName,
-      envelope,
-      result: acceptResult,
+      agentName: acceptResult.agentName,
+      conversationId: acceptResult.conversationId,
+      turnId: acceptResult.turnId,
     });
 
     return acceptResult;

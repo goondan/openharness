@@ -59,7 +59,7 @@ interface MakePipelineOptions {
   connectionName?: string;
   connectionMiddleware?: MiddlewareRegistry;
   agentMiddleware?: MiddlewareRegistry;
-  dispatchTurn?: (agentName: string, envelope: InboundEnvelope, conversationId: string) => Promise<string>;
+  dispatchTurn?: (turnId: string, agentName: string, envelope: InboundEnvelope, conversationId: string) => void;
 }
 
 function makePipeline(opts: MakePipelineOptions = {}) {
@@ -70,7 +70,7 @@ function makePipeline(opts: MakePipelineOptions = {}) {
     connectionName = "conn1",
     connectionMiddleware = new MiddlewareRegistry(),
     agentMiddleware = new MiddlewareRegistry(),
-    dispatchTurn = vi.fn().mockResolvedValue("turn-123"),
+    dispatchTurn = vi.fn(),
   } = opts;
 
   const eventBus = new EventBus();
@@ -117,8 +117,11 @@ describe("IngressPipeline", () => {
     expect(results[0].accepted).toBe(true);
     expect(results[0].agentName).toBe("agent1");
     expect(results[0].conversationId).toBe("conv-1");
-    expect(results[0].turnId).toBe("turn-123");
+    expect(results[0].turnId).toEqual(expect.any(String));
     expect(dispatchTurn).toHaveBeenCalledOnce();
+    expect(dispatchTurn).toHaveBeenCalledWith(
+      expect.any(String), "agent1", expect.any(Object), "conv-1"
+    );
   });
 
   // Test 2: verify fails → rejected, ingress.rejected event
@@ -221,38 +224,36 @@ describe("IngressPipeline", () => {
     expect(dispatchTurn).not.toHaveBeenCalled();
   });
 
-  // Test 7: dispatch is async (receive returns before Turn completes)
-  it("dispatch is async — receive() resolves before the turn completes", async () => {
-    const turnStarted = vi.fn();
+  // Test 7: dispatch is fire-and-forget (INGRESS-CONST-004)
+  // receive() returns immediately; the Turn runs asynchronously.
+  it("dispatch is fire-and-forget — receive() resolves before Turn completes", async () => {
+    let turnResolve: () => void;
     const turnCompleted = vi.fn();
+    const turnPromise = new Promise<void>((resolve) => { turnResolve = resolve; });
 
-    // dispatchTurn is a long-running async task
-    const dispatchTurn = vi.fn().mockImplementation(async () => {
-      turnStarted();
-      // Simulate async work by yielding
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      turnCompleted();
-      return "turn-async";
+    // dispatchTurn simulates a long-running turn; pipeline must NOT await it
+    const dispatchTurn = vi.fn().mockImplementation(() => {
+      // This is synchronous — fires the turn in background
+      void turnPromise.then(() => turnCompleted());
     });
 
     const { pipeline } = makePipeline({ dispatchTurn });
 
-    // receive() should resolve and turnCompleted should NOT be called yet
-    // (since the turn runs async)
-    const receivePromise = pipeline.receive({
+    const results = await pipeline.receive({
       connectionName: "conn1",
       payload: {},
     });
 
-    // receive() returns before turn completes
-    const results = await receivePromise;
-
-    // receive returned accepted result (turnId comes from dispatchTurn Promise,
-    // but the turn itself is fired-and-forgotten after getting the turnId)
+    // receive() already returned — turn has NOT completed yet
     expect(results).toHaveLength(1);
     expect(results[0].accepted).toBe(true);
-    // The turn was started (dispatchTurn called)
-    expect(turnStarted).toHaveBeenCalled();
+    expect(turnCompleted).not.toHaveBeenCalled();
+    expect(dispatchTurn).toHaveBeenCalledOnce();
+
+    // Now let the turn complete
+    turnResolve!();
+    await turnPromise;
+    expect(turnCompleted).toHaveBeenCalled();
   });
 
   // Test 8: dispatch() method skips verify/normalize
@@ -268,6 +269,7 @@ describe("IngressPipeline", () => {
 
     expect(result.accepted).toBe(true);
     expect(result.agentName).toBe("agent1");
+    expect(result.turnId).toEqual(expect.any(String));
     // verify and normalize should NOT have been called
     expect(connector.verify).not.toHaveBeenCalled();
     expect(connector.normalize).not.toHaveBeenCalled();
@@ -289,7 +291,12 @@ describe("IngressPipeline", () => {
     expect((received[0] as { type: string }).type).toBe("ingress.received");
 
     expect(accepted).toHaveLength(1);
-    expect((accepted[0] as { type: string }).type).toBe("ingress.accepted");
+    const acc = accepted[0] as { type: string; connectionName: string; agentName: string; conversationId: string; turnId: string };
+    expect(acc.type).toBe("ingress.accepted");
+    expect(acc.connectionName).toBe("conn1");
+    expect(acc.agentName).toBe("agent1");
+    expect(acc.conversationId).toBe("conv-1");
+    expect(acc.turnId).toEqual(expect.any(String));
   });
 
   it("emits ingress.rejected when route fails (no matching rule)", async () => {
@@ -442,7 +449,7 @@ describe("IngressPipeline", () => {
       agentMiddleware: new MiddlewareRegistry(),
       registeredAgents: new Set(["agent1", "agent2"]),
       eventBus: new EventBus(),
-      dispatchTurn: vi.fn().mockResolvedValue("turn-x"),
+      dispatchTurn: vi.fn(),
     });
 
     const infos = pipeline.listConnections();
