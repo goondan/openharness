@@ -87,54 +87,125 @@ export default {
     expect(config.agents["myAgent"]).toBeDefined();
     expect(config.agents["myAgent"]!.model.provider).toBe("openai");
   });
-});
 
-// ---------------------------------------------------------------------------
-// Test 4 & 5: Agent auto-selection logic
-// ---------------------------------------------------------------------------
+  it("config missing agents property throws an error", async () => {
+    const configContent = `export default { notAgents: {} };\n`;
+    const configPath = path.join(tmpDir, "invalid.config.mjs");
+    fs.writeFileSync(configPath, configContent);
 
-describe("agent auto-selection", () => {
-  it("1 agent is selected automatically", () => {
-    const agents = { myAgent: {} };
-    const agentNames = Object.keys(agents);
-    const selectedAgent = agentNames.length === 1 ? agentNames[0] : null;
-    expect(selectedAgent).toBe("myAgent");
-  });
-
-  it("2+ agents without --agent flag results in error (exit code 2)", () => {
-    const agents = { agentA: {}, agentB: {} };
-    const agentNames = Object.keys(agents);
-    const requestedAgent: string | undefined = undefined;
-
-    let exitCode: number | null = null;
-
-    if (!requestedAgent) {
-      if (agentNames.length > 1) {
-        exitCode = 2;
-      } else {
-        exitCode = 0;
-      }
-    } else {
-      exitCode = 0;
-    }
-
-    expect(exitCode).toBe(2);
+    const { loadConfig } = await import("../config-loader.js");
+    await expect(loadConfig(configPath)).rejects.toThrow(/agents/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Test 6: Exit codes
+// Tests 4-6: runCommand agent-selection logic (calls actual source code)
 // ---------------------------------------------------------------------------
 
-describe("exit codes", () => {
-  it("exit codes are correct: 0=success, 1=runtime error, 2=usage error", () => {
-    // These are the defined exit codes for the CLI
-    const EXIT_SUCCESS = 0;
-    const EXIT_RUNTIME_ERROR = 1;
-    const EXIT_USAGE_ERROR = 2;
+// Mock @goondan/openharness and the config/env loaders so runCommand can be
+// exercised in isolation without real files or real LLM clients.
+vi.mock("@goondan/openharness", () => ({
+  createHarness: vi.fn(),
+}));
 
-    expect(EXIT_SUCCESS).toBe(0);
-    expect(EXIT_RUNTIME_ERROR).toBe(1);
-    expect(EXIT_USAGE_ERROR).toBe(2);
+vi.mock("../config-loader.js", async (importOriginal) => {
+  // Preserve a reference to the real implementation so config-loader tests
+  // (which run before this mock is configured) still use actual code.
+  const real = await importOriginal<typeof import("../config-loader.js")>();
+  return {
+    loadConfig: vi.fn(real.loadConfig),
+  };
+});
+
+vi.mock("../env-loader.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../env-loader.js")>();
+  return {
+    loadEnv: vi.fn(real.loadEnv),
+  };
+});
+
+describe("runCommand agent-selection", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    // Make process.exit throw so runCommand stops executing after exit is called
+    exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+      throw new Error(`process.exit(${code})`);
+    });
+
+    // Override loadConfig to return controlled configs (don't hit the filesystem)
+    const { loadConfig } = await import("../config-loader.js");
+    vi.mocked(loadConfig).mockReset();
+
+    const { createHarness } = await import("@goondan/openharness");
+    vi.mocked(createHarness).mockReset();
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  it("single agent is auto-selected and runCommand succeeds", async () => {
+    const { loadConfig } = await import("../config-loader.js");
+    const { createHarness } = await import("@goondan/openharness");
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      agents: {
+        onlyAgent: {
+          model: { provider: "openai", model: "gpt-4o", apiKey: "test-key" },
+        },
+      },
+    } as never);
+
+    const mockHarness = {
+      processTurn: vi.fn().mockResolvedValue({ text: "hello" }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(createHarness).mockResolvedValue(mockHarness as never);
+
+    const { runCommand } = await import("../commands/run.js");
+    await runCommand("hello", { config: "/fake/harness.config.ts" });
+
+    // process.exit should not have been called
+    expect(exitSpy).not.toHaveBeenCalled();
+    // processTurn should have been called with the auto-selected agent name
+    expect(mockHarness.processTurn).toHaveBeenCalledWith("onlyAgent", "hello", expect.anything());
+  });
+
+  it("multiple agents without --agent flag calls process.exit(2)", async () => {
+    const { loadConfig } = await import("../config-loader.js");
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      agents: {
+        agentA: { model: { provider: "openai", model: "gpt-4o", apiKey: "test-key" } },
+        agentB: { model: { provider: "openai", model: "gpt-4o", apiKey: "test-key" } },
+      },
+    } as never);
+
+    const { runCommand } = await import("../commands/run.js");
+
+    await expect(
+      runCommand("hello", { config: "/fake/harness.config.ts" }),
+    ).rejects.toThrow("process.exit(2)");
+
+    expect(exitSpy).toHaveBeenCalledWith(2);
+  });
+
+  it("unknown --agent name calls process.exit(2)", async () => {
+    const { loadConfig } = await import("../config-loader.js");
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      agents: {
+        realAgent: { model: { provider: "openai", model: "gpt-4o", apiKey: "test-key" } },
+      },
+    } as never);
+
+    const { runCommand } = await import("../commands/run.js");
+
+    await expect(
+      runCommand("hello", { config: "/fake/harness.config.ts", agent: "ghostAgent" }),
+    ).rejects.toThrow("process.exit(2)");
+
+    expect(exitSpy).toHaveBeenCalledWith(2);
   });
 });
