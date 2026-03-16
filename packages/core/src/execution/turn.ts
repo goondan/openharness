@@ -1,7 +1,6 @@
 import type {
   TurnContext,
   TurnResult,
-  TurnMiddleware,
   StepContext,
   StepResult,
   StepSummary,
@@ -100,20 +99,6 @@ export async function executeTurn(
     envelope = input;
   }
 
-  // 4. Set conversationState._turnActive = true
-  conversationState._turnActive = true;
-
-  // 5. FR-CORE-007: Append inbound message to conversation
-  const text = extractText(envelope);
-  conversationState.emit({
-    type: "append",
-    message: {
-      id: generateMessageId(),
-      role: "user",
-      content: text ? text : envelope.content as unknown as string,
-    },
-  });
-
   // Build TurnContext
   const turnCtx: TurnContext = {
     turnId,
@@ -203,6 +188,20 @@ export async function executeTurn(
   // Execute the chain and handle errors
   let result: TurnResult;
   try {
+    // 4. Set conversationState._turnActive = true (inside try so errors reset it)
+    conversationState._turnActive = true;
+
+    // 5. FR-CORE-007: Append inbound message to conversation
+    const text = extractText(envelope);
+    conversationState.emit({
+      type: "append",
+      message: {
+        id: generateMessageId(),
+        role: "user",
+        content: text,
+      },
+    });
+
     result = await chain(turnCtx);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));

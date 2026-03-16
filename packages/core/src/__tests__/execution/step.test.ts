@@ -351,6 +351,60 @@ describe("executeStep", () => {
     );
   });
 
+  // Test: Multiple tool calls execute sequentially, not concurrently
+  it("multiple tool calls in one step execute sequentially (not concurrently)", async () => {
+    const executionOrder: string[] = [];
+    let concurrentCount = 0;
+    let maxConcurrent = 0;
+
+    function makeSequentialTool(name: string) {
+      return makeTool(name, async () => {
+        concurrentCount++;
+        maxConcurrent = Math.max(maxConcurrent, concurrentCount);
+        executionOrder.push(`start:${name}`);
+        // Simulate async work with a small delay
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        executionOrder.push(`end:${name}`);
+        concurrentCount--;
+        return { type: "text" as const, text: `${name} result` };
+      });
+    }
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeSequentialTool("tool_1"));
+    toolRegistry.register(makeSequentialTool("tool_2"));
+    toolRegistry.register(makeSequentialTool("tool_3"));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-1", toolName: "tool_1", args: { value: "a" } },
+        { toolCallId: "call-2", toolName: "tool_2", args: { value: "b" } },
+        { toolCallId: "call-3", toolName: "tool_3", args: { value: "c" } },
+      ],
+    });
+
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry });
+
+    const result = await executeStep(ctx, deps);
+
+    // All tools should have been called
+    expect(result.toolCalls).toHaveLength(3);
+
+    // Sequential execution: max concurrent should never exceed 1
+    expect(maxConcurrent).toBe(1);
+
+    // Order should be: start/end tool_1, start/end tool_2, start/end tool_3
+    expect(executionOrder).toEqual([
+      "start:tool_1",
+      "end:tool_1",
+      "start:tool_2",
+      "end:tool_2",
+      "start:tool_3",
+      "end:tool_3",
+    ]);
+  });
+
   // LLM client receives current messages and available tools
   it("LLM client is called with current messages and available tools", async () => {
     const toolRegistry = new ToolRegistry();
