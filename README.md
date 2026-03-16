@@ -92,6 +92,7 @@ README는 _처음 시작하는 데 필요한 최소한_ 만 담습니다.
 아래 문서에서 더 자세히 보시는 걸 권장합니다.
 
 - [Getting Started](docs/getting-started.md): 설치, 설정 파일, CLI, programmatic 사용
+- [Migration: alpha4 -> alpha5](docs/migration-alpha4-to-alpha5.md): YAML/manifest 기반 alpha4에서 code-first alpha5로 옮기는 방법
 - [Architecture](docs/architecture.md): Turn/Step/ToolCall, ingress, conversation state
 - [Extensions And Tools](docs/extensions-and-tools.md): 언제 Extension을 쓰고 언제 Tool을 쓰는지
 - [Message Envelope](docs/message-envelope.md): `ModelMessage`, `metadata.__createdBy`, 이벤트 기반 메시지 조작
@@ -101,4 +102,3 @@ README는 _처음 시작하는 데 필요한 최소한_ 만 담습니다.
 
 아직 alpha 단계입니다.
 기본 철학은 꽤 분명하지만, API는 사용성 피드백을 받아 계속 다듬는 중입니다.
-
