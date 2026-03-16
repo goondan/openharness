@@ -1,0 +1,134 @@
+import type { TurnResult, StepResult, StepSummary } from "./middleware.js";
+import type { ToolResult, JsonObject } from "./tool.js";
+import type { InboundEnvelope, IngressAcceptResult } from "./ingress.js";
+
+// -----------------------------------------------------------------------
+// Core execution event payloads
+// -----------------------------------------------------------------------
+
+export interface TurnStartPayload {
+  type: "turn.start";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+}
+
+export interface TurnDonePayload {
+  type: "turn.done";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  result: TurnResult;
+}
+
+export interface TurnErrorPayload {
+  type: "turn.error";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  error: Error;
+}
+
+export interface StepStartPayload {
+  type: "step.start";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+}
+
+export interface StepDonePayload {
+  type: "step.done";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  result: StepResult;
+}
+
+export interface StepErrorPayload {
+  type: "step.error";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  error: Error;
+}
+
+export interface ToolStartPayload {
+  type: "tool.start";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  toolCallId: string;
+  toolName: string;
+  args: JsonObject;
+}
+
+export interface ToolDonePayload {
+  type: "tool.done";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  toolCallId: string;
+  toolName: string;
+  args: JsonObject;
+  result: ToolResult;
+}
+
+export interface ToolErrorPayload {
+  type: "tool.error";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  toolCallId: string;
+  toolName: string;
+  args: JsonObject;
+  error: Error;
+}
+
+// -----------------------------------------------------------------------
+// Ingress event payloads
+// -----------------------------------------------------------------------
+
+export interface IngressReceivedPayload {
+  type: "ingress.received";
+  connectionName: string;
+  payload: unknown;
+  receivedAt: string;
+}
+
+export interface IngressAcceptedPayload {
+  type: "ingress.accepted";
+  connectionName: string;
+  envelope: InboundEnvelope;
+  result: IngressAcceptResult;
+}
+
+export interface IngressRejectedPayload {
+  type: "ingress.rejected";
+  connectionName: string;
+  envelope: InboundEnvelope;
+  reason: string;
+}
+
+// -----------------------------------------------------------------------
+// Union
+// -----------------------------------------------------------------------
+
+export type EventPayload =
+  | TurnStartPayload
+  | TurnDonePayload
+  | TurnErrorPayload
+  | StepStartPayload
+  | StepDonePayload
+  | StepErrorPayload
+  | ToolStartPayload
+  | ToolDonePayload
+  | ToolErrorPayload
+  | IngressReceivedPayload
+  | IngressAcceptedPayload
+  | IngressRejectedPayload;
