@@ -14,8 +14,6 @@ import type {
   LlmResponse,
   Message,
   ToolDefinition,
-  InboundEnvelope,
-  TurnResult,
   ToolCallContext,
   ToolResult,
   MessageEvent,
@@ -162,8 +160,7 @@ describe("AC-1: Minimal execution with ContextMessage", () => {
 
     // TurnResult assertions
     expect(result.status).toBe("completed");
-    expect(result.text).toBeDefined();
-    expect(typeof result.text).toBe("string");
+    expect(result.text).toBe("AC-1 response");
 
     await runtime.close();
   });
@@ -246,6 +243,7 @@ describe("AC-3: Extension swap — MessageWindow truncates, no-op extension does
     // The last call should have received at most 2 messages
     const lastCallWithWindow = chatWithWindow.mock.calls[chatWithWindow.mock.calls.length - 1];
     const messagesWithWindow = lastCallWithWindow[0] as Message[];
+    expect(messagesWithWindow.length).toBeGreaterThanOrEqual(1);
     expect(messagesWithWindow.length).toBeLessThanOrEqual(2);
 
     await runtimeWithWindow.close();
@@ -297,7 +295,7 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     const original = createConversationState();
 
     // Manually activate turn so emit() works
-    original._turnActive = true;
+    original["_turnActive"] = true;
 
     // Emit several events
     original.emit({
@@ -335,7 +333,7 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
 
   it("AC-4: restore works with mixed event types (append + truncate)", () => {
     const original = createConversationState();
-    original._turnActive = true;
+    original["_turnActive"] = true;
 
     for (let i = 1; i <= 5; i++) {
       original.emit({
@@ -607,8 +605,11 @@ describe("AC-9: Ingress pipeline — verify → normalize → route → dispatch
       chat: vi.fn().mockResolvedValue({ text: "ingress response" }),
     });
 
-    const verifyFn = vi.fn().mockResolvedValue(undefined);
-    const normalizeFn = vi.fn().mockImplementation(async (ctx: { connectionName: string; payload: unknown; receivedAt: string }) => ({
+    const callOrder: string[] = [];
+    const verifyFn = vi.fn().mockImplementation(async () => { callOrder.push("verify"); });
+    const normalizeFn = vi.fn().mockImplementation(async (ctx: { connectionName: string; payload: unknown; receivedAt: string }) => {
+      callOrder.push("normalize");
+      return {
       name: "message",
       content: [{ type: "text" as const, text: "hello from connector" }],
       properties: {},
@@ -618,7 +619,8 @@ describe("AC-9: Ingress pipeline — verify → normalize → route → dispatch
         connectionName: ctx.connectionName,
         receivedAt: ctx.receivedAt,
       },
-    }));
+    };
+    });
 
     const config: HarnessConfig = {
       agents: {
@@ -660,6 +662,9 @@ describe("AC-9: Ingress pipeline — verify → normalize → route → dispatch
 
     // Normalize stage fired
     expect(normalizeFn).toHaveBeenCalledOnce();
+
+    // Verify stages ran in correct order: verify → normalize, then route+dispatch (implicit)
+    expect(callOrder).toEqual(["verify", "normalize"]);
 
     // Envelope was accepted with correct agent
     expect(results).toHaveLength(1);
@@ -849,7 +854,7 @@ describe("AC-12: Runtime introspection via api.runtime.agent", () => {
       },
     };
 
-    await createHarness(config);
+    const runtime = await createHarness(config);
 
     // Introspection should have captured runtime info during register()
     expect(capturedRuntimeInfo.agentName).toBe("my-agent");
@@ -859,6 +864,8 @@ describe("AC-12: Runtime introspection via api.runtime.agent", () => {
     expect(capturedRuntimeInfo.extensionCount).toBe(2);
     // 3 tools declared in config
     expect(capturedRuntimeInfo.toolCount).toBe(3);
+
+    await runtime.close();
   });
 });
 
