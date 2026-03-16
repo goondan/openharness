@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-base",
-  "version": "0.0.1-alpha5",
+  "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }

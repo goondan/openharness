@@ -1,0 +1,9 @@
+{
+  "name": "e2e-test",
+  "private": true,
+  "dependencies": {
+    "@goondan/openharness": "workspace:*",
+    "@goondan/openharness-base": "workspace:*",
+    "@goondan/openharness-cli": "workspace:*"
+  }
+}
