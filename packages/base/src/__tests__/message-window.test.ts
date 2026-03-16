@@ -1,0 +1,191 @@
+import { describe, it, expect, vi } from "vitest";
+import { MessageWindow } from "../extensions/message-window.js";
+import type {
+  ExtensionApi,
+  StepMiddleware,
+  StepContext,
+  StepResult,
+  ConversationState,
+  Message,
+  MessageEvent,
+} from "@goondan/openharness-types";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeMessages(count: number): Message[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `msg-${i}`,
+    role: "user" as const,
+    content: `Message ${i}`,
+  }));
+}
+
+function makeMockConversationState(
+  messages: Message[],
+): ConversationState & { emitted: MessageEvent[] } {
+  const emitted: MessageEvent[] = [];
+  return {
+    messages,
+    events: [],
+    emitted,
+    emit: vi.fn((event: MessageEvent) => {
+      emitted.push(event);
+    }),
+    restore: vi.fn(),
+  };
+}
+
+function makeMockApi(conversation: ConversationState): {
+  api: ExtensionApi;
+  registeredMiddleware: Array<{
+    level: string;
+    handler: StepMiddleware;
+    options?: { priority?: number };
+  }>;
+} {
+  const registeredMiddleware: Array<{
+    level: string;
+    handler: StepMiddleware;
+    options?: { priority?: number };
+  }> = [];
+
+  const api: ExtensionApi = {
+    pipeline: {
+      register: vi.fn(
+        (level: string, handler: StepMiddleware, options?: { priority?: number }) => {
+          registeredMiddleware.push({ level, handler, options });
+        },
+      ) as unknown as ExtensionApi["pipeline"]["register"],
+    },
+    tools: {
+      register: vi.fn(),
+      remove: vi.fn(),
+      list: vi.fn(() => []),
+    },
+    on: vi.fn(),
+    conversation,
+    runtime: {
+      agent: {
+        name: "test-agent",
+        model: { provider: "openai", model: "gpt-4o" },
+        extensions: [],
+        tools: [],
+      },
+      agents: {},
+      connections: {},
+    },
+  };
+
+  return { api, registeredMiddleware };
+}
+
+function makeStepContext(conversation: ConversationState): StepContext {
+  return {
+    turnId: "turn-1",
+    agentName: "test-agent",
+    conversationId: "conv-1",
+    conversation,
+    stepNumber: 1,
+    abortSignal: new AbortController().signal,
+    input: {
+      name: "test-event",
+      content: [{ type: "text", text: "hello" }],
+      properties: {},
+      source: {
+        connector: "test-connector",
+        connectionName: "test",
+        receivedAt: new Date().toISOString(),
+      },
+    },
+  };
+}
+
+const stubStepResult: StepResult = {
+  toolCalls: [],
+};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("MessageWindow", () => {
+  it("creates an Extension with name 'message-window'", () => {
+    const ext = MessageWindow({ maxMessages: 5 });
+    expect(ext.name).toBe("message-window");
+  });
+
+  it("registers step middleware via api.pipeline.register", () => {
+    const conversation = makeMockConversationState([]);
+    const { api, registeredMiddleware } = makeMockApi(conversation);
+
+    const ext = MessageWindow({ maxMessages: 5 });
+    ext.register(api);
+
+    expect(api.pipeline.register).toHaveBeenCalledOnce();
+    expect(registeredMiddleware[0].level).toBe("step");
+  });
+
+  it("does NOT emit truncate when messages are within maxMessages", async () => {
+    const messages = makeMessages(3);
+    const conversation = makeMockConversationState(messages);
+    const { api, registeredMiddleware } = makeMockApi(conversation);
+
+    const ext = MessageWindow({ maxMessages: 5 });
+    ext.register(api);
+
+    const middleware = registeredMiddleware[0].handler;
+    const ctx = makeStepContext(conversation);
+    const next = vi.fn(async () => stubStepResult);
+
+    await middleware(ctx, next);
+
+    expect(conversation.emit).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("emits truncate when messages exceed maxMessages", async () => {
+    const messages = makeMessages(8);
+    const conversation = makeMockConversationState(messages);
+    const { api, registeredMiddleware } = makeMockApi(conversation);
+
+    const ext = MessageWindow({ maxMessages: 5 });
+    ext.register(api);
+
+    const middleware = registeredMiddleware[0].handler;
+    const ctx = makeStepContext(conversation);
+    const next = vi.fn(async () => stubStepResult);
+
+    await middleware(ctx, next);
+
+    expect(conversation.emit).toHaveBeenCalledOnce();
+    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
+    expect(emitted.type).toBe("truncate");
+    if (emitted.type === "truncate") {
+      expect(emitted.keepLast).toBe(5);
+    }
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("emits truncate with exact maxMessages count", async () => {
+    const messages = makeMessages(6);
+    const conversation = makeMockConversationState(messages);
+    const { api, registeredMiddleware } = makeMockApi(conversation);
+
+    const ext = MessageWindow({ maxMessages: 5 });
+    ext.register(api);
+
+    const middleware = registeredMiddleware[0].handler;
+    const ctx = makeStepContext(conversation);
+    const next = vi.fn(async () => stubStepResult);
+
+    await middleware(ctx, next);
+
+    expect(conversation.emit).toHaveBeenCalledOnce();
+    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
+    if (emitted.type === "truncate") {
+      expect(emitted.keepLast).toBe(5);
+    }
+  });
+});
