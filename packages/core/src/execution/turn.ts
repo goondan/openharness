@@ -12,20 +12,19 @@ import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
+import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
 
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 
-let _idCounter = 0;
-
 function generateTurnId(): string {
-  return `turn-${++_idCounter}-${Date.now()}`;
+  return `turn-${randomUUID()}`;
 }
 
 function generateMessageId(): string {
-  return `msg-${++_idCounter}-${Date.now()}`;
+  return `msg-${randomUUID()}`;
 }
 
 /**
@@ -201,8 +200,13 @@ export async function executeTurn(
       type: "append",
       message: {
         id: generateMessageId(),
-        role: "user",
-        content: text,
+        data: {
+          role: "user",
+          content: text,
+        },
+        metadata: {
+          __createdBy: "core",
+        },
       },
     });
 

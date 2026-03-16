@@ -1,4 +1,5 @@
 import type { Extension, ExtensionApi } from "@goondan/openharness-types";
+import { randomUUID } from "node:crypto";
 
 /**
  * ContextMessage extension — prepends a system message to the conversation
@@ -17,9 +18,14 @@ export function ContextMessage(text: string): Extension {
           ctx.conversation.emit({
             type: "append",
             message: {
-              id: `ctx-msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              role: "system",
-              content: text,
+              id: `ctx-msg-${randomUUID()}`,
+              data: {
+                role: "system",
+                content: text,
+              },
+              metadata: {
+                __createdBy: "context-message",
+              },
             },
           });
           return next();

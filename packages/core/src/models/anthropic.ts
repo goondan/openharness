@@ -20,48 +20,41 @@ function transformMessages(messages: Message[]): unknown[] {
   const result: unknown[] = [];
 
   for (const msg of messages) {
-    if (msg.role === "system") {
+    const data = msg.data;
+
+    if (data.role === "system") {
       // Anthropic takes system separately; skip here — extracted in chat()
       continue;
     }
 
-    if (msg.role === "user") {
+    if (data.role === "user") {
       result.push({
         role: "user",
         content:
-          typeof msg.content === "string"
-            ? msg.content
-            : msg.content
+          typeof data.content === "string"
+            ? data.content
+            : data.content
                 .map((part) => {
                   if (part.type === "text") return { type: "text", text: part.text };
-                  if (part.type === "tool_result") {
-                    const resultContent =
-                      part.result.type === "text"
-                        ? part.result.text
-                        : JSON.stringify(
-                            part.result.type === "json" ? part.result.data : part.result.error,
-                          );
-                    return {
-                      type: "tool_result",
-                      tool_use_id: part.toolCallId,
-                      content: resultContent,
-                    };
-                  }
                   return null;
                 })
                 .filter(Boolean),
       });
-    } else if (msg.role === "tool") {
+    } else if (data.role === "tool") {
       // Anthropic expects tool results as role: "user" with tool_result content blocks
-      const toolResultContent = (Array.isArray(msg.content) ? msg.content : [])
-        .filter((part): part is Extract<typeof part, { type: "tool_result" }> => part.type === "tool_result")
+      const toolResultContent = data.content
+        .filter((part): part is Extract<typeof part, { type: "tool-result" }> => part.type === "tool-result")
         .map((part) => {
           const resultContent =
-            part.result.type === "text"
-              ? part.result.text
-              : JSON.stringify(
-                  part.result.type === "json" ? part.result.data : part.result.error,
-                );
+            part.output.type === "text"
+              ? part.output.value
+              : part.output.type === "json"
+                ? JSON.stringify(part.output.value)
+                : part.output.type === "error-text"
+                  ? part.output.value
+                  : part.output.type === "error-json"
+                    ? JSON.stringify(part.output.value)
+                    : JSON.stringify(part.output);
           return {
             type: "tool_result",
             tool_use_id: part.toolCallId,
@@ -72,21 +65,21 @@ function transformMessages(messages: Message[]): unknown[] {
       if (toolResultContent.length > 0) {
         result.push({ role: "user", content: toolResultContent });
       }
-    } else if (msg.role === "assistant") {
+    } else if (data.role === "assistant") {
       result.push({
         role: "assistant",
         content:
-          typeof msg.content === "string"
-            ? msg.content
-            : msg.content
+          typeof data.content === "string"
+            ? data.content
+            : data.content
                 .map((part) => {
                   if (part.type === "text") return { type: "text", text: part.text };
-                  if (part.type === "tool_use") {
+                  if (part.type === "tool-call") {
                     return {
                       type: "tool_use",
                       id: part.toolCallId,
                       name: part.toolName,
-                      input: part.args,
+                      input: part.input,
                     };
                   }
                   return null;
@@ -125,10 +118,10 @@ export function createAnthropicClient(
       }
 
       // Extract system message
-      const systemMsg = messages.find((m) => m.role === "system");
+      const systemMsg = messages.find((m) => m.data.role === "system");
       const systemText = systemMsg
-        ? typeof systemMsg.content === "string"
-          ? systemMsg.content
+        ? typeof systemMsg.data.content === "string"
+          ? systemMsg.data.content
           : ""
         : undefined;
 

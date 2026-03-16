@@ -1,4 +1,5 @@
 import type { Extension, ExtensionApi } from "@goondan/openharness-types";
+import { randomUUID } from "node:crypto";
 
 /**
  * CompactionSummarize extension — when message count exceeds `threshold`,
@@ -23,7 +24,11 @@ export function CompactionSummarize(config: {
 
           // Build a naive summary from removed messages
           const summaryText = toRemove
-            .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+            .map((m) =>
+              typeof m.data.content === "string"
+                ? m.data.content
+                : JSON.stringify(m.data.content),
+            )
             .join(" ");
 
           // Remove old messages
@@ -35,9 +40,14 @@ export function CompactionSummarize(config: {
           ctx.conversation.emit({
             type: "append",
             message: {
-              id: `summary-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              role: "system",
-              content: `[Summary of earlier conversation]: ${summaryText}`,
+              id: `summary-${randomUUID()}`,
+              data: {
+                role: "system",
+                content: `[Summary of earlier conversation]: ${summaryText}`,
+              },
+              metadata: {
+                __createdBy: "compaction-summarize",
+              },
             },
           });
         }

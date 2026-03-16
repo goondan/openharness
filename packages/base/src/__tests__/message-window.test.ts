@@ -17,8 +17,10 @@ import type {
 function makeMessages(count: number): Message[] {
   return Array.from({ length: count }, (_, i) => ({
     id: `msg-${i}`,
-    role: "user" as const,
-    content: `Message ${i}`,
+    data: {
+      role: "user" as const,
+      content: `Message ${i}`,
+    },
   }));
 }
 

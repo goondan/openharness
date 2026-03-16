@@ -2,7 +2,8 @@ import type {
   StepContext,
   StepResult,
   LlmClient,
-  ContentPart,
+  AssistantModelMessage,
+  ToolModelMessage,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -63,7 +64,11 @@ export async function executeStep(
     );
 
     // d. FR-CORE-007: Append LLM assistant response to conversation
-    const assistantContent: ContentPart[] = [];
+    const assistantContent: NonNullable<AssistantModelMessage["content"]> extends infer T
+      ? T extends string
+        ? never
+        : T
+      : never = [];
 
     if (llmResponse.text) {
       assistantContent.push({ type: "text", text: llmResponse.text });
@@ -72,9 +77,9 @@ export async function executeStep(
     if (llmResponse.toolCalls && llmResponse.toolCalls.length > 0) {
       for (const tc of llmResponse.toolCalls) {
         assistantContent.push({
-          type: "tool_use",
+          type: "tool-call",
           toolName: tc.toolName,
-          args: tc.args,
+          input: tc.args,
           toolCallId: tc.toolCallId,
         });
       }
@@ -87,8 +92,13 @@ export async function executeStep(
         type: "append",
         message: {
           id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
-          role: "assistant",
-          content: assistantContent,
+          data: {
+            role: "assistant",
+            content: assistantContent,
+          },
+          metadata: {
+            __createdBy: "core",
+          },
         },
       });
     }
@@ -115,15 +125,25 @@ export async function executeStep(
           type: "append",
           message: {
             id: `tool-result-${tc.toolCallId}`,
-            role: "tool",
-            content: [
-              {
-                type: "tool_result",
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                result: toolResult,
-              },
-            ],
+            data: {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  output:
+                    toolResult.type === "text"
+                      ? { type: "text", value: toolResult.text }
+                      : toolResult.type === "json"
+                        ? { type: "json", value: toolResult.data }
+                        : { type: "error-text", value: toolResult.error },
+                },
+              ],
+            } satisfies ToolModelMessage,
+            metadata: {
+              __createdBy: "core",
+            },
           },
         });
 

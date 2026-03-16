@@ -21,6 +21,14 @@ function makeAbortSignal(): AbortSignal {
   return new AbortController().signal;
 }
 
+function makeMessage(
+  id: string,
+  role: Message["data"]["role"],
+  content: Message["data"]["content"],
+): Message {
+  return { id, data: { role, content } as Message["data"] };
+}
+
 function makeConversation() {
   const conv = createConversationState();
   // Must be active for emit() to work
@@ -287,9 +295,9 @@ describe("executeStep", () => {
     await executeStep(ctx, deps);
 
     const messages = ctx.conversation.messages;
-    const assistantMessages = messages.filter((m: Message) => m.role === "assistant");
+    const assistantMessages = messages.filter((m: Message) => m.data.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0].content).toEqual(
+    expect(assistantMessages[0].data.content).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "text", text: "assistant reply" }),
       ])
@@ -313,17 +321,17 @@ describe("executeStep", () => {
     await executeStep(ctx, deps);
 
     const messages = ctx.conversation.messages;
-    const toolMessages = messages.filter((m: Message) => m.role === "tool");
+    const toolMessages = messages.filter((m: Message) => m.data.role === "tool");
     expect(toolMessages).toHaveLength(1);
-    expect(toolMessages[0].content).toEqual(
+    expect(toolMessages[0].data.content).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ type: "tool_result", toolCallId: "tc-1" }),
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc-1" }),
       ])
     );
   });
 
-  // FR-CORE-007: LLM response with tool_use content parts appended
-  it("FR-CORE-007: LLM response with tool calls includes tool_use content parts", async () => {
+  // FR-CORE-007: LLM response with tool-call content parts appended
+  it("FR-CORE-007: LLM response with tool calls includes tool-call content parts", async () => {
     const toolRegistry = new ToolRegistry();
     toolRegistry.register(makeTool("my_tool"));
 
@@ -340,13 +348,13 @@ describe("executeStep", () => {
     await executeStep(ctx, deps);
 
     const messages = ctx.conversation.messages;
-    const assistantMessages = messages.filter((m: Message) => m.role === "assistant");
+    const assistantMessages = messages.filter((m: Message) => m.data.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
-    const assistantContent = assistantMessages[0].content as Array<{ type: string }>;
+    const assistantContent = assistantMessages[0].data.content as Array<{ type: string }>;
     expect(assistantContent).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "text", text: "Using a tool" }),
-        expect.objectContaining({ type: "tool_use", toolName: "my_tool", toolCallId: "tc-1" }),
+        expect.objectContaining({ type: "tool-call", toolName: "my_tool", toolCallId: "tc-1" }),
       ])
     );
   });
@@ -419,7 +427,7 @@ describe("executeStep", () => {
     // Pre-populate conversation with a message
     conv.emit({
       type: "append",
-      message: { id: "msg-1", role: "user", content: "Hello" },
+      message: makeMessage("msg-1", "user", "Hello"),
     });
 
     const ctx = makeStepContext({ conversation: conv });
@@ -429,7 +437,7 @@ describe("executeStep", () => {
 
     expect(llmClient.chat).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({ id: "msg-1", role: "user" }),
+        expect.objectContaining({ id: "msg-1", data: expect.objectContaining({ role: "user" }) }),
       ]),
       expect.arrayContaining([
         expect.objectContaining({ name: "available_tool" }),

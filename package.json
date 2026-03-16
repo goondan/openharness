@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@google/generative-ai": "^0.24.1",
+    "ai": "^6.0.105",
     "openai": "^6.29.0",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",

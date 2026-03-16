@@ -17,8 +17,10 @@ import type {
 function makeMessages(count: number): Message[] {
   return Array.from({ length: count }, (_, i) => ({
     id: `msg-${i}`,
-    role: "user" as const,
-    content: `Message ${i}`,
+    data: {
+      role: "user" as const,
+      content: `Message ${i}`,
+    },
   }));
 }
 
@@ -172,8 +174,9 @@ describe("CompactionSummarize", () => {
     // The appended message should be a system summary
     const appendEvent = appendEvents[0];
     if (appendEvent.type === "append") {
-      expect(appendEvent.message.role).toBe("system");
-      expect(appendEvent.message.content).toContain("[Summary of earlier conversation]:");
+      expect(appendEvent.message.data.role).toBe("system");
+      expect(appendEvent.message.data.content).toContain("[Summary of earlier conversation]:");
+      expect(appendEvent.message.metadata?.__createdBy).toBe("compaction-summarize");
     }
 
     expect(next).toHaveBeenCalledOnce();
@@ -223,7 +226,7 @@ describe("CompactionSummarize", () => {
     const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
     const appendEvent = emitted.find((e) => e.type === "append");
     if (appendEvent && appendEvent.type === "append") {
-      const content = appendEvent.message.content as string;
+      const content = appendEvent.message.data.content as string;
       // Should include text from the removed messages
       expect(content).toContain("Message 0");
     }

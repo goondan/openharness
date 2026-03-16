@@ -17,39 +17,45 @@ export function Google(config: {
 
 function transformContents(messages: Message[]): unknown[] {
   return messages
-    .filter((m) => m.role !== "system")
+    .filter((m) => m.data.role !== "system")
     .map((msg) => {
+      const data = msg.data;
       // Google SDK roles: "user", "model", "function"
       // role: "tool" messages carry functionResponse parts → role: "function"
-      const role = msg.role === "assistant" ? "model" : msg.role === "tool" ? "function" : "user";
+      const role =
+        data.role === "assistant" ? "model" : data.role === "tool" ? "function" : "user";
 
-      if (typeof msg.content === "string") {
+      if (typeof data.content === "string") {
         return {
           role,
-          parts: [{ text: msg.content }],
+          parts: [{ text: data.content }],
         };
       }
 
-      const parts = msg.content
+      const parts = data.content
         .map((part) => {
           if (part.type === "text") return { text: part.text };
-          if (part.type === "tool_use") {
+          if (part.type === "tool-call") {
             return {
               functionCall: {
                 name: part.toolName,
-                args: part.args,
+                args: part.input,
               },
             };
           }
-          if (part.type === "tool_result") {
+          if (part.type === "tool-result") {
             // Google SDK uses function NAME (not call ID) to correlate responses.
             const funcName = part.toolName ?? part.toolCallId;
             const resultValue =
-              part.result.type === "text"
-                ? { output: part.result.text }
-                : part.result.type === "json"
-                  ? (part.result.data as Record<string, unknown>)
-                  : { error: part.result.error };
+              part.output.type === "text"
+                ? { output: part.output.value }
+                : part.output.type === "json"
+                  ? (part.output.value as Record<string, unknown>)
+                  : part.output.type === "error-text"
+                    ? { error: part.output.value }
+                    : part.output.type === "error-json"
+                      ? { error: part.output.value }
+                      : { output: part.output };
             return {
               functionResponse: {
                 name: funcName,
@@ -78,10 +84,8 @@ function transformTools(tools: ToolDefinition[]): unknown[] {
 }
 
 export function createGoogleClient(model: string, apiKey: string): LlmClient {
-  type GeminiModel = { generateContent: (req: unknown, opts?: unknown) => Promise<{ response: { candidates?: Array<{ content?: { parts?: unknown[] } }> } }> };
-  type GenAI = { getGenerativeModel: (config: Record<string, unknown>) => GeminiModel };
   // Cached genAI instance — initialized lazily on first call, then reused
-  let genAI: GenAI | undefined;
+  let genAI: any;
 
   return {
     async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
@@ -93,10 +97,10 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
       }
 
       // Extract system instruction
-      const systemMsg = messages.find((m) => m.role === "system");
+      const systemMsg = messages.find((m) => m.data.role === "system");
       const systemInstruction = systemMsg
-        ? typeof systemMsg.content === "string"
-          ? systemMsg.content
+        ? typeof systemMsg.data.content === "string"
+          ? systemMsg.data.content
           : ""
         : undefined;
 

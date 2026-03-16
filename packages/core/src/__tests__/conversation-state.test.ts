@@ -3,8 +3,8 @@ import type { Message, MessageEvent } from "@goondan/openharness-types";
 import { createConversationState } from "../index.js";
 
 // Helper to create a simple message
-function makeMessage(id: string, text: string, role: Message["role"] = "user"): Message {
-  return { id, role, content: text };
+function makeMessage(id: string, text: string, role: Message["data"]["role"] = "user"): Message {
+  return { id, data: { role, content: text } as Message["data"] };
 }
 
 describe("ConversationState", () => {

@@ -148,8 +148,9 @@ describe("ContextMessage", () => {
     const emitted = conversation.emitted[0];
     expect(emitted.type).toBe("append");
     if (emitted.type === "append") {
-      expect(emitted.message.role).toBe("system");
-      expect(emitted.message.content).toBe(systemText);
+      expect(emitted.message.data.role).toBe("system");
+      expect(emitted.message.data.content).toBe(systemText);
+      expect(emitted.message.metadata?.__createdBy).toBe("context-message");
       expect(typeof emitted.message.id).toBe("string");
     }
   });
@@ -194,7 +195,7 @@ describe("ContextMessage", () => {
 
     const texts = conversation.emitted
       .filter((e): e is Extract<typeof e, { type: "append" }> => e.type === "append")
-      .map((e) => e.message.content);
+      .map((e) => e.message.data.content);
 
     expect(texts).toContain("First context");
     expect(texts).toContain("Second context");

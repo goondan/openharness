@@ -22,6 +22,22 @@ import { defineHarness } from "@goondan/openharness-types";
 import { createHarness } from "../../create-harness.js";
 import { createConversationState } from "../../conversation-state.js";
 
+function makeTextMessage(
+  id: string,
+  role: Message["data"]["role"],
+  content: string,
+): Message {
+  return { id, data: { role, content } as Message["data"] };
+}
+
+function messageRole(message: Message): Message["data"]["role"] {
+  return message.data.role;
+}
+
+function messageContent(message: Message): any {
+  return message.data.content;
+}
+
 // ---------------------------------------------------------------------------
 // Inline implementations of base extensions
 // (avoids adding @goondan/openharness-base as a test dependency of core)
@@ -38,8 +54,8 @@ function ContextMessage(text: string): Extension {
             type: "append",
             message: {
               id: `ctx-msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              role: "system",
-              content: text,
+              data: { role: "system", content: text },
+              metadata: { __createdBy: "context-message" },
             },
           });
           return next();
@@ -147,15 +163,15 @@ describe("AC-1: Minimal execution with ContextMessage", () => {
     const [messagesArg] = capturedChat.mock.calls[0] as [Message[], unknown, unknown];
 
     // There must be a system message with the ContextMessage text
-    const systemMessages = messagesArg.filter((m) => m.role === "system");
+    const systemMessages = messagesArg.filter((m) => messageRole(m) === "system");
     expect(systemMessages.length).toBeGreaterThanOrEqual(1);
-    expect(systemMessages.some((m) => m.content === "You are helpful.")).toBe(true);
+    expect(systemMessages.some((m) => messageContent(m) === "You are helpful.")).toBe(true);
 
     // There must be a user message with "hello"
-    const userMessages = messagesArg.filter((m) => m.role === "user");
+    const userMessages = messagesArg.filter((m) => messageRole(m) === "user");
     expect(userMessages.length).toBeGreaterThanOrEqual(1);
     expect(
-      userMessages.some((m) => typeof m.content === "string" && m.content.includes("hello")),
+      userMessages.some((m) => typeof messageContent(m) === "string" && messageContent(m).includes("hello")),
     ).toBe(true);
 
     // TurnResult assertions
@@ -195,10 +211,10 @@ describe("AC-2: No Extension = empty context to LLM", () => {
     ];
 
     // Only a user message — no system message injected
-    const systemMessages = messagesArg.filter((m) => m.role === "system");
+    const systemMessages = messagesArg.filter((m) => messageRole(m) === "system");
     expect(systemMessages).toHaveLength(0);
 
-    const userMessages = messagesArg.filter((m) => m.role === "user");
+    const userMessages = messagesArg.filter((m) => messageRole(m) === "user");
     expect(userMessages).toHaveLength(1);
 
     // tools parameter is empty array
@@ -300,19 +316,19 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     // Emit several events
     original.emit({
       type: "append",
-      message: { id: "m1", role: "user", content: "hello" },
+      message: makeTextMessage("m1", "user", "hello"),
     });
     original.emit({
       type: "append",
-      message: { id: "m2", role: "assistant", content: "hi there" },
+      message: makeTextMessage("m2", "assistant", "hi there"),
     });
     original.emit({
       type: "append",
-      message: { id: "m3", role: "user", content: "how are you?" },
+      message: makeTextMessage("m3", "user", "how are you?"),
     });
     original.emit({
       type: "append",
-      message: { id: "m4", role: "assistant", content: "I am fine" },
+      message: makeTextMessage("m4", "assistant", "I am fine"),
     });
 
     const originalMessages = [...original.messages];
@@ -325,10 +341,10 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     // Messages must be deeply equal
     expect(restored.messages).toEqual(originalMessages);
     expect(restored.messages).toHaveLength(4);
-    expect(restored.messages[0]).toEqual({ id: "m1", role: "user", content: "hello" });
-    expect(restored.messages[1]).toEqual({ id: "m2", role: "assistant", content: "hi there" });
-    expect(restored.messages[2]).toEqual({ id: "m3", role: "user", content: "how are you?" });
-    expect(restored.messages[3]).toEqual({ id: "m4", role: "assistant", content: "I am fine" });
+    expect(restored.messages[0]).toEqual(makeTextMessage("m1", "user", "hello"));
+    expect(restored.messages[1]).toEqual(makeTextMessage("m2", "assistant", "hi there"));
+    expect(restored.messages[2]).toEqual(makeTextMessage("m3", "user", "how are you?"));
+    expect(restored.messages[3]).toEqual(makeTextMessage("m4", "assistant", "I am fine"));
   });
 
   it("AC-4: restore works with mixed event types (append + truncate)", () => {
@@ -338,7 +354,7 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     for (let i = 1; i <= 5; i++) {
       original.emit({
         type: "append",
-        message: { id: `m${i}`, role: "user", content: `message ${i}` },
+        message: makeTextMessage(`m${i}`, "user", `message ${i}`),
       });
     }
     original.emit({ type: "truncate", keepLast: 2 });
@@ -444,9 +460,9 @@ describe("AC-5 & AC-6: Persistence Extension presence/absence", () => {
     // Must contain at least one message from previous turns
     const userMessages = messages.filter(
       (m) =>
-        m.role === "user" &&
-        typeof m.content === "string" &&
-        (m.content.includes("turn 1") || m.content.includes("turn 2")),
+        messageRole(m) === "user" &&
+        typeof messageContent(m) === "string" &&
+        (messageContent(m).includes("turn 1") || messageContent(m).includes("turn 2")),
     );
     expect(userMessages.length).toBeGreaterThanOrEqual(1);
 
@@ -476,9 +492,9 @@ describe("AC-5 & AC-6: Persistence Extension presence/absence", () => {
     const [messages] = capturedChat2.mock.calls[0] as [Message[], unknown, unknown];
 
     // Only the 1 new user message — no history
-    const userMessages = messages.filter((m) => m.role === "user");
+    const userMessages = messages.filter((m) => messageRole(m) === "user");
     expect(userMessages).toHaveLength(1);
-    expect(typeof userMessages[0].content === "string" && userMessages[0].content).toContain(
+    expect(typeof messageContent(userMessages[0]) === "string" && messageContent(userMessages[0])).toContain(
       "turn 3",
     );
 
@@ -945,8 +961,8 @@ describe("AC-14: Third-party Extension with types-only import", () => {
             type: "append",
             message: {
               id: `tp-sys-${Date.now()}`,
-              role: "system",
-              content: "You are a third-party assistant.",
+              data: { role: "system", content: "You are a third-party assistant." },
+              metadata: { __createdBy: "third-party-system-prompt" },
             },
           });
           return next();
@@ -973,13 +989,13 @@ describe("AC-14: Third-party Extension with types-only import", () => {
     expect(capturedChat).toHaveBeenCalledOnce();
     const [messages] = capturedChat.mock.calls[0] as [Message[], unknown, unknown];
 
-    const systemMessages = messages.filter((m) => m.role === "system");
+    const systemMessages = messages.filter((m) => messageRole(m) === "system");
     expect(systemMessages.length).toBeGreaterThanOrEqual(1);
     expect(
       systemMessages.some(
         (m) =>
-          typeof m.content === "string" &&
-          m.content.includes("third-party assistant"),
+          typeof messageContent(m) === "string" &&
+          messageContent(m).includes("third-party assistant"),
       ),
     ).toBe(true);
 

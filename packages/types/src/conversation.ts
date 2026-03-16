@@ -1,19 +1,9 @@
-import type { ToolResult, JsonObject } from "./tool.js";
-
-// MessageContent building blocks
-export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image"; url: string }
-  | { type: "tool_use"; toolName: string; args: JsonObject; toolCallId: string }
-  | { type: "tool_result"; toolCallId: string; toolName?: string; result: ToolResult };
-
-export type MessageContent = string | ContentPart[];
+import type { ModelMessage } from "ai";
 
 // Message
 export interface Message {
   id: string;
-  role: "system" | "user" | "assistant" | "tool";
-  content: MessageContent;
+  data: ModelMessage;
   metadata?: Record<string, unknown>;
 }
 

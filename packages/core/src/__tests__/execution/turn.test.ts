@@ -67,6 +67,14 @@ function makeEnvelope(text: string): InboundEnvelope {
   };
 }
 
+function messageRole(message: Message): Message["data"]["role"] {
+  return message.data.role;
+}
+
+function messageContent(message: Message): any {
+  return message.data.content;
+}
+
 interface MakeDepsOptions {
   llmClient?: LlmClient;
   toolRegistry?: ToolRegistry;
@@ -360,9 +368,9 @@ describe("executeTurn", () => {
     expect(capturedMessages).toBeDefined();
     expect(capturedMessages!.length).toBeGreaterThanOrEqual(1);
 
-    const userMessages = capturedMessages!.filter((m) => m.role === "user");
+    const userMessages = capturedMessages!.filter((m) => messageRole(m) === "user");
     expect(userMessages).toHaveLength(1);
-    expect(userMessages[0].content).toContain("user message text");
+    expect(messageContent(userMessages[0])).toContain("user message text");
   });
 
   // Test 11b: Verify conversation state directly after turn
@@ -373,9 +381,9 @@ describe("executeTurn", () => {
     await executeTurn("agent-1", "hello from user", undefined, deps);
 
     const messages = deps.conversationState.messages;
-    const userMessages = messages.filter((m) => m.role === "user");
+    const userMessages = messages.filter((m) => messageRole(m) === "user");
     expect(userMessages).toHaveLength(1);
-    expect(userMessages[0].content).toContain("hello from user");
+    expect(messageContent(userMessages[0])).toContain("hello from user");
   });
 
   // Test 12: LLM response + tool results also appended to conversation
@@ -396,10 +404,10 @@ describe("executeTurn", () => {
 
     const messages = deps.conversationState.messages;
 
-    // Should have: user message, assistant (with tool_use), tool result, assistant (final)
-    const userMessages = messages.filter((m) => m.role === "user");
-    const assistantMessages = messages.filter((m) => m.role === "assistant");
-    const toolMessages = messages.filter((m) => m.role === "tool");
+    // Should have: user message, assistant (with tool-call), tool result, assistant (final)
+    const userMessages = messages.filter((m) => messageRole(m) === "user");
+    const assistantMessages = messages.filter((m) => messageRole(m) === "assistant");
+    const toolMessages = messages.filter((m) => messageRole(m) === "tool");
 
     expect(userMessages).toHaveLength(1);
     expect(assistantMessages.length).toBeGreaterThanOrEqual(1);
@@ -407,16 +415,16 @@ describe("executeTurn", () => {
 
     // Check tool result was appended
     const toolMessage = toolMessages[0];
-    const toolContent = toolMessage.content as Array<{ type: string; toolCallId: string }>;
+    const toolContent = messageContent(toolMessage) as Array<{ type: string; toolCallId: string }>;
     expect(toolContent).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ type: "tool_result", toolCallId: "call-1" }),
+        expect.objectContaining({ type: "tool-result", toolCallId: "call-1" }),
       ])
     );
 
     // Final assistant response appended
     const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-    const lastContent = lastAssistantMessage.content as Array<{ type: string; text: string }>;
+    const lastContent = messageContent(lastAssistantMessage) as Array<{ type: string; text: string }>;
     expect(lastContent).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "text", text: "Final answer after tool" }),

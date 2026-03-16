@@ -51,8 +51,8 @@ describeE2E("E2E: OpenAI API", () => {
                 type: "append",
                 message: {
                   id: `ctx-${Date.now()}`,
-                  role: "system",
-                  content: text,
+                  data: { role: "system", content: text },
+                  metadata: { __createdBy: "context-message" },
                 },
               });
               return next();

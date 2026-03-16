@@ -108,7 +108,7 @@ describe("createLlmClient()", () => {
 // ---------------------------------------------------------------------------
 
 const mockMessages: Message[] = [
-  { id: "1", role: "user", content: "Hello" },
+  { id: "1", data: { role: "user", content: "Hello" } },
 ];
 
 const mockTools: ToolDefinition[] = [

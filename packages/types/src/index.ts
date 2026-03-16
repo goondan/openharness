@@ -11,12 +11,22 @@ export type {
 
 // conversation
 export type {
-  ContentPart,
-  MessageContent,
   Message,
   MessageEvent,
   ConversationState,
 } from "./conversation.js";
+export type {
+  ModelMessage,
+  SystemModelMessage,
+  UserModelMessage,
+  AssistantModelMessage,
+  ToolModelMessage,
+  TextPart,
+  ImagePart,
+  FilePart,
+  ToolCallPart,
+  ToolResultPart,
+} from "ai";
 
 // ingress
 export type {

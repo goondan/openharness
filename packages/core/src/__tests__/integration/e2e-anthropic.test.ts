@@ -1,18 +1,18 @@
 /**
- * E2E tests with real Google Gemini API.
+ * E2E tests with real Anthropic API.
  *
- * These tests make actual API calls and are skipped unless GOOGLE_API_KEY is set.
- * Run with: GOOGLE_API_KEY=... npx vitest run packages/core/src/__tests__/integration/e2e-google.test.ts
+ * These tests make actual API calls and are skipped unless ANTHROPIC_API_KEY is set.
+ * Run with: ANTHROPIC_API_KEY=... npx vitest run packages/core/src/__tests__/integration/e2e-anthropic.test.ts
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { createHarness } from "../../create-harness.js";
 import type { HarnessConfig, Extension, ExtensionApi, ToolDefinition } from "@goondan/openharness-types";
 
-const API_KEY = process.env["GOOGLE_API_KEY"];
+const API_KEY = process.env["ANTHROPIC_API_KEY"];
 const describeE2E = API_KEY ? describe : describe.skip;
 
-describeE2E("E2E: Google Gemini API", () => {
+describeE2E("E2E: Anthropic API", () => {
   // -----------------------------------------------------------------------
   // Test 1: Simple text response — no extensions, no tools
   // -----------------------------------------------------------------------
@@ -20,7 +20,7 @@ describeE2E("E2E: Google Gemini API", () => {
     const config: HarnessConfig = {
       agents: {
         default: {
-          model: { provider: "google", model: "gemini-2.5-flash", apiKey: API_KEY! },
+          model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
         },
       },
     };
@@ -66,7 +66,7 @@ describeE2E("E2E: Google Gemini API", () => {
     const config: HarnessConfig = {
       agents: {
         default: {
-          model: { provider: "google", model: "gemini-2.5-flash", apiKey: API_KEY! },
+          model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
           extensions: [ContextMessage("You are a pirate. Always respond in pirate speak.")],
         },
       },
@@ -77,6 +77,7 @@ describeE2E("E2E: Google Gemini API", () => {
 
     expect(result.status).toBe("completed");
     expect(result.text).toBeDefined();
+    // The response should contain pirate-like language
     const text = result.text!.toLowerCase();
     const pirateWords = ["arr", "ahoy", "matey", "ye", "aye", "pirate", "captain", "ship", "treasure", "sea", "sail"];
     const hasPirateWord = pirateWords.some((w) => text.includes(w));
@@ -107,7 +108,7 @@ describeE2E("E2E: Google Gemini API", () => {
     const config: HarnessConfig = {
       agents: {
         default: {
-          model: { provider: "google", model: "gemini-2.5-flash", apiKey: API_KEY! },
+          model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
           tools: [weatherTool],
         },
       },
@@ -118,8 +119,11 @@ describeE2E("E2E: Google Gemini API", () => {
 
     expect(result.status).toBe("completed");
     expect(result.text).toBeDefined();
+    // The LLM should have used the tool and mentioned the result
     expect(result.text!).toContain("22");
+    // Should have at least 2 steps: one with tool call, one final text
     expect(result.steps.length).toBeGreaterThanOrEqual(2);
+    // First step should have a tool call
     const toolStep = result.steps.find((s) => s.toolCalls.length > 0);
     expect(toolStep).toBeDefined();
     expect(toolStep!.toolCalls[0].toolName).toBe("get_weather");
@@ -134,19 +138,21 @@ describeE2E("E2E: Google Gemini API", () => {
     const config: HarnessConfig = {
       agents: {
         default: {
-          model: { provider: "google", model: "gemini-2.5-flash", apiKey: API_KEY! },
+          model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
         },
       },
     };
 
     const runtime = await createHarness(config);
-    const convId = "e2e-google-multi-turn";
+    const convId = "e2e-multi-turn";
 
+    // Turn 1: introduce a fact
     const result1 = await runtime.processTurn("default", "Remember this: the secret code is ALPHA-7. Just say OK.", {
       conversationId: convId,
     });
     expect(result1.status).toBe("completed");
 
+    // Turn 2: ask for the fact back
     const result2 = await runtime.processTurn("default", "What is the secret code I told you?", {
       conversationId: convId,
     });

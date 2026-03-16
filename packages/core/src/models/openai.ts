@@ -18,63 +18,50 @@ export function OpenAI(config: {
 
 function transformMessages(messages: Message[]): unknown[] {
   return messages.map((msg) => {
-    if (msg.role === "system") {
+    const data = msg.data;
+
+    if (data.role === "system") {
       return {
         role: "system",
-        content: typeof msg.content === "string" ? msg.content : "",
+        content: data.content,
       };
     }
 
-    if (msg.role === "user") {
-      if (typeof msg.content === "string") {
-        return { role: "user", content: msg.content };
+    if (data.role === "user") {
+      if (typeof data.content === "string") {
+        return { role: "user", content: data.content };
       }
-      // Array content: check for tool_result parts
-      const hasTool = msg.content.some((p) => p.type === "tool_result");
-      if (hasTool) {
-        // OpenAI expects tool results as separate "tool" role messages
-        return msg.content
-          .filter((p) => p.type === "tool_result")
-          .map((p) => {
-            if (p.type !== "tool_result") return null;
-            const resultContent =
-              p.result.type === "text"
-                ? p.result.text
-                : JSON.stringify(p.result.type === "json" ? p.result.data : p.result.error);
-            return {
-              role: "tool",
-              tool_call_id: p.toolCallId,
-              content: resultContent,
-            };
-          })
-          .filter(Boolean);
-      }
+
       return {
         role: "user",
-        content: msg.content
-          .map((p) => (p.type === "text" ? { type: "text", text: p.text } : null))
+        content: data.content
+          .map((p) => {
+            if (p.type === "text") return { type: "text", text: p.text };
+            return null;
+          })
           .filter(Boolean),
       };
     }
 
-    if (msg.role === "assistant") {
-      if (typeof msg.content === "string") {
-        return { role: "assistant", content: msg.content };
+    if (data.role === "assistant") {
+      if (typeof data.content === "string") {
+        return { role: "assistant", content: data.content };
       }
-      const textParts = msg.content
+
+      const textParts = data.content
         .filter((p) => p.type === "text")
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("");
-      const toolCalls = msg.content
-        .filter((p) => p.type === "tool_use")
+      const toolCalls = data.content
+        .filter((p) => p.type === "tool-call")
         .map((p) => {
-          if (p.type !== "tool_use") return null;
+          if (p.type !== "tool-call") return null;
           return {
             id: p.toolCallId,
             type: "function",
             function: {
               name: p.toolName,
-              arguments: JSON.stringify(p.args),
+              arguments: JSON.stringify(p.input),
             },
           };
         })
@@ -87,17 +74,22 @@ function transformMessages(messages: Message[]): unknown[] {
       };
     }
 
-    if (msg.role === "tool") {
+    if (data.role === "tool") {
       // OpenAI expects tool results as separate "tool" role messages with tool_call_id
-      if (Array.isArray(msg.content)) {
-        return msg.content
-          .filter((p) => p.type === "tool_result")
+      return data.content
+          .filter((p) => p.type === "tool-result")
           .map((p) => {
-            if (p.type !== "tool_result") return null;
+            if (p.type !== "tool-result") return null;
             const resultContent =
-              p.result.type === "text"
-                ? p.result.text
-                : JSON.stringify(p.result.type === "json" ? p.result.data : p.result.error);
+              p.output.type === "text"
+                ? p.output.value
+                : p.output.type === "json"
+                  ? JSON.stringify(p.output.value)
+                  : p.output.type === "error-text"
+                    ? p.output.value
+                    : p.output.type === "error-json"
+                      ? JSON.stringify(p.output.value)
+                      : JSON.stringify(p.output);
             return {
               role: "tool",
               tool_call_id: p.toolCallId,
@@ -105,11 +97,13 @@ function transformMessages(messages: Message[]): unknown[] {
             };
           })
           .filter(Boolean);
-      }
-      return [];
     }
 
-    return { role: msg.role, content: typeof msg.content === "string" ? msg.content : "" };
+    const fallback = data as { content?: unknown };
+    return {
+      role: "user",
+      content: typeof fallback.content === "string" ? fallback.content : "",
+    };
   }).flat();
 }
 
@@ -130,7 +124,7 @@ export function createOpenAIClient(
   baseUrl?: string,
 ): LlmClient {
   // Cached SDK client — initialized lazily on first call, then reused
-  let client: { chat: { completions: { create: (p: unknown, o: unknown) => Promise<unknown> } } } | undefined;
+  let client: any;
 
   return {
     async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
