@@ -251,12 +251,12 @@ describe("MiddlewareRegistry", () => {
     const registry = new MiddlewareRegistry();
 
     const log: string[] = [];
-    registry.register("turn", async (ctx: Ctx, next: () => Promise<Res>) => {
+    registry.register("turn", (async (ctx: Ctx, next: () => Promise<Res>) => {
       log.push("mw:before");
       const res = await next();
       log.push("mw:after");
       return res;
-    });
+    }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>);
 
     const core = async (ctx: Ctx): Promise<Res> => {
       log.push("core");
@@ -276,23 +276,23 @@ describe("MiddlewareRegistry", () => {
 
     registry.register(
       "turn",
-      async (_ctx: Ctx, next: () => Promise<Res>) => {
+      (async (_ctx: Ctx, next: () => Promise<Res>) => {
         log.push("p200:before");
         const res = await next();
         log.push("p200:after");
         return res;
-      },
+      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
       { priority: 200 }
     );
 
     registry.register(
       "turn",
-      async (_ctx: Ctx, next: () => Promise<Res>) => {
+      (async (_ctx: Ctx, next: () => Promise<Res>) => {
         log.push("p50:before");
         const res = await next();
         log.push("p50:after");
         return res;
-      },
+      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
       { priority: 50 }
     );
 

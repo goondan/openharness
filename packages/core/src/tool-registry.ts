@@ -1,5 +1,8 @@
-import Ajv from "ajv";
+import _Ajv, { type ValidateFunction } from "ajv";
 import type { ToolDefinition, ToolContext, ToolResult, JsonObject } from "@goondan/openharness-types";
+
+// Ajv default export is wrapped when imported as ESM from CJS
+const Ajv = _Ajv as unknown as typeof _Ajv.default;
 
 type ValidateResult =
   | { valid: true }
@@ -7,7 +10,7 @@ type ValidateResult =
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDefinition>();
-  private readonly validators = new Map<string, ReturnType<Ajv["compile"]>>();
+  private readonly validators = new Map<string, ValidateFunction>();
   private readonly ajv = new Ajv({ allErrors: true });
 
   register(tool: ToolDefinition): void {
