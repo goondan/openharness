@@ -6,3 +6,5 @@ export { registerExtensions, createExtensionApi } from "./extension-registry.js"
 export { isEnvRef, resolveEnv } from "./env.js";
 export { HarnessError, ConfigError, ToolValidationError, IngressRejectedError } from "./errors.js";
 export { env } from "@goondan/openharness-types";
+export { createHarness } from "./create-harness.js";
+export { HarnessRuntimeImpl } from "./harness-runtime.js";

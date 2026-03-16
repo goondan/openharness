@@ -69,6 +69,7 @@ export async function executeTurn(
     eventBus: EventBus;
     conversationState: ConversationStateImpl;
     maxSteps: number;
+    abortController?: AbortController;
   }
 ): Promise<TurnResult> {
   const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps } =
@@ -99,13 +100,16 @@ export async function executeTurn(
     envelope = input;
   }
 
+  // Use external AbortController if provided, otherwise create a new one
+  const abortController = deps.abortController ?? new AbortController();
+
   // Build TurnContext
   const turnCtx: TurnContext = {
     turnId,
     agentName,
     conversationId,
     conversation: conversationState,
-    abortSignal: new AbortController().signal,
+    abortSignal: abortController.signal,
     input: envelope,
   };
 
