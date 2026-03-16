@@ -1,0 +1,27 @@
+{
+  "name": "@goondan/openharness-cli",
+  "version": "2.0.0-alpha.0",
+  "type": "module",
+  "bin": { "oh": "./dist/index.js" },
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@goondan/openharness": "workspace:*",
+    "@goondan/openharness-types": "workspace:*",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsup": "^8.4.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
