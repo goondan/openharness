@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
+import * as fs from "node:fs";
 import { runCommand } from "./commands/run.js";
 import { replCommand } from "./commands/repl.js";
+
+const CLI_VERSION = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -69,7 +74,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       printHelp();
       process.exit(0);
     } else if (arg === "--version" || arg === "-v") {
-      console.log("2.0.0-alpha.0");
+      console.log(CLI_VERSION.version);
       process.exit(0);
     }
 
