@@ -120,6 +120,7 @@ export async function executeStep(
               {
                 type: "tool_result",
                 toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
                 result: toolResult,
               },
             ],

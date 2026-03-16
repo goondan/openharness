@@ -5,7 +5,7 @@ export type ContentPart =
   | { type: "text"; text: string }
   | { type: "image"; url: string }
   | { type: "tool_use"; toolName: string; args: JsonObject; toolCallId: string }
-  | { type: "tool_result"; toolCallId: string; result: ToolResult };
+  | { type: "tool_result"; toolCallId: string; toolName?: string; result: ToolResult };
 
 export type MessageContent = string | ContentPart[];
 

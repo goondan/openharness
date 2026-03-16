@@ -19,7 +19,9 @@ function transformContents(messages: Message[]): unknown[] {
   return messages
     .filter((m) => m.role !== "system")
     .map((msg) => {
-      const role = msg.role === "assistant" ? "model" : "user";
+      // Google SDK roles: "user", "model", "function"
+      // role: "tool" messages carry functionResponse parts → role: "function"
+      const role = msg.role === "assistant" ? "model" : msg.role === "tool" ? "function" : "user";
 
       if (typeof msg.content === "string") {
         return {
@@ -40,15 +42,17 @@ function transformContents(messages: Message[]): unknown[] {
             };
           }
           if (part.type === "tool_result") {
+            // Google SDK uses function NAME (not call ID) to correlate responses.
+            const funcName = part.toolName ?? part.toolCallId;
             const resultValue =
               part.result.type === "text"
                 ? { output: part.result.text }
                 : part.result.type === "json"
-                  ? part.result.data
+                  ? (part.result.data as Record<string, unknown>)
                   : { error: part.result.error };
             return {
               functionResponse: {
-                name: part.toolCallId,
+                name: funcName,
                 response: resultValue,
               },
             };
@@ -74,15 +78,13 @@ function transformTools(tools: ToolDefinition[]): unknown[] {
 }
 
 export function createGoogleClient(model: string, apiKey: string): LlmClient {
-  type GeminiModel = { generateContent: (req: unknown) => Promise<{ response: { candidates?: Array<{ content?: { parts?: unknown[] } }> } }> };
+  type GeminiModel = { generateContent: (req: unknown, opts?: unknown) => Promise<{ response: { candidates?: Array<{ content?: { parts?: unknown[] } }> } }> };
   type GenAI = { getGenerativeModel: (config: Record<string, unknown>) => GeminiModel };
   // Cached genAI instance — initialized lazily on first call, then reused
   let genAI: GenAI | undefined;
 
   return {
-    // Note: AbortSignal is not forwarded — the Google Generative AI SDK does not natively
-    // support AbortSignal on generateContent calls. Cancellation is not available for this adapter.
-    async chat(messages: Message[], tools: ToolDefinition[], _signal: AbortSignal): Promise<LlmResponse> {
+    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
       if (!genAI) {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore -- @google/generative-ai is a peer dependency, not installed at build time
@@ -110,7 +112,7 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
 
       const contents = transformContents(messages);
 
-      const result = await geminiModel.generateContent({ contents });
+      const result = await geminiModel.generateContent({ contents }, { signal });
 
       const response = result.response;
       const candidate = response?.candidates?.[0];

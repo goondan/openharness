@@ -2,7 +2,9 @@
   "name": "openharness",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "pnpm -r run build",
@@ -12,8 +14,10 @@
     "clean": "pnpm -r run clean"
   },
   "devDependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "openai": "^6.29.0",
+    "tsup": "^8.4.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "tsup": "^8.4.0"
+    "vitest": "^3.0.0"
   }
 }
