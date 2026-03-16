@@ -107,15 +107,20 @@ export function createOpenAIClient(
   apiKey: string,
   baseUrl?: string,
 ): LlmClient {
+  // Cached SDK client — initialized lazily on first call, then reused
+  let client: { chat: { completions: { create: (p: unknown, o: unknown) => Promise<unknown> } } } | undefined;
+
   return {
     async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore -- openai is a peer dependency, not installed at build time
-      const { default: OpenAISDK } = await import("openai");
-      const client = new OpenAISDK({
-        apiKey,
-        ...(baseUrl ? { baseURL: baseUrl } : {}),
-      });
+      if (!client) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore -- openai is a peer dependency, not installed at build time
+        const { default: OpenAISDK } = await import("openai");
+        client = new OpenAISDK({
+          apiKey,
+          ...(baseUrl ? { baseURL: baseUrl } : {}),
+        });
+      }
 
       const openaiMessages = transformMessages(messages);
 
@@ -129,9 +134,15 @@ export function createOpenAIClient(
         requestParams["tool_choice"] = "auto";
       }
 
-      const response = await client.chat.completions.create(
-        requestParams as Parameters<typeof client.chat.completions.create>[0],
-      );
+      type OpenAIResponse = {
+        choices: Array<{
+          message?: {
+            content?: string | null;
+            tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
+          };
+        }>;
+      };
+      const response = await client!.chat.completions.create(requestParams, { signal }) as OpenAIResponse;
 
       const choice = response.choices[0];
       const message = choice?.message;
@@ -139,11 +150,20 @@ export function createOpenAIClient(
       const text = message?.content || undefined;
 
       const toolCalls = message?.tool_calls?.map(
-        (tc: { id: string; function: { name: string; arguments: string } }) => ({
-          toolCallId: tc.id,
-          toolName: tc.function.name,
-          args: JSON.parse(tc.function.arguments) as Record<string, unknown>,
-        }),
+        (tc: { id: string; function: { name: string; arguments: string } }) => {
+          let args: Record<string, unknown>;
+          try {
+            args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+          } catch {
+            // Invalid JSON in tool arguments — use empty object; the tool handler will surface the error
+            args = {};
+          }
+          return {
+            toolCallId: tc.id,
+            toolName: tc.function.name,
+            args,
+          };
+        },
       );
 
       return {

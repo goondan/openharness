@@ -18,12 +18,10 @@ export function Anthropic(config: {
 
 function transformMessages(messages: Message[]): unknown[] {
   const result: unknown[] = [];
-  let system: string | undefined;
 
   for (const msg of messages) {
     if (msg.role === "system") {
-      // Anthropic takes system separately; we'll collect last system message
-      system = typeof msg.content === "string" ? msg.content : "";
+      // Anthropic takes system separately; skip here — extracted in chat()
       continue;
     }
 
@@ -93,12 +91,17 @@ export function createAnthropicClient(
   apiKey: string,
   baseUrl?: string,
 ): LlmClient {
+  // Cached SDK client — initialized lazily on first call, then reused
+  let client: InstanceType<{ new (opts: Record<string, unknown>): unknown }> | undefined;
+
   return {
     async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore -- @anthropic-ai/sdk is a peer dependency, not installed at build time
-      const { default: AnthropicSDK } = await import("@anthropic-ai/sdk");
-      const client = new AnthropicSDK({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+      if (!client) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore -- @anthropic-ai/sdk is a peer dependency, not installed at build time
+        const { default: AnthropicSDK } = await import("@anthropic-ai/sdk");
+        client = new AnthropicSDK({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+      }
 
       // Extract system message
       const systemMsg = messages.find((m) => m.role === "system");
@@ -124,19 +127,20 @@ export function createAnthropicClient(
         requestParams["tools"] = transformTools(tools);
       }
 
-      const response = await client.messages.create(requestParams as Parameters<typeof client.messages.create>[0]);
+      type AnthropicResponse = { content: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }> };
+      const response = await (client as { messages: { create: (p: unknown, o: unknown) => Promise<AnthropicResponse> } }).messages.create(requestParams, { signal });
 
       const text = response.content
-        .filter((c: { type: string }) => c.type === "text")
-        .map((c: { type: string; text: string }) => c.text)
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
         .join("") || undefined;
 
       const toolCalls = response.content
-        .filter((c: { type: string }) => c.type === "tool_use")
-        .map((c: { type: string; id: string; name: string; input: Record<string, unknown> }) => ({
-          toolCallId: c.id,
-          toolName: c.name,
-          args: c.input,
+        .filter((c) => c.type === "tool_use")
+        .map((c) => ({
+          toolCallId: c.id!,
+          toolName: c.name!,
+          args: c.input!,
         }));
 
       return {

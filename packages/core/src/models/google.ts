@@ -74,12 +74,21 @@ function transformTools(tools: ToolDefinition[]): unknown[] {
 }
 
 export function createGoogleClient(model: string, apiKey: string): LlmClient {
+  type GeminiModel = { generateContent: (req: unknown) => Promise<{ response: { candidates?: Array<{ content?: { parts?: unknown[] } }> } }> };
+  type GenAI = { getGenerativeModel: (config: Record<string, unknown>) => GeminiModel };
+  // Cached genAI instance — initialized lazily on first call, then reused
+  let genAI: GenAI | undefined;
+
   return {
-    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore -- @google/generative-ai is a peer dependency, not installed at build time
-      const { GoogleGenerativeAI } = await import("@google/generative-ai");
-      const genAI = new GoogleGenerativeAI(apiKey);
+    // Note: AbortSignal is not forwarded — the Google Generative AI SDK does not natively
+    // support AbortSignal on generateContent calls. Cancellation is not available for this adapter.
+    async chat(messages: Message[], tools: ToolDefinition[], _signal: AbortSignal): Promise<LlmResponse> {
+      if (!genAI) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore -- @google/generative-ai is a peer dependency, not installed at build time
+        const { GoogleGenerativeAI } = await import("@google/generative-ai");
+        genAI = new GoogleGenerativeAI(apiKey);
+      }
 
       // Extract system instruction
       const systemMsg = messages.find((m) => m.role === "system");
@@ -97,11 +106,11 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
         modelConfig["tools"] = transformTools(tools);
       }
 
-      const geminiModel = genAI.getGenerativeModel({ model, ...modelConfig });
+      const geminiModel = genAI!.getGenerativeModel({ model, ...modelConfig });
 
       const contents = transformContents(messages);
 
-      const result = await geminiModel.generateContent({ contents } as Parameters<typeof geminiModel.generateContent>[0]);
+      const result = await geminiModel.generateContent({ contents });
 
       const response = result.response;
       const candidate = response?.candidates?.[0];
@@ -116,6 +125,8 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
         }
         if (part.functionCall) {
           toolCalls.push({
+            // Google SDK does not provide call IDs — generate a synthetic one so that
+            // tool_result messages can be correlated back to the correct function call.
             toolCallId: `${part.functionCall.name}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
             toolName: part.functionCall.name,
             args: part.functionCall.args,
