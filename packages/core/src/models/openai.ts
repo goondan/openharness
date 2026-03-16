@@ -87,6 +87,28 @@ function transformMessages(messages: Message[]): unknown[] {
       };
     }
 
+    if (msg.role === "tool") {
+      // OpenAI expects tool results as separate "tool" role messages with tool_call_id
+      if (Array.isArray(msg.content)) {
+        return msg.content
+          .filter((p) => p.type === "tool_result")
+          .map((p) => {
+            if (p.type !== "tool_result") return null;
+            const resultContent =
+              p.result.type === "text"
+                ? p.result.text
+                : JSON.stringify(p.result.type === "json" ? p.result.data : p.result.error);
+            return {
+              role: "tool",
+              tool_call_id: p.toolCallId,
+              content: resultContent,
+            };
+          })
+          .filter(Boolean);
+      }
+      return [];
+    }
+
     return { role: msg.role, content: typeof msg.content === "string" ? msg.content : "" };
   }).flat();
 }

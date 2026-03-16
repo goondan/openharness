@@ -51,6 +51,27 @@ function transformMessages(messages: Message[]): unknown[] {
                 })
                 .filter(Boolean),
       });
+    } else if (msg.role === "tool") {
+      // Anthropic expects tool results as role: "user" with tool_result content blocks
+      const toolResultContent = (Array.isArray(msg.content) ? msg.content : [])
+        .filter((part): part is Extract<typeof part, { type: "tool_result" }> => part.type === "tool_result")
+        .map((part) => {
+          const resultContent =
+            part.result.type === "text"
+              ? part.result.text
+              : JSON.stringify(
+                  part.result.type === "json" ? part.result.data : part.result.error,
+                );
+          return {
+            type: "tool_result",
+            tool_use_id: part.toolCallId,
+            content: resultContent,
+          };
+        });
+
+      if (toolResultContent.length > 0) {
+        result.push({ role: "user", content: toolResultContent });
+      }
     } else if (msg.role === "assistant") {
       result.push({
         role: "assistant",
