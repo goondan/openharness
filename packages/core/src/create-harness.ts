@@ -189,20 +189,21 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     registeredAgents,
     eventBus: ingressEventBus,
     dispatchTurn: (turnId, agentName, envelope, conversationId) => {
-      // Fire-and-forget: start turn asynchronously
-      if (runtimeRef) {
-        runtimeRef
-          .processTurn(agentName, envelope, { conversationId })
-          .catch((err) => {
-            ingressEventBus.emit("turn.error", {
-              type: "turn.error",
-              turnId,
-              agentName,
-              conversationId,
-              error: err instanceof Error ? err : new Error(String(err)),
-            });
-          });
+      if (!runtimeRef) {
+        throw new ConfigError("Runtime not yet initialized");
       }
+      // Fire-and-forget: start turn asynchronously
+      runtimeRef
+        .processTurn(agentName, envelope, { conversationId })
+        .catch((err) => {
+          ingressEventBus.emit("turn.error", {
+            type: "turn.error",
+            turnId,
+            agentName,
+            conversationId,
+            error: err instanceof Error ? err : new Error(String(err)),
+          });
+        });
     },
   });
 

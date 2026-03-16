@@ -11,6 +11,7 @@ import type {
 } from "@goondan/openharness-types";
 import { defineHarness, env } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
+import { HarnessError } from "../errors.js";
 
 // ---------------------------------------------------------------------------
 // Mock LlmClient factory — returns a simple text response
@@ -199,9 +200,8 @@ describe("createHarness", () => {
 
     await runtime.close();
 
-    await expect(runtime.processTurn("default", "hello")).rejects.toThrow(
-      /closed/i,
-    );
+    await expect(runtime.processTurn("default", "hello")).rejects.toThrow(HarnessError);
+    await expect(runtime.processTurn("default", "hello")).rejects.toThrow(/closed/i);
   });
 
   // -----------------------------------------------------------------------
@@ -254,10 +254,14 @@ describe("createHarness", () => {
   it("abortConversation aborts the correct conversation", async () => {
     // Use a slow mock to keep a turn in-flight
     const { createLlmClient } = await import("../models/index.js");
+    let chatCalled: () => void;
+    const chatStarted = new Promise<void>((resolve) => { chatCalled = resolve; });
+
     const slowClient: LlmClient = {
       chat: vi.fn().mockImplementation(
         (_msgs: Message[], _tools: ToolDefinition[], signal: AbortSignal) =>
           new Promise<LlmResponse>((resolve, reject) => {
+            chatCalled!();
             const timer = setTimeout(() => resolve({ text: "done" }), 5000);
             signal.addEventListener("abort", () => {
               clearTimeout(timer);
@@ -275,8 +279,8 @@ describe("createHarness", () => {
       conversationId: "conv-to-abort",
     });
 
-    // Give it a tick to start
-    await new Promise((r) => setTimeout(r, 10));
+    // Wait until the LLM mock is actually called (reliable latch, no sleep)
+    await chatStarted;
 
     // Abort it
     const abortResult = await runtime.control.abortConversation({

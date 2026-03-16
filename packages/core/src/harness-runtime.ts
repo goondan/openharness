@@ -15,8 +15,10 @@ import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
 import { executeTurn } from "./execution/turn.js";
-import { ConfigError } from "./errors.js";
+import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
+
+const CLOSE_TIMEOUT_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Per-agent deps
@@ -35,10 +37,10 @@ export interface AgentDeps {
 // ---------------------------------------------------------------------------
 
 interface InFlightTurn {
-  turnId: string;
   agentName: string;
   conversationId: string;
   abortController: AbortController;
+  promise: Promise<TurnResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +69,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     options?: ProcessTurnOptions,
   ): Promise<TurnResult> {
     if (this._closed) {
-      throw new ConfigError("Runtime is closed");
+      throw new HarnessError("Runtime is closed");
     }
 
     const agentDeps = this._agents.get(agentName);
@@ -91,29 +93,29 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     // Create an AbortController so we can abort this turn externally
     const abortController = new AbortController();
-    const turnTrackingId = randomUUID();
+    const trackingId = randomUUID();
 
-    const inFlight: InFlightTurn = {
-      turnId: turnTrackingId,
+    const turnPromise = executeTurn(agentName, input, { conversationId }, {
+      llmClient: agentDeps.llmClient,
+      toolRegistry: agentDeps.toolRegistry,
+      middlewareRegistry: agentDeps.middlewareRegistry,
+      eventBus: agentDeps.eventBus,
+      conversationState,
+      maxSteps: agentDeps.maxSteps,
+      abortController,
+    });
+
+    this._inFlightTurns.set(trackingId, {
       agentName,
       conversationId,
       abortController,
-    };
-    this._inFlightTurns.set(turnTrackingId, inFlight);
+      promise: turnPromise,
+    });
 
     try {
-      const result = await executeTurn(agentName, input, { conversationId }, {
-        llmClient: agentDeps.llmClient,
-        toolRegistry: agentDeps.toolRegistry,
-        middlewareRegistry: agentDeps.middlewareRegistry,
-        eventBus: agentDeps.eventBus,
-        conversationState,
-        maxSteps: agentDeps.maxSteps,
-        abortController,
-      });
-      return result;
+      return await turnPromise;
     } finally {
-      this._inFlightTurns.delete(turnTrackingId);
+      this._inFlightTurns.delete(trackingId);
     }
   }
 
@@ -163,8 +165,20 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     this._closed = true;
 
     // Abort all in-flight turns
+    const promises: Promise<unknown>[] = [];
     for (const [, turn] of this._inFlightTurns) {
       turn.abortController.abort("Runtime closed");
+      promises.push(turn.promise.catch(() => {}));
     }
+
+    // Wait for turns to settle (with timeout)
+    if (promises.length > 0) {
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS));
+      await Promise.race([Promise.allSettled(promises), timeout]);
+    }
+
+    // Clean up
+    this._inFlightTurns.clear();
+    this._conversations.clear();
   }
 }
