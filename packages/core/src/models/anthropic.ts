@@ -1,0 +1,148 @@
+import type { LlmClient, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function Anthropic(config: {
+  model: string;
+  apiKey: string | EnvRef;
+  baseUrl?: string;
+}): ModelConfig {
+  return { provider: "anthropic", ...config };
+}
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
+
+function transformMessages(messages: Message[]): unknown[] {
+  const result: unknown[] = [];
+  let system: string | undefined;
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      // Anthropic takes system separately; we'll collect last system message
+      system = typeof msg.content === "string" ? msg.content : "";
+      continue;
+    }
+
+    if (msg.role === "user") {
+      result.push({
+        role: "user",
+        content:
+          typeof msg.content === "string"
+            ? msg.content
+            : msg.content
+                .map((part) => {
+                  if (part.type === "text") return { type: "text", text: part.text };
+                  if (part.type === "tool_result") {
+                    const resultContent =
+                      part.result.type === "text"
+                        ? part.result.text
+                        : JSON.stringify(
+                            part.result.type === "json" ? part.result.data : part.result.error,
+                          );
+                    return {
+                      type: "tool_result",
+                      tool_use_id: part.toolCallId,
+                      content: resultContent,
+                    };
+                  }
+                  return null;
+                })
+                .filter(Boolean),
+      });
+    } else if (msg.role === "assistant") {
+      result.push({
+        role: "assistant",
+        content:
+          typeof msg.content === "string"
+            ? msg.content
+            : msg.content
+                .map((part) => {
+                  if (part.type === "text") return { type: "text", text: part.text };
+                  if (part.type === "tool_use") {
+                    return {
+                      type: "tool_use",
+                      id: part.toolCallId,
+                      name: part.toolName,
+                      input: part.args,
+                    };
+                  }
+                  return null;
+                })
+                .filter(Boolean),
+      });
+    }
+  }
+
+  return result;
+}
+
+function transformTools(tools: ToolDefinition[]): unknown[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.parameters,
+  }));
+}
+
+export function createAnthropicClient(
+  model: string,
+  apiKey: string,
+  baseUrl?: string,
+): LlmClient {
+  return {
+    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore -- @anthropic-ai/sdk is a peer dependency, not installed at build time
+      const { default: AnthropicSDK } = await import("@anthropic-ai/sdk");
+      const client = new AnthropicSDK({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+
+      // Extract system message
+      const systemMsg = messages.find((m) => m.role === "system");
+      const systemText = systemMsg
+        ? typeof systemMsg.content === "string"
+          ? systemMsg.content
+          : ""
+        : undefined;
+
+      const anthropicMessages = transformMessages(messages);
+
+      const requestParams: Record<string, unknown> = {
+        model,
+        max_tokens: 4096,
+        messages: anthropicMessages,
+      };
+
+      if (systemText) {
+        requestParams["system"] = systemText;
+      }
+
+      if (tools.length > 0) {
+        requestParams["tools"] = transformTools(tools);
+      }
+
+      const response = await client.messages.create(requestParams as Parameters<typeof client.messages.create>[0]);
+
+      const text = response.content
+        .filter((c: { type: string }) => c.type === "text")
+        .map((c: { type: string; text: string }) => c.text)
+        .join("") || undefined;
+
+      const toolCalls = response.content
+        .filter((c: { type: string }) => c.type === "tool_use")
+        .map((c: { type: string; id: string; name: string; input: Record<string, unknown> }) => ({
+          toolCallId: c.id,
+          toolName: c.name,
+          args: c.input,
+        }));
+
+      return {
+        text: text || undefined,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      };
+    },
+  };
+}
