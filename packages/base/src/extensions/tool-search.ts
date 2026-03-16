@@ -1,4 +1,4 @@
-import type { Extension, ExtensionApi } from "@goondan/openharness-types";
+import type { Extension, ExtensionApi, JsonValue } from "@goondan/openharness-types";
 
 /**
  * ToolSearch extension — registers a meta-tool `search_tools` that searches
@@ -30,7 +30,7 @@ export function ToolSearch(): Extension {
               t.name.toLowerCase().includes(query) ||
               t.description.toLowerCase().includes(query),
           );
-          return { type: "json", data: matching };
+          return { type: "json", data: matching as unknown as JsonValue };
         },
       });
     },

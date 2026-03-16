@@ -115,7 +115,7 @@ describe("ToolSearch", () => {
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
-      const data = result.data as ToolDefinition[];
+      const data = result.data as unknown as ToolDefinition[];
       expect(data).toHaveLength(2);
       expect(data.map((t) => t.name)).toContain("weather_get");
       expect(data.map((t) => t.name)).toContain("weather_forecast");
@@ -140,7 +140,7 @@ describe("ToolSearch", () => {
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
-      const data = result.data as ToolDefinition[];
+      const data = result.data as unknown as ToolDefinition[];
       expect(data).toHaveLength(1);
       expect(data[0].name).toBe("tool_a");
     }
@@ -180,7 +180,7 @@ describe("ToolSearch", () => {
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
-      const data = result.data as ToolDefinition[];
+      const data = result.data as unknown as ToolDefinition[];
       expect(data).toHaveLength(1);
     }
   });

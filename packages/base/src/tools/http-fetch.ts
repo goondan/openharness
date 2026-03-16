@@ -1,4 +1,4 @@
-import type { ToolDefinition, JsonObject, ToolContext } from "@goondan/openharness-types";
+import type { ToolDefinition, JsonObject, ToolContext, JsonValue } from "@goondan/openharness-types";
 
 export function HttpFetchTool(): ToolDefinition {
   return {
@@ -53,7 +53,7 @@ export function HttpFetchTool(): ToolDefinition {
           data: {
             status: response.status,
             headers: responseHeaders,
-            body: responseBody,
+            body: responseBody as JsonValue,
           },
         };
       } catch (err) {
