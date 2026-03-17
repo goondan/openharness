@@ -1,8 +1,11 @@
-import _Ajv, { type ValidateFunction } from "ajv";
+import type { ValidateFunction } from "ajv";
+import _Ajv2020 from "ajv/dist/2020.js";
+import _addFormats from "ajv-formats";
 import type { ToolDefinition, ToolContext, ToolResult, JsonObject } from "@goondan/openharness-types";
 
-// Ajv default export is wrapped when imported as ESM from CJS
-const Ajv = _Ajv as unknown as typeof _Ajv.default;
+// CommonJS default exports are wrapped when imported as ESM.
+const Ajv2020 = _Ajv2020 as unknown as typeof _Ajv2020.default;
+const addFormats = _addFormats as unknown as typeof _addFormats.default;
 
 type ValidateResult =
   | { valid: true }
@@ -11,7 +14,7 @@ type ValidateResult =
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDefinition>();
   private readonly validators = new Map<string, ValidateFunction>();
-  private readonly ajv = new Ajv({ allErrors: true });
+  private readonly ajv = createAjv();
 
   register(tool: ToolDefinition): void {
     if (this.tools.has(tool.name)) {
@@ -69,4 +72,10 @@ export class ToolRegistry {
       return { type: "error", error: message };
     }
   }
+}
+
+function createAjv() {
+  const ajv = new Ajv2020({ allErrors: true });
+  addFormats(ajv);
+  return ajv;
 }

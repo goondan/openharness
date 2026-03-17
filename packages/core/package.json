@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -24,7 +24,8 @@
   },
   "dependencies": {
     "@goondan/openharness-types": "workspace:*",
-    "ajv": "^8.17.0"
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

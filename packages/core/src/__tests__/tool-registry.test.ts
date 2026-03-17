@@ -109,6 +109,29 @@ describe("ToolRegistry", () => {
     }
   });
 
+  it("supports draft 2020-12 schemas and uri format validation", () => {
+    const registry = new ToolRegistry();
+    const schema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        url: { type: "string", format: "uri" },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    };
+
+    registry.register(makeTool("schema_tool_uri", schema));
+
+    expect(registry.validate("schema_tool_uri", { url: "https://goondan.ai/runtime" })).toEqual({ valid: true });
+
+    const invalid = registry.validate("schema_tool_uri", { url: "not-a-uri" });
+    expect(invalid.valid).toBe(false);
+    if (!invalid.valid) {
+      expect(invalid.errors).toContain("must match format");
+    }
+  });
+
   // Test 7: Tool handler called with correct ToolContext
   it("execute: handler called with correct ToolContext", async () => {
     const registry = new ToolRegistry();
