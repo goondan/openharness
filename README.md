@@ -39,7 +39,7 @@ Anthropic을 쓰면 `openai` 대신 `@anthropic-ai/sdk`, Google을 쓰면 `@goog
 ```ts
 import { defineHarness, env } from "@goondan/openharness-types";
 import { OpenAI } from "@goondan/openharness/models";
-import { ContextMessage, MessageWindow, BashTool } from "@goondan/openharness-base";
+import { BasicSystemPrompt, MessageWindow, BashTool } from "@goondan/openharness-base";
 
 export default defineHarness({
   agents: {
@@ -49,7 +49,7 @@ export default defineHarness({
         apiKey: env("OPENAI_API_KEY"),
       }),
       extensions: [
-        ContextMessage("당신은 정확하고 실무적인 조력자입니다."),
+        BasicSystemPrompt("You are helpful."),
         MessageWindow({ maxMessages: 20 }),
       ],
       tools: [
@@ -79,7 +79,7 @@ oh run "요약해줘" --agent assistant --conversation demo-1
 ## OpenHarness를 올바르게 이해하는 핵심
 
 - 코어는 _실행 루프_ 만 제공합니다.
-- 시스템 프롬프트도 기본 제공되지 않습니다. `ContextMessage` 같은 Extension이 있어야 들어갑니다.
+- 시스템 프롬프트도 기본 제공되지 않습니다. `BasicSystemPrompt` 같은 Extension이 있어야 들어갑니다.
 - 도구도 선언해야만 보입니다. "기본 툴"은 없습니다.
 - 메시지는 `Message { id, data: ModelMessage, metadata }` envelope로 다룹니다.
 - `metadata.__createdBy`는 코어 예약 provenance 키입니다.

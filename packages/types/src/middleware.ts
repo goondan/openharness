@@ -7,10 +7,8 @@ export type MiddlewareLevel =
   | "turn"
   | "step"
   | "toolCall"
-  | "verify"
-  | "normalize"
-  | "route"
-  | "dispatch";
+  | "ingress"
+  | "route";
 
 export interface MiddlewareOptions {
   /** default 100; lower runs first */
@@ -84,13 +82,7 @@ export interface StepResult {
 // Ingress middleware contexts
 // -----------------------------------------------------------------------
 
-export interface VerifyContext {
-  connectionName: string;
-  payload: unknown;
-  receivedAt: string;
-}
-
-export interface NormalizeContext {
+export interface IngressContext {
   connectionName: string;
   payload: unknown;
   receivedAt: string;
@@ -101,16 +93,13 @@ export interface RouteContext {
   envelope: InboundEnvelope;
 }
 
-export interface DispatchContext {
-  connectionName: string;
-  envelope: InboundEnvelope;
-  agentName: string;
-  conversationId: string;
-}
-
 export interface RouteResult {
+  accepted: true;
+  connectionName: string;
   agentName: string;
   conversationId: string;
+  eventName: string;
+  turnId: string;
 }
 
 // -----------------------------------------------------------------------
@@ -134,13 +123,8 @@ export type ToolCallMiddleware = (
 ) => Promise<ToolResult>;
 
 // Ingress middleware
-export type VerifyMiddleware = (
-  ctx: VerifyContext,
-  next: () => Promise<void>,
-) => Promise<void>;
-
-export type NormalizeMiddleware = (
-  ctx: NormalizeContext,
+export type IngressMiddleware = (
+  ctx: IngressContext,
   next: () => Promise<InboundEnvelope | InboundEnvelope[]>,
 ) => Promise<InboundEnvelope | InboundEnvelope[]>;
 
@@ -148,11 +132,6 @@ export type RouteMiddleware = (
   ctx: RouteContext,
   next: () => Promise<RouteResult>,
 ) => Promise<RouteResult>;
-
-export type DispatchMiddleware = (
-  ctx: DispatchContext,
-  next: () => Promise<IngressAcceptResult>,
-) => Promise<IngressAcceptResult>;
 
 // -----------------------------------------------------------------------
 // LLM Client abstraction

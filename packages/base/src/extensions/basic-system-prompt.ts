@@ -2,14 +2,14 @@ import type { Extension, ExtensionApi } from "@goondan/openharness-types";
 import { randomUUID } from "node:crypto";
 
 /**
- * ContextMessage extension — prepends a system message to the conversation
+ * BasicSystemPrompt extension — prepends a system message to the conversation
  * at the start of every turn.
  *
  * Priority 10 (HIGH) ensures it runs before other turn middleware.
  */
-export function ContextMessage(text: string): Extension {
+export function BasicSystemPrompt(text: string): Extension {
   return {
-    name: "context-message",
+    name: "basic-system-prompt",
 
     register(api: ExtensionApi): void {
       api.pipeline.register(
@@ -18,13 +18,13 @@ export function ContextMessage(text: string): Extension {
           ctx.conversation.emit({
             type: "append",
             message: {
-              id: `ctx-msg-${randomUUID()}`,
+              id: `sys-${randomUUID()}`,
               data: {
                 role: "system",
                 content: text,
               },
               metadata: {
-                __createdBy: "context-message",
+                __createdBy: "basic-system-prompt",
               },
             },
           });

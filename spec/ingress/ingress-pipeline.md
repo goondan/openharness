@@ -1,8 +1,8 @@
-# ingress-pipeline — Ingress 4단계 파이프라인
+# ingress-pipeline — Ingress 2단계 파이프라인
 
 ## 1. 한 줄 요약
 
-외부 이벤트를 4단계 파이프라인(verify → normalize → route → dispatch)으로 처리하여, 적절한 에이전트의 적절한 대화에 Turn을 비동기로 접수한다.
+외부 이벤트를 2단계 파이프라인(ingress → route)으로 처리하여, 적절한 에이전트의 적절한 대화에 Turn을 비동기로 접수한다.
 
 ---
 
@@ -26,34 +26,31 @@
   - 해당 connectionName에 대응하는 Connection이 등록되어 있다.
 - **Main Flow:**
   1. Connection의 Connector를 조회한다.
-  2. **Verify 단계:** Connection 수준 미들웨어를 실행한 후, `connector.verify`가 정의되어 있으면 `connector.verify(ctx)`를 호출한다. 서명 확인, 중복 체크 등. verify가 미정의면 이 단계를 통과한다.
-  3. **Normalize 단계:** `connector.normalize(ctx)`를 호출한다. 소스별 페이로드를 InboundEnvelope 표준 형식으로 변환한다. 1:N fan-out을 허용한다 (배열 반환).
-  4. **Route 단계:** 각 InboundEnvelope에 대해 Connection의 라우팅 규칙을 선언 순서대로 평가한다 (first-match-wins).
-     - 매칭된 규칙에서 대상 agentName과 conversationId를 결정한다.
-  5. **Dispatch 단계:** Agent 수준 미들웨어를 실행한 후, 매칭된 에이전트에 Turn을 비동기로 접수한다.
-  6. 접수 결과(IngressAcceptResult 배열)를 반환한다. 결과는 Turn 완료가 아니라 accepted handle이다.
-  7. `ingress.accepted` 이벤트를 발행한다 (각 접수건별).
+  2. **Ingress 단계 (Connection 수준):** Connection 수준 미들웨어를 실행한 후, 내부적으로 verify와 normalize를 순차 수행한다. `connector.verify`가 정의되어 있으면 `connector.verify(ctx)`를 호출하여 서명 확인, 중복 체크 등을 수행한다 (verify가 미정의면 건너뜀). 이어서 `connector.normalize(ctx)`를 호출하여 소스별 페이로드를 InboundEnvelope 표준 형식으로 변환한다. 1:N fan-out을 허용한다 (배열 반환).
+  3. **Route 단계 (Agent 수준):** 각 InboundEnvelope에 대해 Agent 수준 미들웨어를 실행한 후, 내부적으로 라우팅 규칙 매칭과 Turn 접수를 수행한다. Connection의 라우팅 규칙을 선언 순서대로 평가하고 (first-match-wins), 매칭된 규칙에서 대상 agentName과 conversationId를 결정한 뒤, 매칭된 에이전트에 Turn을 비동기로 접수한다.
+  4. 접수 결과(IngressAcceptResult 배열)를 반환한다. 결과는 Turn 완료가 아니라 accepted handle이다.
+  5. `ingress.accepted` 이벤트를 발행한다 (각 접수건별).
 - **Alternative Flow:**
-  - verify 실패: 에러를 반환한다. normalize 이후 단계 실행하지 않음. `ingress.rejected` 이벤트 발행.
-  - normalize가 빈 배열 반환: 처리할 이벤트 없음. 빈 결과 배열 반환.
-  - 매칭되는 라우팅 규칙 없음: 해당 envelope을 reject. `ingress.rejected` 이벤트 발행.
+  - verify 실패 (ingress 단계 내): 빈 배열 `[]`을 반환하고 `ingress.rejected` 이벤트를 발행한다. route 단계 실행하지 않음.
+  - normalize가 빈 배열 반환 (ingress 단계 내): 처리할 이벤트 없음. 빈 결과 배열 반환.
+  - 매칭되는 라우팅 규칙 없음 (route 단계 내): 해당 envelope을 reject. `ingress.rejected` 이벤트 발행.
   - conversationId를 결정할 수 없음 (3개 경로 모두 없음): reject. `ingress.rejected` 이벤트 발행.
   - 대상 agentName이 등록되지 않은 경우: reject. `ingress.rejected` 이벤트 발행.
 - **Outputs:** IngressAcceptResult[]
 - **Side Effects:** Turn이 비동기로 접수됨.
 - **Failure Modes:**
   - connectionName이 등록되지 않은 경우: 즉시 에러 반환.
-  - Connector verify/normalize 예외: reject로 처리.
+  - Connector verify/normalize 예외 (ingress 단계): 빈 배열 `[]`을 반환하고 `ingress.rejected` 이벤트를 발행한다.
 
-#### Flow ID: INGRESS-DISPATCH-01 — 직접 접수 (verify/normalize 건너뜀)
+#### Flow ID: INGRESS-DISPATCH-01 — 직접 접수 (ingress 단계 건너뜀)
 
 - **Actor:** 외부 코드
 - **Trigger:** `runtime.ingress.dispatch({ connectionName, envelope })` 호출
 - **Preconditions:**
   - 이미 정규화된 InboundEnvelope가 전달된다.
 - **Main Flow:**
-  1. Route 단계부터 실행한다 (verify/normalize 건너뜀).
-  2. 이하 INGRESS-RECEIVE-01의 Route/Dispatch 단계와 동일.
+  1. Route 단계부터 실행한다 (ingress 단계 건너뜀).
+  2. 이하 INGRESS-RECEIVE-01의 Route 단계와 동일.
 - **Outputs:** IngressAcceptResult
 - **Failure Modes:**
   - 매칭 실패, conversationId 부재: INGRESS-RECEIVE-01과 동일.
@@ -114,9 +111,9 @@
 ### Constraint ID: INGRESS-CONST-005 — 미들웨어 범위 분리
 
 - **Category:** 아키텍처
-- **Description:** Connection 수준 Extension은 verify/normalize(pre-route)에 개입한다. Agent 수준 Extension은 route/dispatch(post-route)에 개입한다. 범위를 넘어서는 개입은 불가. Extension은 `api.pipeline.register("verify" | "normalize" | "route" | "dispatch", handler)`로 Ingress 미들웨어를 등록한다.
+- **Description:** Connection 수준 Extension은 ingress 단계에 개입한다. Agent 수준 Extension은 route 단계에 개입한다. 범위를 넘어서는 개입은 불가. Extension은 `api.pipeline.register("ingress" | "route", handler)`로 Ingress 미들웨어를 등록한다.
 - **Scope:** 전체
-- **Measurement:** Connection Extension이 dispatch에 개입하지 못하는 테스트.
+- **Measurement:** Connection Extension이 route 단계에 개입하지 못하는 테스트.
 - **Verification:** 유닛 테스트.
 
 ---
@@ -227,14 +224,12 @@ interface IngressAcceptResult {
 
 ## 6. Realization Specification
 
-- **Module Boundaries:** Ingress 파이프라인은 코어 패키지의 독립 모듈. Connector/Connection 등록과 4단계 파이프라인 실행을 담당.
+- **Module Boundaries:** Ingress 파이프라인은 코어 패키지의 독립 모듈. Connector/Connection 등록과 2단계 파이프라인 실행을 담당.
 - **Data Ownership:** ConnectionConfig는 createHarness 시 등록되며 런타임 중 변경 불가. Connector 인스턴스는 Connection당 하나.
-- **Concurrency Strategy:** `receive()`가 N개의 InboundEnvelope를 생성하면 각각 독립적으로 Route → Dispatch를 실행한다. Dispatch는 비동기 접수이므로 receive()는 빠르게 반환된다.
+- **Concurrency Strategy:** `receive()`가 N개의 InboundEnvelope를 생성하면 각각 독립적으로 Route 단계를 실행한다. Turn 접수는 비동기이므로 receive()는 빠르게 반환된다.
 - **Failure Handling:**
-  - Connector verify 예외: reject로 처리, ingress.rejected 이벤트.
-  - Connector normalize 예외: reject로 처리, ingress.rejected 이벤트.
-  - Route 매칭 실패: reject로 처리, ingress.rejected 이벤트.
-  - Dispatch 접수 실패: reject로 처리.
+  - Ingress 단계 예외 (verify/normalize): reject로 처리, ingress.rejected 이벤트.
+  - Route 단계 실패 (매칭 실패, 접수 실패): reject로 처리, ingress.rejected 이벤트.
   - 개별 envelope의 실패가 다른 envelope 처리에 영향을 주지 않는다 (fan-out 시).
 
 ---
@@ -249,11 +244,11 @@ interface IngressAcceptResult {
 
 ## 8. Acceptance Criteria
 
-- **Given** SlackConnector와 `{ match: { event: "slack.message" }, agent: "assistant" }` 규칙이 있는 Connection에서, **When** `receive({ connectionName: "slack-main", payload: rawSlackBody })`를 호출하면, **Then** verify → normalize → route → dispatch가 순서대로 실행되고 accepted 결과가 반환된다. (AC-9)
+- **Given** SlackConnector와 `{ match: { event: "slack.message" }, agent: "assistant" }` 규칙이 있는 Connection에서, **When** `receive({ connectionName: "slack-main", payload: rawSlackBody })`를 호출하면, **Then** ingress → route가 순서대로 실행되고 accepted 결과가 반환된다. (AC-9)
 - **Given** 규칙에 `conversationIdProperty: "channel"`이 설정되고 envelope.properties에 `channel: "C123"`이 있으면, **When** Route 단계를 실행하면, **Then** conversationId가 "C123"으로 결정된다. (AC-10)
 - **Given** 규칙에 conversationId 관련 설정이 없고 Connector도 conversationId를 설정하지 않았으면, **When** Route 단계를 실행하면, **Then** reject된다. (AC-11)
-- **Given** normalize가 3개의 InboundEnvelope를 반환하면, **When** receive를 실행하면, **Then** 3건의 Route → Dispatch가 각각 실행되고 IngressAcceptResult 3개가 반환된다.
+- **Given** normalize가 3개의 InboundEnvelope를 반환하면, **When** receive를 실행하면, **Then** 3건의 Route 단계가 각각 실행되고 IngressAcceptResult 3개가 반환된다.
 - **Given** 두 규칙이 모두 매칭 가능한 envelope에서, **When** Route를 실행하면, **Then** 선언 순서상 첫 번째 규칙이 적용된다.
 - **Given** receive()가 accepted를 반환한 직후, **When** Turn이 아직 실행 중이면, **Then** receive()는 이미 반환되어 있다 (비동기 접수).
-- **Given** Connection 수준 Extension이 verify 미들웨어를 등록했으면, **When** receive를 실행하면, **Then** Connector.verify 전에 미들웨어가 실행된다.
-- **Given** 이미 정규화된 InboundEnvelope로 `dispatch()`를 호출하면, **When** 실행하면, **Then** verify/normalize를 건너뛰고 Route → Dispatch만 실행된다.
+- **Given** Connection 수준 Extension이 ingress 미들웨어를 등록했으면, **When** receive를 실행하면, **Then** Connector.verify/normalize 전에 미들웨어가 실행된다.
+- **Given** 이미 정규화된 InboundEnvelope로 `dispatch()`를 호출하면, **When** 실행하면, **Then** ingress 단계를 건너뛰고 Route 단계만 실행된다.

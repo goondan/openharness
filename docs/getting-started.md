@@ -35,7 +35,7 @@ OpenHarness CLI는 기본적으로 현재 작업 디렉토리의 `harness.config
 ```ts
 import { defineHarness, env } from "@goondan/openharness-types";
 import { OpenAI } from "@goondan/openharness/models";
-import { ContextMessage, MessageWindow } from "@goondan/openharness-base";
+import { BasicSystemPrompt, MessageWindow } from "@goondan/openharness-base";
 
 export default defineHarness({
   agents: {
@@ -45,7 +45,7 @@ export default defineHarness({
         apiKey: env("OPENAI_API_KEY"),
       }),
       extensions: [
-        ContextMessage("당신은 짧고 정확하게 답합니다."),
+        BasicSystemPrompt("You are helpful."),
         MessageWindow({ maxMessages: 20 }),
       ],
     },

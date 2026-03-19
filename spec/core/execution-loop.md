@@ -27,7 +27,7 @@
   - 런타임이 close되지 않은 상태다.
 - **Main Flow:**
   1. Turn ID를 생성한다.
-  2. `input`이 `string`이면 코어가 `InboundEnvelope`로 래핑한다 (name: `"direct"`, content: `[{ type: "text", text: input }]`). Ingress 경유 시 이미 `InboundEnvelope`이므로 그대로 사용한다.
+  2. `input`이 `string`이면 코어가 `InboundEnvelope`로 래핑한다. Ingress 경유 시 이미 `InboundEnvelope`이므로 그대로 사용한다.
   3. 인바운드 메시지를 대화 상태에 `append` 이벤트로 추가한다 (FR-CORE-007). 코어가 LLM 응답과 도구 결과도 동일하게 append한다. 이것이 코어가 대화 상태에 직접 쓰는 유일한 동작이다.
   4. AbortController를 생성하고, AbortSignal을 Turn 컨텍스트에 바인딩한다.
   5. Turn 미들웨어 체인을 실행한다.

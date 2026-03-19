@@ -7,10 +7,8 @@ import type {
   ConnectorContext,
   InboundEnvelope,
   RoutingRule,
-  VerifyContext,
-  NormalizeContext,
+  IngressContext,
   RouteContext,
-  DispatchContext,
   IngressAcceptResult,
 } from "@goondan/openharness-types";
 
@@ -104,8 +102,8 @@ function makePipeline(opts: MakePipelineOptions = {}) {
 // -----------------------------------------------------------------------
 
 describe("IngressPipeline", () => {
-  // Test 1: Full pipeline: verify → normalize → route → dispatch → accepted
-  it("full pipeline: verify → normalize → route → dispatch → accepted", async () => {
+  // Test 1: Full pipeline: ingress → route → accepted
+  it("full pipeline: ingress → route → accepted", async () => {
     const { pipeline, dispatchTurn } = makePipeline();
 
     const results = await pipeline.receive({
@@ -256,8 +254,8 @@ describe("IngressPipeline", () => {
     expect(turnCompleted).toHaveBeenCalled();
   });
 
-  // Test 8: dispatch() method skips verify/normalize
-  it("dispatch() method skips verify/normalize stages", async () => {
+  // Test 8: dispatch() method skips ingress stage
+  it("dispatch() method skips ingress stage", async () => {
     const connector = makeConnector();
     const { pipeline, dispatchTurn } = makePipeline({ connector });
 
@@ -316,25 +314,16 @@ describe("IngressPipeline", () => {
     expect((rejected[0] as { type: string }).type).toBe("ingress.rejected");
   });
 
-  // Test 10: Connection-level middleware on verify/normalize
-  it("connection-level middleware runs on verify and normalize stages", async () => {
-    const verifyMiddlewareCalled = vi.fn();
-    const normalizeMiddlewareCalled = vi.fn();
+  // Test 10: Connection-level middleware on ingress stage
+  it("connection-level middleware runs on ingress stage", async () => {
+    const ingressMiddlewareCalled = vi.fn();
 
     const connectionMiddleware = new MiddlewareRegistry();
 
     connectionMiddleware.register(
-      "verify",
+      "ingress",
       async (ctx: unknown, next: () => Promise<unknown>) => {
-        verifyMiddlewareCalled(ctx);
-        return next();
-      }
-    );
-
-    connectionMiddleware.register(
-      "normalize",
-      async (ctx: unknown, next: () => Promise<unknown>) => {
-        normalizeMiddlewareCalled(ctx);
+        ingressMiddlewareCalled(ctx);
         return next();
       }
     );
@@ -343,14 +332,12 @@ describe("IngressPipeline", () => {
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
-    expect(verifyMiddlewareCalled).toHaveBeenCalledOnce();
-    expect(normalizeMiddlewareCalled).toHaveBeenCalledOnce();
+    expect(ingressMiddlewareCalled).toHaveBeenCalledOnce();
   });
 
-  // Test 11: Agent-level middleware on route/dispatch
-  it("agent-level middleware runs on route and dispatch stages", async () => {
+  // Test 11: Agent-level middleware on route stage
+  it("agent-level middleware runs on route stage", async () => {
     const routeMiddlewareCalled = vi.fn();
-    const dispatchMiddlewareCalled = vi.fn();
 
     const agentMiddleware = new MiddlewareRegistry();
 
@@ -362,24 +349,15 @@ describe("IngressPipeline", () => {
       }
     );
 
-    agentMiddleware.register(
-      "dispatch",
-      async (ctx: unknown, next: () => Promise<unknown>) => {
-        dispatchMiddlewareCalled(ctx);
-        return next();
-      }
-    );
-
     const { pipeline } = makePipeline({ agentMiddleware });
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
     expect(routeMiddlewareCalled).toHaveBeenCalledOnce();
-    expect(dispatchMiddlewareCalled).toHaveBeenCalledOnce();
   });
 
-  // Test 12: Scope enforcement — Connection Extension cannot affect route/dispatch
-  it("scope enforcement: connection middleware does NOT affect route/dispatch stages", async () => {
+  // Test 12: Scope enforcement — Connection Extension cannot affect route stage
+  it("scope enforcement: connection middleware does NOT affect route stage", async () => {
     const routeIntercepted = vi.fn();
 
     // Register "route" middleware on the connection registry — should be ignored
@@ -400,16 +378,16 @@ describe("IngressPipeline", () => {
     expect(routeIntercepted).not.toHaveBeenCalled();
   });
 
-  // Test 13: Scope enforcement — Agent Extension cannot affect verify/normalize
-  it("scope enforcement: agent middleware does NOT affect verify/normalize stages", async () => {
-    const verifyIntercepted = vi.fn();
+  // Test 13: Scope enforcement — Agent Extension cannot affect ingress stage
+  it("scope enforcement: agent middleware does NOT affect ingress stage", async () => {
+    const ingressIntercepted = vi.fn();
 
-    // Register "verify" middleware on the agent registry — should be ignored
+    // Register "ingress" middleware on the agent registry — should be ignored
     const agentMiddleware = new MiddlewareRegistry();
     agentMiddleware.register(
-      "verify",
+      "ingress",
       async (ctx: unknown, next: () => Promise<unknown>) => {
-        verifyIntercepted(); // should NOT be called
+        ingressIntercepted(); // should NOT be called
         return next();
       }
     );
@@ -418,8 +396,8 @@ describe("IngressPipeline", () => {
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
-    // Verify middleware registered on agentMiddleware should NOT have been called
-    expect(verifyIntercepted).not.toHaveBeenCalled();
+    // Ingress middleware registered on agentMiddleware should NOT have been called
+    expect(ingressIntercepted).not.toHaveBeenCalled();
   });
 
   // Test 14: listConnections() returns all registered connections

@@ -78,7 +78,7 @@ openharness_v2/
 │       └── src/
 │           ├── index.ts            # re-exports
 │           ├── extensions/
-│           │   ├── context-message.ts   # ContextMessage()
+│           │   ├── basic-system-prompt.ts   # BasicSystemPrompt()
 │           │   ├── message-window.ts    # MessageWindow()
 │           │   ├── compaction-summarize.ts  # CompactionSummarize()
 │           │   ├── logging.ts           # Logging()
@@ -923,14 +923,14 @@ git commit -m "feat(cli): implement oh CLI with run and repl commands"
 
 ## Chunk 8: Base Package — Extensions & Tools
 
-### Task 17: Base package scaffolding + ContextMessage
+### Task 17: Base package scaffolding + BasicSystemPrompt
 
 **Files:**
 - Create: `packages/base/package.json`
 - Create: `packages/base/tsconfig.json`
 - Create: `packages/base/src/index.ts`
-- Create: `packages/base/src/extensions/context-message.ts`
-- Create: `packages/base/src/__tests__/context-message.test.ts`
+- Create: `packages/base/src/extensions/basic-system-prompt.ts`
+- Create: `packages/base/src/__tests__/basic-system-prompt.test.ts`
 
 - [ ] **Step 1: Create package.json**
 
@@ -950,7 +950,7 @@ git commit -m "feat(cli): implement oh CLI with run and repl commands"
 
 Note: depends on types only (NOT core). Per spec CONFIG-CONST-004.
 
-- [ ] **Step 2: Write failing tests for ContextMessage**
+- [ ] **Step 2: Write failing tests for BasicSystemPrompt**
 
 Tests:
 1. With systemPrompt → system message prepended via emit(append)
@@ -958,7 +958,7 @@ Tests:
 3. InboundEnvelope content converted to user message via emit(append)
 4. Registers on "step" pipeline level
 
-- [ ] **Step 3: Implement ContextMessage extension**
+- [ ] **Step 3: Implement BasicSystemPrompt extension**
 
 Registers Step middleware that:
 - If systemPrompt config is provided, prepends system message via emit(append)
@@ -967,7 +967,7 @@ Registers Step middleware that:
 - [ ] **Step 4: Run tests & commit**
 
 ```bash
-git commit -m "feat(base): implement ContextMessage extension"
+git commit -m "feat(base): implement BasicSystemPrompt extension"
 ```
 
 ### Task 18: MessageWindow + CompactionSummarize
@@ -1084,7 +1084,7 @@ git commit -m "feat(base): implement 6 base tools"
 **Files:**
 - Create: `packages/core/src/__tests__/integration/ac-tests.test.ts`
 
-- [ ] **Step 1: AC-1 — Minimal execution with ContextMessage**
+- [ ] **Step 1: AC-1 — Minimal execution with BasicSystemPrompt**
 
 - [ ] **Step 2: AC-2 — No Extension = empty context to LLM**
 

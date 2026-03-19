@@ -8,10 +8,8 @@ import type {
   TurnMiddleware,
   StepMiddleware,
   ToolCallMiddleware,
-  VerifyMiddleware,
-  NormalizeMiddleware,
+  IngressMiddleware,
   RouteMiddleware,
-  DispatchMiddleware,
   ConversationState,
 } from "@goondan/openharness-types";
 import type { EventBus } from "./event-bus.js";
@@ -59,15 +57,13 @@ export function createExtensionApi(deps: ExtensionRegistryDeps): ExtensionApi {
   const api: ExtensionApi = {
     pipeline: {
       register(
-        level: "turn" | "step" | "toolCall" | "verify" | "normalize" | "route" | "dispatch",
+        level: "turn" | "step" | "toolCall" | "ingress" | "route",
         handler:
           | TurnMiddleware
           | StepMiddleware
           | ToolCallMiddleware
-          | VerifyMiddleware
-          | NormalizeMiddleware
-          | RouteMiddleware
-          | DispatchMiddleware,
+          | IngressMiddleware
+          | RouteMiddleware,
         options?: MiddlewareOptions
       ): void {
         middlewareRegistry.register(

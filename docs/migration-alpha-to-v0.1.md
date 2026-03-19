@@ -11,7 +11,7 @@
 
 1. `harness.yaml` 기반 구성이 사라지고 `harness.config.ts` 기반으로 바뀌었습니다.
 2. `createHarnessRuntimeFromYaml()` / `createRunnerFromHarnessYaml()` 같은 YAML 런타임 API가 사라졌습니다.
-3. `Extension/context-message`, `Tool/bash` 같은 manifest ref 대신, 실제 JS/TS 값을 import 해서 넣어야 합니다.
+3. `Extension/basic-system-prompt`, `Tool/bash` 같은 manifest ref 대신, 실제 JS/TS 값을 import 해서 넣어야 합니다.
 4. ingress / connection 설정 구조가 YAML 리소스 그래프가 아니라 plain object config로 바뀌었습니다.
 
 즉, alpha4 → 0.1.x는 _설정 번역_ 이 핵심이고, 대부분의 경우 점진적 패치보다 한 번에 옮기는 편이 낫습니다.
@@ -56,7 +56,7 @@ spec:
   modelConfig:
     modelRef: Model/claude
   extensions:
-    - Extension/context-message
+    - Extension/basic-system-prompt
 ```
 
 ### 0.1.x
@@ -64,7 +64,7 @@ spec:
 ```ts
 import { defineHarness, env } from "@goondan/openharness-types";
 import { Anthropic } from "@goondan/openharness/models";
-import { ContextMessage } from "@goondan/openharness-base";
+import { BasicSystemPrompt } from "@goondan/openharness-base";
 
 export default defineHarness({
   agents: {
@@ -74,7 +74,7 @@ export default defineHarness({
         apiKey: env("ANTHROPIC_API_KEY"),
       }),
       extensions: [
-        ContextMessage("당신은 정확한 조력자입니다."),
+        BasicSystemPrompt("You are helpful."),
       ],
     },
   },
@@ -133,7 +133,7 @@ manifest ref를 YAML에 적었습니다.
 
 ```yaml
 extensions:
-  - Extension/context-message
+  - Extension/basic-system-prompt
 tools:
   - Tool/bash
 ```
@@ -143,14 +143,14 @@ tools:
 실제 구현을 import 해서 config에 넣습니다.
 
 ```ts
-import { ContextMessage, BashTool } from "@goondan/openharness-base";
+import { BasicSystemPrompt, BashTool } from "@goondan/openharness-base";
 
 export default defineHarness({
   agents: {
     assistant: {
       // ...
       extensions: [
-        ContextMessage("당신은 정확한 조력자입니다."),
+        BasicSystemPrompt("You are helpful."),
       ],
       tools: [
         BashTool(),

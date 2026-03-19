@@ -2,10 +2,8 @@ import type {
   TurnMiddleware,
   StepMiddleware,
   ToolCallMiddleware,
-  VerifyMiddleware,
-  NormalizeMiddleware,
+  IngressMiddleware,
   RouteMiddleware,
-  DispatchMiddleware,
   MiddlewareOptions,
 } from "./middleware.js";
 import type { ToolDefinition, ToolInfo } from "./tool.js";
@@ -57,10 +55,8 @@ export interface ExtensionApi {
     register(level: "turn", handler: TurnMiddleware, options?: MiddlewareOptions): void;
     register(level: "step", handler: StepMiddleware, options?: MiddlewareOptions): void;
     register(level: "toolCall", handler: ToolCallMiddleware, options?: MiddlewareOptions): void;
-    register(level: "verify", handler: VerifyMiddleware, options?: MiddlewareOptions): void;
-    register(level: "normalize", handler: NormalizeMiddleware, options?: MiddlewareOptions): void;
+    register(level: "ingress", handler: IngressMiddleware, options?: MiddlewareOptions): void;
     register(level: "route", handler: RouteMiddleware, options?: MiddlewareOptions): void;
-    register(level: "dispatch", handler: DispatchMiddleware, options?: MiddlewareOptions): void;
   };
   tools: {
     register(tool: ToolDefinition): void;

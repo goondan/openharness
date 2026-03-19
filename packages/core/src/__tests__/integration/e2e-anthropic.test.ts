@@ -37,12 +37,12 @@ describeE2E("E2E: Anthropic API", () => {
   }, 30_000);
 
   // -----------------------------------------------------------------------
-  // Test 2: ContextMessage extension injects system prompt
+  // Test 2: BasicSystemPrompt extension injects system prompt
   // -----------------------------------------------------------------------
-  it("ContextMessage extension injects system prompt that affects response", async () => {
-    function ContextMessage(text: string): Extension {
+  it("BasicSystemPrompt extension injects system prompt that affects response", async () => {
+    function BasicSystemPrompt(text: string): Extension {
       return {
-        name: "context-message",
+        name: "basic-system-prompt",
         register(api: ExtensionApi): void {
           api.pipeline.register(
             "turn",
@@ -50,9 +50,9 @@ describeE2E("E2E: Anthropic API", () => {
               ctx.conversation.emit({
                 type: "append",
                 message: {
-                  id: `ctx-${Date.now()}`,
+                  id: `sys-${Date.now()}`,
                   data: { role: "system", content: text },
-                  metadata: { __createdBy: "context-message" },
+                  metadata: { __createdBy: "basic-system-prompt" },
                 },
               });
               return next();
@@ -67,7 +67,7 @@ describeE2E("E2E: Anthropic API", () => {
       agents: {
         default: {
           model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
-          extensions: [ContextMessage("You are a pirate. Always respond in pirate speak.")],
+          extensions: [BasicSystemPrompt("You are helpful.")],
         },
       },
     };

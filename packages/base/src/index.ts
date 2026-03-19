@@ -1,4 +1,4 @@
-export { ContextMessage } from "./extensions/context-message.js";
+export { BasicSystemPrompt } from "./extensions/basic-system-prompt.js";
 export { MessageWindow } from "./extensions/message-window.js";
 export { CompactionSummarize } from "./extensions/compaction-summarize.js";
 export { Logging } from "./extensions/logging.js";

@@ -5,10 +5,8 @@ import type {
   InboundEnvelope,
   Connector,
   RoutingRule,
-  VerifyContext,
-  NormalizeContext,
+  IngressContext,
   RouteContext,
-  DispatchContext,
   RouteResult,
 } from "@goondan/openharness-types";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -62,7 +60,10 @@ export class IngressPipeline implements IngressApi {
   // -----------------------------------------------------------------------
 
   /**
-   * Full 4-stage pipeline: verify → normalize → (route → dispatch) per envelope.
+   * Full 2-stage pipeline: ingress → route per envelope.
+   *
+   * Stage 1 (ingress): connection-level — verify + normalize raw payload into InboundEnvelope(s).
+   * Stage 2 (route): agent-level — route envelope to agent and dispatch turn.
    */
   async receive(input: {
     connectionName: string;
@@ -73,7 +74,7 @@ export class IngressPipeline implements IngressApi {
       input;
     const { eventBus } = this._config;
 
-    // Stage 0: emit ingress.received
+    // Emit ingress.received
     eventBus.emit("ingress.received", {
       type: "ingress.received",
       connectionName,
@@ -88,51 +89,38 @@ export class IngressPipeline implements IngressApi {
     }
 
     const { connector, rules, connectionMiddleware } = connection;
-    const verifyCtx: VerifyContext = { connectionName, payload, receivedAt };
-    const normalizeCtx: NormalizeContext = {
-      connectionName,
-      payload,
-      receivedAt,
-    };
+    const ingressCtx: IngressContext = { connectionName, payload, receivedAt };
 
-    // Stage 1: Verify (skip if connector.verify is undefined)
-    if (connector.verify !== undefined) {
-      const verifyCore = async (ctx: VerifyContext): Promise<void> => {
-        await connector.verify!(ctx);
-      };
-
-      const verifyChain = connectionMiddleware.buildChain<VerifyContext, void>(
-        "verify",
-        verifyCore
-      );
-
-      try {
-        await verifyChain(verifyCtx);
-      } catch (err) {
-        const reason =
-          err instanceof Error ? err.message : String(err);
-        eventBus.emit("ingress.rejected", {
-          type: "ingress.rejected",
-          connectionName,
-          reason,
-        });
-        return [];
-      }
-    }
-
-    // Stage 2: Normalize (connection-level middleware)
-    const normalizeCore = async (
-      ctx: NormalizeContext
+    // Stage 1: Ingress (connection-level middleware wrapping verify + normalize)
+    const ingressCore = async (
+      ctx: IngressContext
     ): Promise<InboundEnvelope | InboundEnvelope[]> => {
+      // Verify (skip if connector.verify is undefined)
+      if (connector.verify !== undefined) {
+        await connector.verify(ctx);
+      }
+      // Normalize
       return connector.normalize(ctx);
     };
 
-    const normalizeChain = connectionMiddleware.buildChain<
-      NormalizeContext,
+    const ingressChain = connectionMiddleware.buildChain<
+      IngressContext,
       InboundEnvelope | InboundEnvelope[]
-    >("normalize", normalizeCore);
+    >("ingress", ingressCore);
 
-    const normalizeResult = await normalizeChain(normalizeCtx);
+    let normalizeResult: InboundEnvelope | InboundEnvelope[];
+    try {
+      normalizeResult = await ingressChain(ingressCtx);
+    } catch (err) {
+      const reason =
+        err instanceof Error ? err.message : String(err);
+      eventBus.emit("ingress.rejected", {
+        type: "ingress.rejected",
+        connectionName,
+        reason,
+      });
+      return [];
+    }
 
     // Fan-out: normalise to array
     const envelopes: InboundEnvelope[] = Array.isArray(normalizeResult)
@@ -143,7 +131,7 @@ export class IngressPipeline implements IngressApi {
       return [];
     }
 
-    // Stages 3 & 4: route + dispatch per envelope
+    // Stage 2: Route per envelope (agent-level middleware wrapping route + dispatch)
     const results: IngressAcceptResult[] = [];
     for (const envelope of envelopes) {
       const result = await this._routeAndDispatch(
@@ -161,7 +149,7 @@ export class IngressPipeline implements IngressApi {
   }
 
   /**
-   * Skip verify/normalize — go straight to route + dispatch.
+   * Skip ingress stage — go straight to route stage.
    */
   async dispatch(input: {
     connectionName: string;
@@ -212,7 +200,7 @@ export class IngressPipeline implements IngressApi {
   // -----------------------------------------------------------------------
 
   /**
-   * Stage 3 (route) + Stage 4 (dispatch) for a single envelope.
+   * Route + dispatch for a single envelope (agent-level "route" middleware).
    * Returns IngressAcceptResult on success, null on rejection.
    */
   private async _routeAndDispatch(
@@ -224,15 +212,22 @@ export class IngressPipeline implements IngressApi {
     const { agentMiddleware, registeredAgents, eventBus, dispatchTurn } =
       this._config;
 
-    // Stage 3: Route (agent-level middleware)
+    // "route" middleware chain handles routing only — dispatch happens after
     const routeCore = async (ctx: RouteContext): Promise<RouteResult> => {
-      const routeResult = routeEnvelope(ctx.envelope, rules, registeredAgents);
-      if (!routeResult.matched) {
-        throw new RouteRejectedError(routeResult.reason);
+      const routeMatch = routeEnvelope(ctx.envelope, rules, registeredAgents);
+      if (!routeMatch.matched) {
+        throw new RouteRejectedError(routeMatch.reason);
       }
+
+      const { agentName, conversationId } = routeMatch;
+
       return {
-        agentName: routeResult.agentName,
-        conversationId: routeResult.conversationId,
+        accepted: true,
+        connectionName: ctx.connectionName,
+        agentName,
+        conversationId,
+        eventName: ctx.envelope.name,
+        turnId: randomUUID(),
       };
     };
 
@@ -241,9 +236,9 @@ export class IngressPipeline implements IngressApi {
       routeCore
     );
 
-    let routeResult: RouteResult;
+    let result: RouteResult;
     try {
-      routeResult = await routeChain({ connectionName, envelope });
+      result = await routeChain({ connectionName, envelope });
     } catch (err) {
       const reason =
         err instanceof Error ? err.message : String(err);
@@ -255,42 +250,19 @@ export class IngressPipeline implements IngressApi {
       return null;
     }
 
-    const { agentName, conversationId } = routeResult;
+    // Dispatch: fire turn AFTER route chain completes successfully (INGRESS-CONST-004)
+    dispatchTurn(result.turnId, result.agentName, envelope, result.conversationId);
 
-    // Stage 4: Dispatch (agent-level middleware)
-    // Pipeline generates turnId and fires turn as fire-and-forget (INGRESS-CONST-004).
-    const dispatchCore = async (
-      ctx: DispatchContext
-    ): Promise<IngressAcceptResult> => {
-      const turnId = randomUUID();
-      // Fire-and-forget: start the turn asynchronously.
-      // Turn errors are handled via events, not propagated here.
-      dispatchTurn(turnId, ctx.agentName, ctx.envelope, ctx.conversationId);
-      return {
-        accepted: true,
-        connectionName: ctx.connectionName,
-        agentName: ctx.agentName,
-        conversationId: ctx.conversationId,
-        eventName: ctx.envelope.name,
-        turnId,
-      };
+    const acceptResult: IngressAcceptResult = {
+      accepted: result.accepted,
+      connectionName: result.connectionName,
+      agentName: result.agentName,
+      conversationId: result.conversationId,
+      eventName: result.eventName,
+      turnId: result.turnId,
     };
 
-    const dispatchChain = agentMiddleware.buildChain<
-      DispatchContext,
-      IngressAcceptResult
-    >("dispatch", dispatchCore);
-
-    const dispatchCtx: DispatchContext = {
-      connectionName,
-      envelope,
-      agentName,
-      conversationId,
-    };
-
-    const acceptResult = await dispatchChain(dispatchCtx);
-
-    // Emit ingress.accepted (payload per spec: connectionName, agentName, conversationId, turnId)
+    // Emit ingress.accepted
     eventBus.emit("ingress.accepted", {
       type: "ingress.accepted",
       connectionName,

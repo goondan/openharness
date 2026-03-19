@@ -145,20 +145,19 @@ type MessageEvent =
 ```ts
 interface Message {
   id: string;            // 고유 식별자
-  role: "system" | "user" | "assistant" | "tool";
-  content: MessageContent;
+  data: ModelMessage;    // Vercel AI SDK의 ModelMessage 타입
   metadata?: Record<string, unknown>;
 }
+```
 
-type MessageContent =
-  | string
-  | ContentPart[];
+`ModelMessage`는 Vercel AI SDK에서 제공하는 메시지 타입으로, role과 content를 포함한다. 코어는 이 타입을 직접 정의하지 않고 AI SDK의 타입을 그대로 사용한다.
 
+```ts
 type ContentPart =
   | { type: "text"; text: string }
   | { type: "image"; url: string }
-  | { type: "tool_use"; toolName: string; args: JsonObject; toolCallId: string }
-  | { type: "tool_result"; toolCallId: string; result: ToolResult };
+  | { type: "tool-call"; toolName: string; args: JsonObject; toolCallId: string }
+  | { type: "tool-result"; toolCallId: string; result: ToolResult };
 ```
 
 ---

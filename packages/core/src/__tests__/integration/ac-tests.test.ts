@@ -43,9 +43,9 @@ function messageContent(message: Message): any {
 // (avoids adding @goondan/openharness-base as a test dependency of core)
 // ---------------------------------------------------------------------------
 
-function ContextMessage(text: string): Extension {
+function BasicSystemPrompt(text: string): Extension {
   return {
-    name: "context-message",
+    name: "basic-system-prompt",
     register(api: ExtensionApi): void {
       api.pipeline.register(
         "turn",
@@ -53,9 +53,14 @@ function ContextMessage(text: string): Extension {
           ctx.conversation.emit({
             type: "append",
             message: {
-              id: `ctx-msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              data: { role: "system", content: text },
-              metadata: { __createdBy: "context-message" },
+              id: `sys-${Date.now()}`,
+              data: {
+                role: "system",
+                content: text,
+              },
+              metadata: {
+                __createdBy: "basic-system-prompt",
+              },
             },
           });
           return next();
@@ -138,11 +143,11 @@ beforeEach(async () => {
 });
 
 // ===========================================================================
-// AC-1: Minimal execution with ContextMessage
+// AC-1: Minimal execution with BasicSystemPrompt
 // ===========================================================================
 
-describe("AC-1: Minimal execution with ContextMessage", () => {
-  it("AC-1: ContextMessage prepends a system message and LLM receives it alongside the user message", async () => {
+describe("AC-1: Minimal execution with BasicSystemPrompt", () => {
+  it("AC-1: BasicSystemPrompt prepends a system message and LLM receives it alongside the user message", async () => {
     const capturedChat = vi.fn().mockResolvedValue({ text: "AC-1 response" });
     mockedCreateLlmClient.mockReturnValue({ chat: capturedChat });
 
@@ -150,7 +155,7 @@ describe("AC-1: Minimal execution with ContextMessage", () => {
       agents: {
         default: {
           model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
-          extensions: [ContextMessage("You are helpful.")],
+          extensions: [BasicSystemPrompt("You are helpful.")],
         },
       },
     };
@@ -162,7 +167,7 @@ describe("AC-1: Minimal execution with ContextMessage", () => {
     expect(capturedChat).toHaveBeenCalledOnce();
     const [messagesArg] = capturedChat.mock.calls[0] as [Message[], unknown, unknown];
 
-    // There must be a system message with the ContextMessage text
+    // There must be a system message with the BasicSystemPrompt text
     const systemMessages = messagesArg.filter((m) => messageRole(m) === "system");
     expect(systemMessages.length).toBeGreaterThanOrEqual(1);
     expect(systemMessages.some((m) => messageContent(m) === "You are helpful.")).toBe(true);
@@ -612,11 +617,11 @@ describe("AC-8: Middleware blocks ToolCall — tool handler not invoked", () => 
 });
 
 // ===========================================================================
-// AC-9: Ingress pipeline (verify → normalize → route → dispatch)
+// AC-9: Ingress pipeline (ingress → route)
 // ===========================================================================
 
-describe("AC-9: Ingress pipeline — verify → normalize → route → dispatch", () => {
-  it("AC-9: All 4 pipeline stages fire in order and envelope is accepted with correct agent", async () => {
+describe("AC-9: Ingress pipeline — ingress → route", () => {
+  it("AC-9: All pipeline stages fire in order and envelope is accepted with correct agent", async () => {
     mockedCreateLlmClient.mockReturnValue({
       chat: vi.fn().mockResolvedValue({ text: "ingress response" }),
     });

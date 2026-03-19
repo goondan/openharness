@@ -33,4 +33,4 @@ spec:
   tools:
     - Tool/bash
   extensions:
-    - Extension/context-message
+    - Extension/basic-system-prompt

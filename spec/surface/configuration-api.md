@@ -317,7 +317,7 @@ oh run "<text>"             → 단일 Turn 실행
 
 ## 8. Acceptance Criteria
 
-- **Given** harness.config.ts에 model + ContextMessage + 0 tools가 선언된 상태에서, **When** `oh run "hello"`를 실행하면, **Then** LLM이 시스템 프롬프트와 사용자 메시지를 받아 텍스트 응답을 반환한다. (AC-1)
+- **Given** harness.config.ts에 model + BasicSystemPrompt + 0 tools가 선언된 상태에서, **When** `oh run "hello"`를 실행하면, **Then** LLM이 시스템 프롬프트와 사용자 메시지를 받아 텍스트 응답을 반환한다. (AC-1)
 - **Given** MessageWindow를 CompactionSummarize로 교체한 상태에서, **When** Turn을 실행하면, **Then** 나머지 구성은 변경 없이 압축 전략만 바뀐다. (AC-3)
 - **Given** types에만 의존하는 Extension npm 패키지를 만들어 import + 선언한 상태에서, **When** Turn을 실행하면, **Then** 정상 동작한다. (AC-14)
 - **Given** process.env에 KEY=A가 설정되고 .env에 KEY=B가 있는 상태에서, **When** CLI가 .env를 로드하면, **Then** KEY의 값은 A다 (process.env 우선).

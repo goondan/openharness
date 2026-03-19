@@ -145,11 +145,9 @@ interface ExtensionApi {
     register(level: "turn", handler: TurnMiddleware, options?: MiddlewareOptions): void;
     register(level: "step", handler: StepMiddleware, options?: MiddlewareOptions): void;
     register(level: "toolCall", handler: ToolCallMiddleware, options?: MiddlewareOptions): void;
-    // Ingress 미들웨어 (Connection 수준 Extension: verify/normalize, Agent 수준 Extension: route/dispatch)
-    register(level: "verify", handler: VerifyMiddleware, options?: MiddlewareOptions): void;
-    register(level: "normalize", handler: NormalizeMiddleware, options?: MiddlewareOptions): void;
+    // Ingress 미들웨어 (Connection 수준 Extension: ingress, Agent 수준 Extension: route)
+    register(level: "ingress", handler: IngressMiddleware, options?: MiddlewareOptions): void;
     register(level: "route", handler: RouteMiddleware, options?: MiddlewareOptions): void;
-    register(level: "dispatch", handler: DispatchMiddleware, options?: MiddlewareOptions): void;
   };
 
   // 2. 도구 동적 관리
