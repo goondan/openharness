@@ -110,6 +110,7 @@ export async function executeTurn(
     conversation: conversationState,
     abortSignal: abortController.signal,
     input: envelope,
+    llm: llmClient,
   };
 
   // 6. Emit turn.start

@@ -86,6 +86,7 @@ function makeTurnContext(conversation: ConversationState): TurnContext {
         receivedAt: new Date().toISOString(),
       },
     },
+    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
   };
 }
 

@@ -9,8 +9,8 @@
 ## 2. 상위 스펙 연결
 
 - **Related Goals:** G-1 (순수한 코어), G-2 (Composable Extension), G-5 (명시적 선택)
-- **Related Requirements:** FR-CORE-001~007, FR-OBS-001~004
-- **Related AC:** AC-1, AC-2, AC-7, AC-8, AC-13
+- **Related Requirements:** FR-CORE-001~009, FR-OBS-001~004
+- **Related AC:** AC-1, AC-2, AC-7, AC-8, AC-13, AC-15, AC-16
 
 ---
 
@@ -151,6 +151,22 @@
 - **Measurement:** Extension 없이 실행했을 때 LLM 입력이 빈 컨텍스트인지 확인하는 테스트
 - **Verification:** Extension/Tool을 선언하지 않고 Turn을 실행, LLM에 전달되는 messages가 사용자 입력만 포함됨을 확인.
 
+### Constraint ID: EXEC-CONST-006 — TurnContext.llm 바인딩
+
+- **Category:** 동작 보장
+- **Description:** TurnContext.llm은 현재 에이전트의 모델 구성에 바인딩된 LlmClient다. StepContext와 ToolCallContext는 TurnContext를 extends하므로 llm이 자동 전파된다. Extension이 ctx.llm.chat()을 호출해도 대화 상태(conversation)에 자동 반영되지 않는다.
+- **Scope:** EXEC-TURN-01, EXEC-STEP-01, EXEC-TOOLCALL-01
+- **Measurement:** 미들웨어 내에서 ctx.llm.chat() 호출이 성공하고, 대화 상태에 자동 추가되지 않는 테스트
+- **Verification:** Turn 미들웨어에서 ctx.llm.chat()을 호출 후 conversation.messages에 해당 호출이 포함되지 않음을 확인.
+
+### Constraint ID: EXEC-CONST-007 — LlmChatOptions 격리
+
+- **Category:** 동작 보장
+- **Description:** LlmChatOptions로 전달된 오버라이드(model, temperature, maxTokens)는 해당 chat() 호출에만 적용된다. 에이전트의 기본 모델 구성을 영구적으로 변경하지 않는다.
+- **Scope:** LlmClient.chat()
+- **Measurement:** options를 전달한 호출 후, 다음 호출이 기본 구성을 사용하는 테스트
+- **Verification:** chat(messages, [], [], { model: "override" }) 호출 후, 옵션 없이 chat(messages)을 호출하여 기본 모델이 사용됨을 확인.
+
 ---
 
 ## 5. Interface Specification
@@ -189,6 +205,7 @@ interface TurnContext {
   conversation: ConversationState;  // 현재 Turn에 바인딩된 프록시. emit()은 Turn 실행 중(미들웨어 내부)에서만 호출 가능.
   abortSignal: AbortSignal;
   input: InboundEnvelope;           // processTurn(string)이면 코어가 래핑한 InboundEnvelope.
+  llm: LlmClient;                   // 현재 에이전트의 모델 구성에 바인딩된 LLM 클라이언트. Extension이 런타임에 LLM 호출 시 사용. (FR-CORE-008)
 }
 
 interface StepContext extends TurnContext {
@@ -201,7 +218,38 @@ interface ToolCallContext extends StepContext {
 }
 ```
 
-### 5.3 이벤트 구독 계약
+### 5.3 LlmClient 계약
+
+```ts
+interface LlmClient {
+  /**
+   * LLM에 채팅 요청을 보낸다.
+   * @param messages - 대화 메시지 배열
+   * @param tools - 사용 가능한 도구 정의 배열 (선택)
+   * @param systemMessages - 시스템 메시지 배열 (선택)
+   * @param options - 호출별 오버라이드 옵션 (선택, FR-CORE-009)
+   */
+  chat(
+    messages: Message[],
+    tools?: ToolDefinition[],
+    systemMessages?: SystemMessage[],
+    options?: LlmChatOptions,
+  ): Promise<LlmResponse>;
+}
+
+interface LlmChatOptions {
+  model?: string;        // 호출별 모델 오버라이드. 미지정 시 에이전트 기본 모델 사용.
+  temperature?: number;  // 호출별 temperature 오버라이드.
+  maxTokens?: number;    // 호출별 최대 토큰 수 오버라이드.
+}
+```
+
+- TurnContext.llm은 코어가 createHarness 시 에이전트의 모델 구성(provider + model)으로 바인딩한 LlmClient 인스턴스다.
+- StepContext, ToolCallContext는 TurnContext를 extends하므로 llm이 자동 전파된다.
+- LlmChatOptions의 각 필드는 선택적이며, 미지정 필드는 에이전트의 기본 구성을 사용한다.
+- Extension이 `ctx.llm.chat()`을 호출해도 대화 상태(conversation)에는 자동 반영되지 않는다. Extension이 필요에 따라 `conversation.emit()`으로 직접 기록해야 한다.
+
+### 5.4 이벤트 구독 계약
 
 ```ts
 api.on(event: string, listener: (payload: EventPayload) => void): void;
@@ -221,7 +269,7 @@ api.on(event: string, listener: (payload: EventPayload) => void): void;
 | `tool.done` | turnId, stepNumber, toolName, toolResult |
 | `tool.error` | turnId, stepNumber, toolName, error |
 
-### 5.4 Turn 결과 계약
+### 5.5 Turn 결과 계약
 
 ```ts
 interface TurnResult {
@@ -280,3 +328,5 @@ interface ToolCallSummary {
 - **Given** maxSteps: 2로 설정된 상태에서, **When** LLM이 3회 연속 도구를 요청하면, **Then** 2회 Step 후 Turn이 `maxStepsReached` 상태로 종료된다.
 - **Given** Turn 실행 중에, **When** `control.abortConversation()`을 호출하면, **Then** AbortSignal이 전파되어 현재 작업이 중단되고 Turn이 `aborted` 상태로 종료된다. (AC-13)
 - **Given** priority 50, 100, 200의 Step 미들웨어가 등록된 상태에서, **When** Step을 실행하면, **Then** 50 → 100 → 200 순서로 실행된다.
+- **Given** Turn 미들웨어를 등록한 Extension이 있는 상태에서, **When** 미들웨어 내에서 `ctx.llm.chat(messages)`를 호출하면, **Then** 현재 에이전트의 모델 구성으로 LLM 호출이 실행되고 응답이 반환된다. (AC-15)
+- **Given** Extension이 `ctx.llm.chat(messages, [], [], { model: "other-model", temperature: 0 })`를 호출하는 상태에서, **When** 해당 호출이 실행되면, **Then** 지정된 옵션만 오버라이드되고 에이전트의 기본 구성은 변경되지 않는다. (AC-16)

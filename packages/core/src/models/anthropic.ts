@@ -1,4 +1,4 @@
-import type { LlmClient, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
+import type { LlmClient, LlmChatOptions, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -109,7 +109,7 @@ export function createAnthropicClient(
   let client: InstanceType<{ new (opts: Record<string, unknown>): unknown }> | undefined;
 
   return {
-    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
+    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, options?: LlmChatOptions): Promise<LlmResponse> {
       if (!client) {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore -- @anthropic-ai/sdk is a peer dependency, not installed at build time
@@ -128,10 +128,14 @@ export function createAnthropicClient(
       const anthropicMessages = transformMessages(messages);
 
       const requestParams: Record<string, unknown> = {
-        model,
-        max_tokens: 4096,
+        model: options?.model ?? model,
+        max_tokens: options?.maxTokens ?? 4096,
         messages: anthropicMessages,
       };
+
+      if (options?.temperature !== undefined) {
+        requestParams["temperature"] = options.temperature;
+      }
 
       if (systemText) {
         requestParams["system"] = systemText;

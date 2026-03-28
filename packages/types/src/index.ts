@@ -62,6 +62,7 @@ export type {
   IngressMiddleware,
   RouteMiddleware,
   LlmResponse,
+  LlmChatOptions,
   LlmClient,
 } from "./middleware.js";
 

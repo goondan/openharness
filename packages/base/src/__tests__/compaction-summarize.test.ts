@@ -83,6 +83,12 @@ function makeMockApi(conversation: ConversationState): {
   return { api, registeredMiddleware };
 }
 
+function makeMockLlmClient() {
+  return {
+    chat: vi.fn().mockResolvedValue({ text: "LLM-generated summary of the conversation." }),
+  };
+}
+
 function makeStepContext(conversation: ConversationState): StepContext {
   return {
     turnId: "turn-1",
@@ -101,6 +107,7 @@ function makeStepContext(conversation: ConversationState): StepContext {
         receivedAt: new Date().toISOString(),
       },
     },
+    llm: makeMockLlmClient(),
   };
 }
 
@@ -223,12 +230,53 @@ describe("CompactionSummarize", () => {
 
     await middleware(ctx, next);
 
+    // Verify LLM was called for summarization
+    expect(ctx.llm.chat).toHaveBeenCalledOnce();
+
     const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
     const appendEvent = emitted.find((e) => e.type === "append");
     if (appendEvent && appendEvent.type === "append") {
       const content = appendEvent.message.data.content as string;
-      // Should include text from the removed messages
-      expect(content).toContain("Message 0");
+      // Should include the LLM-generated summary
+      expect(content).toContain("LLM-generated summary of the conversation.");
     }
+  });
+
+  it("uses custom summarizer when provided", async () => {
+    const messages = makeMessages(12);
+    const conversation = makeMockConversationState(messages);
+    const { api, registeredMiddleware } = makeMockApi(conversation);
+
+    const summarizer = vi.fn(async (msgs: Message[]) => {
+      return `Custom summary of ${msgs.length} messages`;
+    });
+
+    const ext = CompactionSummarize({ threshold: 10, summarizer });
+    ext.register(api);
+
+    const middleware = registeredMiddleware[0].handler;
+    const ctx = makeStepContext(conversation);
+    const next = vi.fn(async () => stubStepResult);
+
+    await middleware(ctx, next);
+
+    // summarizer should have been called with the 7 removed messages
+    expect(summarizer).toHaveBeenCalledOnce();
+    expect(summarizer).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "msg-0" }),
+        expect.objectContaining({ id: "msg-6" }),
+      ]),
+    );
+    expect(summarizer.mock.calls[0][0]).toHaveLength(7);
+
+    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
+    const appendEvent = emitted.find((e) => e.type === "append");
+    if (appendEvent && appendEvent.type === "append") {
+      const content = appendEvent.message.data.content as string;
+      expect(content).toContain("Custom summary of 7 messages");
+    }
+
+    expect(next).toHaveBeenCalledOnce();
   });
 });

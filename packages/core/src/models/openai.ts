@@ -1,4 +1,4 @@
-import type { LlmClient, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
+import type { LlmClient, LlmChatOptions, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -127,7 +127,7 @@ export function createOpenAIClient(
   let client: any;
 
   return {
-    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
+    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, options?: LlmChatOptions): Promise<LlmResponse> {
       if (!client) {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore -- openai is a peer dependency, not installed at build time
@@ -141,9 +141,16 @@ export function createOpenAIClient(
       const openaiMessages = transformMessages(messages);
 
       const requestParams: Record<string, unknown> = {
-        model,
+        model: options?.model ?? model,
         messages: openaiMessages,
       };
+
+      if (options?.maxTokens !== undefined) {
+        requestParams["max_tokens"] = options.maxTokens;
+      }
+      if (options?.temperature !== undefined) {
+        requestParams["temperature"] = options.temperature;
+      }
 
       if (tools.length > 0) {
         requestParams["tools"] = transformTools(tools);

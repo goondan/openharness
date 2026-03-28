@@ -1,9 +1,13 @@
 import type { Extension, ExtensionApi } from "@goondan/openharness-types";
-import { randomUUID } from "node:crypto";
+
+const SYSTEM_MESSAGE_ID = "sys-basic-system-prompt";
 
 /**
  * BasicSystemPrompt extension — prepends a system message to the conversation
  * at the start of every turn.
+ *
+ * Uses a fixed message ID so the system prompt is only appended once;
+ * subsequent turns detect the existing message and skip the append.
  *
  * Priority 10 (HIGH) ensures it runs before other turn middleware.
  */
@@ -15,19 +19,26 @@ export function BasicSystemPrompt(text: string): Extension {
       api.pipeline.register(
         "turn",
         async (ctx, next) => {
-          ctx.conversation.emit({
-            type: "append",
-            message: {
-              id: `sys-${randomUUID()}`,
-              data: {
-                role: "system",
-                content: text,
+          const alreadyExists = ctx.conversation.messages.some(
+            (m) => m.id === SYSTEM_MESSAGE_ID,
+          );
+
+          if (!alreadyExists) {
+            ctx.conversation.emit({
+              type: "append",
+              message: {
+                id: SYSTEM_MESSAGE_ID,
+                data: {
+                  role: "system",
+                  content: text,
+                },
+                metadata: {
+                  __createdBy: "basic-system-prompt",
+                },
               },
-              metadata: {
-                __createdBy: "basic-system-prompt",
-              },
-            },
-          });
+            });
+          }
+
           return next();
         },
         { priority: 10 },

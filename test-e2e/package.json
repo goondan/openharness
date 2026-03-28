@@ -1,9 +1,19 @@
 {
   "name": "e2e-test",
   "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "dependencies": {
     "@goondan/openharness": "workspace:*",
     "@goondan/openharness-base": "workspace:*",
-    "@goondan/openharness-cli": "workspace:*"
+    "@goondan/openharness-cli": "workspace:*",
+    "@goondan/openharness-types": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "typescript": "^5.7.0"
   }
 }

@@ -36,6 +36,12 @@ function makeConversation() {
   return conv;
 }
 
+function makeMockLlmClient(): LlmClient {
+  return {
+    chat: vi.fn().mockResolvedValue({ text: "mock response" }),
+  };
+}
+
 function makeStepContext(overrides?: Partial<StepContext>): StepContext {
   return {
     turnId: "turn-1",
@@ -54,6 +60,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
       },
     },
     stepNumber: 1,
+    llm: makeMockLlmClient(),
     ...overrides,
   };
 }

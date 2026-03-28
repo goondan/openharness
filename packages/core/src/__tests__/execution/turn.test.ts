@@ -498,4 +498,125 @@ describe("executeTurn", () => {
     await executeTurn("agent-1", "input", undefined, deps);
     expect(deps.conversationState._turnActive).toBe(false);
   });
+
+  // -----------------------------------------------------------------------
+  // FR-CORE-008: TurnContext.llm — Extension에서 LLM 호출 가능
+  // -----------------------------------------------------------------------
+
+  describe("FR-CORE-008: TurnContext.llm", () => {
+    // AC-15: Turn 미들웨어에서 ctx.llm.chat()을 호출할 수 있다
+    it("AC-15: turn middleware can call ctx.llm.chat() and get a response", async () => {
+      const llmClient = makeLlmClient({ text: "main response" });
+      const middlewareRegistry = new MiddlewareRegistry();
+      let middlewareLlmResult: unknown;
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        // Extension이 ctx.llm을 통해 직접 LLM 호출
+        middlewareLlmResult = await ctx.llm.chat(
+          [{ id: "ext-1", data: { role: "user" as const, content: "summarize this" } }],
+          [],
+          ctx.abortSignal,
+        );
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, middlewareRegistry });
+      const result = await executeTurn("agent-1", "Hello", undefined, deps);
+
+      // ctx.llm.chat이 호출됨 — 미들웨어에서 1회 + 코어 실행에서 1회 = 최소 2회
+      expect(llmClient.chat).toHaveBeenCalledTimes(2);
+      expect(middlewareLlmResult).toEqual({ text: "main response" });
+      expect(result.status).toBe("completed");
+    });
+
+    // TurnContext.llm은 코어가 주입한 것과 동일한 LlmClient 인스턴스다
+    it("ctx.llm is the same LlmClient instance passed to executeTurn", async () => {
+      const llmClient = makeLlmClient({ text: "response" });
+      const middlewareRegistry = new MiddlewareRegistry();
+      let capturedLlm: LlmClient | undefined;
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        capturedLlm = ctx.llm;
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      expect(capturedLlm).toBe(llmClient);
+    });
+
+    // StepContext도 TurnContext.llm을 상속한다 (propagation)
+    it("StepContext inherits llm from TurnContext (auto-propagation)", async () => {
+      const llmClient = makeLlmClient({ text: "response" });
+      const middlewareRegistry = new MiddlewareRegistry();
+      let stepLlmRef: LlmClient | undefined;
+
+      // Step 미들웨어에서 ctx.llm 접근
+      middlewareRegistry.register(
+        "step",
+        ((ctx: import("@goondan/openharness-types").StepContext, next: () => Promise<unknown>) => {
+          stepLlmRef = ctx.llm;
+          return next();
+        }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+      );
+
+      const deps = makeDeps({ llmClient, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      expect(stepLlmRef).toBe(llmClient);
+    });
+
+    // EXEC-CONST-006: ctx.llm.chat() 호출이 대화 상태에 자동 반영되지 않는다
+    it("EXEC-CONST-006: ctx.llm.chat() does NOT auto-append to conversation state", async () => {
+      const llmClient: LlmClient = {
+        chat: vi.fn()
+          .mockResolvedValueOnce({ text: "side-channel response" })  // 미들웨어에서 호출
+          .mockResolvedValue({ text: "main response" }),              // 코어에서 호출
+      };
+      const middlewareRegistry = new MiddlewareRegistry();
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        // Extension이 ctx.llm으로 별도 LLM 호출 (대화 외 용도)
+        await ctx.llm.chat(
+          [{ id: "side-1", data: { role: "user" as const, content: "side query" } }],
+          [],
+          ctx.abortSignal,
+        );
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, middlewareRegistry });
+      await executeTurn("agent-1", "user input", undefined, deps);
+
+      const messages = deps.conversationState.messages;
+      // "side-channel response"가 대화 메시지에 포함되지 않아야 한다
+      const allContent = messages.map((m) => {
+        const c = m.data.content;
+        return typeof c === "string" ? c : JSON.stringify(c);
+      }).join(" ");
+      expect(allContent).not.toContain("side-channel response");
+      expect(allContent).toContain("user input");
+    });
+
+    // 실패 케이스: ctx.llm.chat()이 에러를 던져도 Turn은 미들웨어의 에러 핸들링에 따른다
+    it("ctx.llm.chat() error in middleware propagates as turn error if not caught", async () => {
+      const llmClient: LlmClient = {
+        chat: vi.fn().mockRejectedValue(new Error("LLM API down")),
+      };
+      const middlewareRegistry = new MiddlewareRegistry();
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        // Extension이 ctx.llm.chat()을 호출하고 에러를 잡지 않음
+        await ctx.llm.chat([], [], ctx.abortSignal);
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, middlewareRegistry });
+      const result = await executeTurn("agent-1", "Hello", undefined, deps);
+
+      expect(result.status).toBe("error");
+      expect(result.error?.message).toContain("LLM API down");
+    });
+  });
 });

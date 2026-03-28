@@ -26,6 +26,8 @@ export interface TurnContext {
   conversation: ConversationState;
   abortSignal: AbortSignal;
   input: InboundEnvelope;
+  /** LLM client bound to the current agent's model configuration. */
+  llm: LlmClient;
 }
 
 export interface StepContext extends TurnContext {
@@ -142,10 +144,20 @@ export interface LlmResponse {
   toolCalls?: Array<{ toolCallId: string; toolName: string; args: JsonObject }>;
 }
 
+export interface LlmChatOptions {
+  /** Override the model for this call (e.g. use a cheaper model for summarization). */
+  model?: string;
+  /** Sampling temperature override. */
+  temperature?: number;
+  /** Max output tokens override. */
+  maxTokens?: number;
+}
+
 export interface LlmClient {
   chat(
     messages: Message[],
     tools: ToolDefinition[],
     signal: AbortSignal,
+    options?: LlmChatOptions,
   ): Promise<LlmResponse>;
 }

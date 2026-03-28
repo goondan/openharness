@@ -1,4 +1,4 @@
-import type { LlmClient, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
+import type { LlmClient, LlmChatOptions, LlmResponse, Message, ToolDefinition, ModelConfig, EnvRef } from "@goondan/openharness-types";
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -88,7 +88,7 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
   let genAI: any;
 
   return {
-    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal): Promise<LlmResponse> {
+    async chat(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, options?: LlmChatOptions): Promise<LlmResponse> {
       if (!genAI) {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore -- @google/generative-ai is a peer dependency, not installed at build time
@@ -112,11 +112,23 @@ export function createGoogleClient(model: string, apiKey: string): LlmClient {
         modelConfig["tools"] = transformTools(tools);
       }
 
-      const geminiModel = genAI!.getGenerativeModel({ model, ...modelConfig });
+      const effectiveModel = options?.model ?? model;
+      const geminiModel = genAI!.getGenerativeModel({ model: effectiveModel, ...modelConfig });
+
+      const generationConfig: Record<string, unknown> = {};
+      if (options?.temperature !== undefined) {
+        generationConfig["temperature"] = options.temperature;
+      }
+      if (options?.maxTokens !== undefined) {
+        generationConfig["maxOutputTokens"] = options.maxTokens;
+      }
 
       const contents = transformContents(messages);
 
-      const result = await geminiModel.generateContent({ contents }, { signal });
+      const result = await geminiModel.generateContent(
+        { contents, ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}) },
+        { signal },
+      );
 
       const response = result.response;
       const candidate = response?.candidates?.[0];

@@ -39,6 +39,7 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
     stepNumber: 1,
     toolName: "my_tool",
     toolArgs: { value: "hello" },
+    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
     ...overrides,
   };
 }

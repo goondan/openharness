@@ -2,12 +2,19 @@
   "name": "@goondan/openharness-cli",
   "version": "0.1.3",
   "type": "module",
-  "bin": { "oh": "./dist/index.js" },
+  "bin": {
+    "oh": "./dist/index.js"
+  },
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
     "typecheck": "tsc --noEmit",
@@ -16,12 +23,13 @@
   "dependencies": {
     "@goondan/openharness": "workspace:*",
     "@goondan/openharness-types": "workspace:*",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "jiti": "^2.6.1"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
     "tsup": "^8.4.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }

@@ -101,6 +101,7 @@ function makeStepContext(conversation: ConversationState): StepContext {
         receivedAt: new Date().toISOString(),
       },
     },
+    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
   };
 }
 

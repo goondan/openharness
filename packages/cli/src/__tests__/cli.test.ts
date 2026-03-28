@@ -96,6 +96,45 @@ export default {
     const { loadConfig } = await import("../config-loader.js");
     await expect(loadConfig(configPath)).rejects.toThrow(/agents/);
   });
+
+  it("loads a .ts config file via jiti", async () => {
+    const configContent = `
+import type { HarnessConfig } from "@goondan/openharness-types";
+const config: HarnessConfig = {
+  agents: {
+    tsAgent: {
+      model: {
+        provider: "openai",
+        model: "gpt-4o",
+        apiKey: "ts-test-key",
+      },
+    },
+  },
+};
+export default config;
+`;
+    const configPath = path.join(tmpDir, "harness.config.ts");
+    fs.writeFileSync(configPath, configContent);
+
+    const { loadConfig } = await import("../config-loader.js");
+    const config = await loadConfig(configPath);
+
+    expect(config).toBeDefined();
+    expect(config.agents).toBeDefined();
+    expect(config.agents["tsAgent"]).toBeDefined();
+    expect(config.agents["tsAgent"]!.model.provider).toBe("openai");
+  });
+
+  it("throws a clear error message when .ts file cannot be loaded", async () => {
+    // Write a .ts file that will fail to parse (invalid syntax for both jiti and native)
+    const configPath = path.join(tmpDir, "broken.config.ts");
+    fs.writeFileSync(configPath, "export default {{{INVALID SYNTAX");
+
+    const { loadConfig } = await import("../config-loader.js");
+    await expect(loadConfig(configPath)).rejects.toThrow(
+      /jiti, tsx, 또는 ts-node/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
