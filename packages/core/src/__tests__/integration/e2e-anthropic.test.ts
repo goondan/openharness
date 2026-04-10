@@ -37,7 +37,7 @@ describeE2E("E2E: Anthropic API", () => {
   }, 30_000);
 
   // -----------------------------------------------------------------------
-  // Test 2: BasicSystemPrompt extension injects system prompt
+  // Test 2: BasicSystemPrompt extension injects a strong response style
   // -----------------------------------------------------------------------
   it("BasicSystemPrompt extension injects system prompt that affects response", async () => {
     function BasicSystemPrompt(text: string): Extension {
@@ -67,7 +67,7 @@ describeE2E("E2E: Anthropic API", () => {
       agents: {
         default: {
           model: { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: API_KEY! },
-          extensions: [BasicSystemPrompt("You are helpful.")],
+          extensions: [BasicSystemPrompt("You are a pirate. Every reply must sound like a pirate and use words like ahoy or matey.")],
         },
       },
     };
@@ -77,9 +77,8 @@ describeE2E("E2E: Anthropic API", () => {
 
     expect(result.status).toBe("completed");
     expect(result.text).toBeDefined();
-    // The response should contain pirate-like language
     const text = result.text!.toLowerCase();
-    const pirateWords = ["arr", "ahoy", "matey", "ye", "aye", "pirate", "captain", "ship", "treasure", "sea", "sail"];
+    const pirateWords = ["arr", "ahoy", "matey", "ye", "aye", "captain", "ship", "treasure", "sea", "sail"];
     const hasPirateWord = pirateWords.some((w) => text.includes(w));
     expect(hasPirateWord).toBe(true);
 
