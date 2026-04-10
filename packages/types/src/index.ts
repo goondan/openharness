@@ -63,6 +63,7 @@ export type {
   RouteMiddleware,
   LlmResponse,
   LlmChatOptions,
+  LlmStreamCallbacks,
   LlmClient,
 } from "./middleware.js";
 
@@ -87,6 +88,8 @@ export type {
   ToolStartPayload,
   ToolDonePayload,
   ToolErrorPayload,
+  StepTextDeltaPayload,
+  StepToolCallDeltaPayload,
   IngressReceivedPayload,
   IngressAcceptedPayload,
   IngressRejectedPayload,

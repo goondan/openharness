@@ -1,8 +1,9 @@
-import { generateText, tool as aiTool, jsonSchema } from "ai";
+import { generateText, streamText, tool as aiTool, jsonSchema } from "ai";
 import type { LanguageModel, ModelMessage } from "ai";
 import type {
   LlmClient,
   LlmChatOptions,
+  LlmStreamCallbacks,
   LlmResponse,
   Message,
   ToolDefinition,
@@ -146,6 +147,72 @@ export function createAiSdkClient(
           : undefined;
 
       return { text, toolCalls };
+    },
+
+    async streamChat(
+      messages: Message[],
+      tools: ToolDefinition[],
+      signal: AbortSignal,
+      callbacks: LlmStreamCallbacks,
+      options?: LlmChatOptions,
+    ): Promise<LlmResponse> {
+      const factory = await getProviderFactory(provider, apiKey, baseUrl);
+      const effectiveModel = options?.model ?? defaultModel;
+      const model = factory.languageModel(effectiveModel);
+
+      const aiTools =
+        tools.length > 0 ? toAiSdkTools(tools) : undefined;
+
+      const result = streamText({
+        model,
+        messages: toModelMessages(messages),
+        ...(aiTools ? { tools: aiTools } : {}),
+        ...(options?.temperature !== undefined
+          ? { temperature: options.temperature }
+          : {}),
+        ...(options?.maxTokens !== undefined
+          ? { maxOutputTokens: options.maxTokens }
+          : {}),
+        abortSignal: signal,
+      });
+
+      // Track toolCallId → toolName from tool-input-start events
+      const toolNameMap = new Map<string, string>();
+
+      // Consume fullStream for granular delta events
+      for await (const part of result.fullStream) {
+        switch (part.type) {
+          case "text-delta":
+            callbacks.onTextDelta?.(part.delta);
+            break;
+          case "tool-input-start":
+            toolNameMap.set(part.toolCallId, part.toolName);
+            break;
+          case "tool-input-delta":
+            callbacks.onToolCallDelta?.(
+              part.toolCallId,
+              toolNameMap.get(part.toolCallId) ?? "",
+              part.inputTextDelta,
+            );
+            break;
+        }
+      }
+
+      // After stream completes, build LlmResponse from resolved promises
+      const text = await result.text;
+      const toolCalls = await result.toolCalls;
+
+      return {
+        text: text && text.trim().length > 0 ? text : undefined,
+        toolCalls:
+          toolCalls && toolCalls.length > 0
+            ? toolCalls.map((tc) => ({
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: (tc.input ?? {}) as JsonObject,
+              }))
+            : undefined,
+      };
     },
   };
 }

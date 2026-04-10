@@ -153,11 +153,29 @@ export interface LlmChatOptions {
   maxTokens?: number;
 }
 
+export interface LlmStreamCallbacks {
+  onTextDelta?: (delta: string) => void;
+  onToolCallDelta?: (toolCallId: string, toolName: string, argsDelta: string) => void;
+}
+
 export interface LlmClient {
   chat(
     messages: Message[],
     tools: ToolDefinition[],
     signal: AbortSignal,
+    options?: LlmChatOptions,
+  ): Promise<LlmResponse>;
+
+  /**
+   * Optional streaming variant of chat(). Returns the same LlmResponse once complete,
+   * but calls callbacks with deltas during streaming. If not implemented, core falls
+   * back to chat(). (FR-CORE-010)
+   */
+  streamChat?(
+    messages: Message[],
+    tools: ToolDefinition[],
+    signal: AbortSignal,
+    callbacks: LlmStreamCallbacks,
     options?: LlmChatOptions,
   ): Promise<LlmResponse>;
 }

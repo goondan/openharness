@@ -19,7 +19,7 @@ import { executeToolCall } from "./tool-call.js";
  * 3. Core handler:
  *    a. Get current messages from ctx.conversation.messages
  *    b. Get available tools from deps.toolRegistry.list()
- *    c. Call deps.llmClient.chat(messages, tools, ctx.abortSignal)
+ *    c. If streamChat available, use it with EventBus callbacks; else fallback to chat()
  *    d. FR-CORE-007: Append LLM response to conversation (assistant message)
  *    e. If LLM response has tool calls: execute each via executeToolCall
  *       FR-CORE-007: Append each tool result to conversation
@@ -56,12 +56,40 @@ export async function executeStep(
     // b. Get available tools
     const tools = toolRegistry.list() as ReturnType<ToolRegistry["list"]>;
 
-    // c. Call LLM
-    const llmResponse = await llmClient.chat(
-      messages as Parameters<LlmClient["chat"]>[0],
-      tools as Parameters<LlmClient["chat"]>[1],
-      stepCtx.abortSignal
-    );
+    // c. Call LLM — prefer streamChat for real-time delta events (FR-CORE-010)
+    const llmResponse = llmClient.streamChat
+      ? await llmClient.streamChat(
+          messages as Parameters<LlmClient["chat"]>[0],
+          tools as Parameters<LlmClient["chat"]>[1],
+          stepCtx.abortSignal,
+          {
+            onTextDelta: (delta) =>
+              eventBus.emit("step.textDelta", {
+                type: "step.textDelta",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                delta,
+              }),
+            onToolCallDelta: (toolCallId, toolName, argsDelta) =>
+              eventBus.emit("step.toolCallDelta", {
+                type: "step.toolCallDelta",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                toolCallId,
+                toolName,
+                argsDelta,
+              }),
+          },
+        )
+      : await llmClient.chat(
+          messages as Parameters<LlmClient["chat"]>[0],
+          tools as Parameters<LlmClient["chat"]>[1],
+          stepCtx.abortSignal,
+        );
 
     // d. FR-CORE-007: Append LLM assistant response to conversation
     const assistantContent: NonNullable<AssistantModelMessage["content"]> extends infer T

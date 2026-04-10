@@ -55,6 +55,9 @@
 - **Main Flow:**
   1. Step 미들웨어 체인을 실행한다.
   2. 체인의 최내부에서 현재 대화 상태의 messages를 LLM에 전달하여 호출한다.
+     - LlmClient에 `streamChat`이 구현되어 있으면 `streamChat()`을 사용한다. 스트리밍 중 콜백을 통해 EventBus에 `step.textDelta`/`step.toolCallDelta` 이벤트를 발행한다.
+     - `streamChat`이 없으면 `chat()`으로 폴백한다. 이 경우 `step.textDelta`/`step.toolCallDelta` 이벤트는 발행되지 않는다.
+     - 두 경로 모두 동일한 `LlmResponse`를 반환한다.
   3. LLM 응답을 파싱한다.
   4. LLM이 도구 호출을 요청한 경우: 각 ToolCall을 실행한다 (EXEC-TOOLCALL-01).
   5. 도구 결과를 대화 상태에 추가한다.
@@ -154,7 +157,7 @@
 ### Constraint ID: EXEC-CONST-006 — TurnContext.llm 바인딩
 
 - **Category:** 동작 보장
-- **Description:** TurnContext.llm은 현재 에이전트의 모델 구성에 바인딩된 LlmClient다. StepContext와 ToolCallContext는 TurnContext를 extends하므로 llm이 자동 전파된다. Extension이 ctx.llm.chat()을 호출해도 대화 상태(conversation)에 자동 반영되지 않는다.
+- **Description:** TurnContext.llm은 현재 에이전트의 모델 구성에 바인딩된 LlmClient다. StepContext와 ToolCallContext는 TurnContext를 extends하므로 llm이 자동 전파된다. Extension이 ctx.llm.chat() 또는 ctx.llm.streamChat()을 호출해도 대화 상태(conversation)에 자동 반영되지 않는다.
 - **Scope:** EXEC-TURN-01, EXEC-STEP-01, EXEC-TOOLCALL-01
 - **Measurement:** 미들웨어 내에서 ctx.llm.chat() 호출이 성공하고, 대화 상태에 자동 추가되지 않는 테스트
 - **Verification:** Turn 미들웨어에서 ctx.llm.chat()을 호출 후 conversation.messages에 해당 호출이 포함되지 않음을 확인.
@@ -166,6 +169,22 @@
 - **Scope:** LlmClient.chat()
 - **Measurement:** options를 전달한 호출 후, 다음 호출이 기본 구성을 사용하는 테스트
 - **Verification:** chat(messages, [], [], { model: "override" }) 호출 후, 옵션 없이 chat(messages)을 호출하여 기본 모델이 사용됨을 확인.
+
+### Constraint ID: EXEC-CONST-008 — 스트리밍 폴백 보장
+
+- **Category:** 동작 보장
+- **Description:** `streamChat`이 LlmClient에 없으면 코어는 `chat()`으로 폴백한다. 두 경로의 최종 `LlmResponse`는 동일한 형태다. 스트리밍은 관찰 관심사이므로 `TurnResult`/`StepResult`에는 변경이 없다.
+- **Scope:** EXEC-STEP-01
+- **Measurement:** `streamChat` 미구현 LlmClient로 Turn을 실행하여 정상 완료되는 테스트
+- **Verification:** `chat()`만 구현한 커스텀 LlmClient로 Turn을 실행, `step.textDelta` 이벤트 미발행 + Turn 정상 완료를 확인.
+
+### Constraint ID: EXEC-CONST-009 — 스트리밍 이벤트 범위
+
+- **Category:** 동작 보장
+- **Description:** `step.textDelta`와 `step.toolCallDelta` 이벤트는 `step.start`와 `step.done` 사이에서만 발행된다. 이벤트 리스너 예외는 EXEC-CONST-003과 동일하게 실행 루프에 영향을 주지 않는다.
+- **Scope:** EXEC-STEP-01
+- **Measurement:** 스트리밍 이벤트가 step 범위 내에서만 발행되고, 리스너 예외가 스트림을 중단시키지 않는 테스트
+- **Verification:** step.textDelta 리스너에서 예외를 던져도 스트림이 계속되고 Turn이 정상 완료됨을 확인.
 
 ---
 
@@ -221,6 +240,11 @@ interface ToolCallContext extends StepContext {
 ### 5.3 LlmClient 계약
 
 ```ts
+interface LlmStreamCallbacks {
+  onTextDelta?: (delta: string) => void;
+  onToolCallDelta?: (toolCallId: string, toolName: string, argsDelta: string) => void;
+}
+
 interface LlmClient {
   /**
    * LLM에 채팅 요청을 보낸다.
@@ -233,6 +257,20 @@ interface LlmClient {
     messages: Message[],
     tools?: ToolDefinition[],
     systemMessages?: SystemMessage[],
+    options?: LlmChatOptions,
+  ): Promise<LlmResponse>;
+
+  /**
+   * LLM에 스트리밍 채팅 요청을 보낸다. (선택적 — FR-CORE-010)
+   * chat()과 동일한 Promise<LlmResponse>를 반환하되,
+   * 스트리밍 중 callbacks를 호출하여 텍스트/도구호출 델타를 실시간으로 전달한다.
+   * 미구현 시 코어가 chat()으로 폴백한다.
+   */
+  streamChat?(
+    messages: Message[],
+    tools: ToolDefinition[],
+    signal: AbortSignal,
+    callbacks: LlmStreamCallbacks,
     options?: LlmChatOptions,
   ): Promise<LlmResponse>;
 }
@@ -248,6 +286,7 @@ interface LlmChatOptions {
 - StepContext, ToolCallContext는 TurnContext를 extends하므로 llm이 자동 전파된다.
 - LlmChatOptions의 각 필드는 선택적이며, 미지정 필드는 에이전트의 기본 구성을 사용한다.
 - Extension이 `ctx.llm.chat()`을 호출해도 대화 상태(conversation)에는 자동 반영되지 않는다. Extension이 필요에 따라 `conversation.emit()`으로 직접 기록해야 한다.
+- `streamChat`은 선택적(optional) 메서드다. ai-sdk 어댑터는 항상 구현하지만, 커스텀 LlmClient는 `chat()`만 구현해도 된다. 스트리밍은 관찰(observation) 관심사이므로 TurnResult/StepResult에는 영향을 주지 않는다.
 
 ### 5.4 이벤트 구독 계약
 
@@ -263,6 +302,8 @@ api.on(event: string, listener: (payload: EventPayload) => void): void;
 | `turn.done` | turnId, result |
 | `turn.error` | turnId, error |
 | `step.start` | turnId, stepNumber |
+| `step.textDelta` | turnId, agentName, conversationId, stepNumber, delta |
+| `step.toolCallDelta` | turnId, agentName, conversationId, stepNumber, toolCallId, toolName, argsDelta |
 | `step.done` | turnId, stepNumber, result |
 | `step.error` | turnId, stepNumber, error |
 | `tool.start` | turnId, stepNumber, toolName, toolArgs |
@@ -330,3 +371,6 @@ interface ToolCallSummary {
 - **Given** priority 50, 100, 200의 Step 미들웨어가 등록된 상태에서, **When** Step을 실행하면, **Then** 50 → 100 → 200 순서로 실행된다.
 - **Given** Turn 미들웨어를 등록한 Extension이 있는 상태에서, **When** 미들웨어 내에서 `ctx.llm.chat(messages)`를 호출하면, **Then** 현재 에이전트의 모델 구성으로 LLM 호출이 실행되고 응답이 반환된다. (AC-15)
 - **Given** Extension이 `ctx.llm.chat(messages, [], [], { model: "other-model", temperature: 0 })`를 호출하는 상태에서, **When** 해당 호출이 실행되면, **Then** 지정된 옵션만 오버라이드되고 에이전트의 기본 구성은 변경되지 않는다. (AC-16)
+- **Given** `streamChat()`을 구현한 LlmClient가 바인딩된 에이전트에서 `api.on("step.textDelta")`가 등록된 상태에서, **When** Turn을 실행하면, **Then** `step.textDelta` 이벤트가 `step.start`와 `step.done` 사이에 여러 번 발행되고, 각 delta를 이어 붙이면 최종 텍스트 응답과 동일하다. (AC-17)
+- **Given** `streamChat()`이 없는 커스텀 LlmClient가 바인딩된 에이전트에서, **When** Step이 LLM을 호출하면, **Then** `chat()`으로 폴백하여 Turn이 정상 완료되고, `step.textDelta` 이벤트는 발행되지 않는다. (AC-18)
+- **Given** `streamChat()`을 구현한 LlmClient가 바인딩된 에이전트에서 스트리밍 중인 상태에서, **When** `control.abortConversation()`을 호출하면, **Then** AbortSignal이 전파되어 스트림이 중단되고 Turn이 `aborted` 상태로 종료된다. (AC-19)

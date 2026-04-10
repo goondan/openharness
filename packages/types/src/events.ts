@@ -90,6 +90,30 @@ export interface ToolErrorPayload {
 }
 
 // -----------------------------------------------------------------------
+// Streaming event payloads (FR-CORE-010)
+// -----------------------------------------------------------------------
+
+export interface StepTextDeltaPayload {
+  type: "step.textDelta";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  delta: string;
+}
+
+export interface StepToolCallDeltaPayload {
+  type: "step.toolCallDelta";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  toolCallId: string;
+  toolName: string;
+  argsDelta: string;
+}
+
+// -----------------------------------------------------------------------
 // Ingress event payloads
 // -----------------------------------------------------------------------
 
@@ -125,6 +149,8 @@ export type EventPayload =
   | StepStartPayload
   | StepDonePayload
   | StepErrorPayload
+  | StepTextDeltaPayload
+  | StepToolCallDeltaPayload
   | ToolStartPayload
   | ToolDonePayload
   | ToolErrorPayload
