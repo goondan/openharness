@@ -180,19 +180,20 @@ export function createAiSdkClient(
       const toolNameMap = new Map<string, string>();
 
       // Consume fullStream for granular delta events
+      // ai-sdk v6 TextStreamPart uses: text-delta.text, tool-input-start.id, tool-input-delta.{id,delta}
       for await (const part of result.fullStream) {
         switch (part.type) {
           case "text-delta":
-            callbacks.onTextDelta?.(part.delta);
+            callbacks.onTextDelta?.(part.text);
             break;
           case "tool-input-start":
-            toolNameMap.set(part.toolCallId, part.toolName);
+            toolNameMap.set(part.id, part.toolName);
             break;
           case "tool-input-delta":
             callbacks.onToolCallDelta?.(
-              part.toolCallId,
-              toolNameMap.get(part.toolCallId) ?? "",
-              part.inputTextDelta,
+              part.id,
+              toolNameMap.get(part.id) ?? "",
+              part.delta,
             );
             break;
         }

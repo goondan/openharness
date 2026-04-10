@@ -55,10 +55,11 @@ describe("AI SDK adapter streamChat()", () => {
   });
 
   it("calls streamText and invokes onTextDelta callback for text-delta parts", async () => {
+    // ai-sdk v6 TextStreamPart: text-delta uses `text` (not `delta`)
     const streamParts = [
-      { type: "text-delta", delta: "Hello" },
-      { type: "text-delta", delta: " world" },
-      { type: "text-delta", delta: "!" },
+      { type: "text-delta", text: "Hello" },
+      { type: "text-delta", text: " world" },
+      { type: "text-delta", text: "!" },
     ];
 
     vi.doMock("ai", async (importOriginal) => {
@@ -100,10 +101,12 @@ describe("AI SDK adapter streamChat()", () => {
   });
 
   it("invokes onToolCallDelta callback for tool-input-delta parts, resolving toolName from tool-input-start", async () => {
+    // ai-sdk v6 TextStreamPart: tool-input-start uses `id` (not `toolCallId`),
+    // tool-input-delta uses `id` + `delta` (not `toolCallId` + `inputTextDelta`)
     const streamParts = [
-      { type: "tool-input-start", toolCallId: "toolu_01", toolName: "get_weather" },
-      { type: "tool-input-delta", toolCallId: "toolu_01", inputTextDelta: '{"loc' },
-      { type: "tool-input-delta", toolCallId: "toolu_01", inputTextDelta: 'ation":"NYC"}' },
+      { type: "tool-input-start", id: "toolu_01", toolName: "get_weather" },
+      { type: "tool-input-delta", id: "toolu_01", delta: '{"loc' },
+      { type: "tool-input-delta", id: "toolu_01", delta: 'ation":"NYC"}' },
     ];
 
     vi.doMock("ai", async (importOriginal) => {
@@ -166,10 +169,10 @@ describe("AI SDK adapter streamChat()", () => {
 
   it("handles interleaved text and tool call deltas", async () => {
     const streamParts = [
-      { type: "text-delta", delta: "Let me check " },
-      { type: "text-delta", delta: "the weather." },
-      { type: "tool-input-start", toolCallId: "toolu_02", toolName: "get_weather" },
-      { type: "tool-input-delta", toolCallId: "toolu_02", inputTextDelta: '{"location":"SF"}' },
+      { type: "text-delta", text: "Let me check " },
+      { type: "text-delta", text: "the weather." },
+      { type: "tool-input-start", id: "toolu_02", toolName: "get_weather" },
+      { type: "tool-input-delta", id: "toolu_02", delta: '{"location":"SF"}' },
     ];
 
     vi.doMock("ai", async (importOriginal) => {
@@ -255,10 +258,10 @@ describe("AI SDK adapter streamChat()", () => {
 
   it("handles multiple tool calls with separate tool-input-start events", async () => {
     const streamParts = [
-      { type: "tool-input-start", toolCallId: "tc-1", toolName: "tool_a" },
-      { type: "tool-input-delta", toolCallId: "tc-1", inputTextDelta: '{"v":"1"}' },
-      { type: "tool-input-start", toolCallId: "tc-2", toolName: "tool_b" },
-      { type: "tool-input-delta", toolCallId: "tc-2", inputTextDelta: '{"v":"2"}' },
+      { type: "tool-input-start", id: "tc-1", toolName: "tool_a" },
+      { type: "tool-input-delta", id: "tc-1", delta: '{"v":"1"}' },
+      { type: "tool-input-start", id: "tc-2", toolName: "tool_b" },
+      { type: "tool-input-delta", id: "tc-2", delta: '{"v":"2"}' },
     ];
 
     vi.doMock("ai", async (importOriginal) => {
