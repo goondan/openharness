@@ -14,9 +14,10 @@
     "clean": "pnpm -r run clean"
   },
   "devDependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/google": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
     "ai": "^6.0.105",
-    "openai": "^6.29.0",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

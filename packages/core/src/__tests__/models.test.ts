@@ -104,7 +104,7 @@ describe("createLlmClient()", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Adapter chat() tests with mocked SDKs
+// Adapter chat() tests — mock ai-sdk's generateText
 // ---------------------------------------------------------------------------
 
 const mockMessages: Message[] = [
@@ -122,21 +122,28 @@ const mockTools: ToolDefinition[] = [
 
 const abortSignal = new AbortController().signal;
 
-describe("Anthropic adapter chat()", () => {
+describe("AI SDK adapter chat()", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("calls Anthropic SDK and returns LlmResponse with text", async () => {
-    vi.doMock("@anthropic-ai/sdk", () => ({
-      default: vi.fn().mockImplementation(() => ({
-        messages: {
-          create: vi.fn().mockResolvedValue({
-            content: [{ type: "text", text: "Hello from Claude" }],
-            stop_reason: "end_turn",
-          }),
-        },
-      })),
+  it("calls generateText and returns LlmResponse with text", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "Hello from AI SDK",
+          toolCalls: [],
+          finishReason: "stop",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
     }));
 
     const { createLlmClient: createClient } = await import("../models/index.js");
@@ -144,27 +151,33 @@ describe("Anthropic adapter chat()", () => {
     const client = createClient(config, "sk-ant-resolved");
     const response = await client.chat(mockMessages, mockTools, abortSignal);
 
-    expect(response.text).toBe("Hello from Claude");
+    expect(response.text).toBe("Hello from AI SDK");
     expect(response.toolCalls).toBeUndefined();
   });
 
-  it("returns toolCalls when Anthropic responds with tool_use", async () => {
-    vi.doMock("@anthropic-ai/sdk", () => ({
-      default: vi.fn().mockImplementation(() => ({
-        messages: {
-          create: vi.fn().mockResolvedValue({
-            content: [
-              {
-                type: "tool_use",
-                id: "toolu_01",
-                name: "get_weather",
-                input: { location: "NYC" },
-              },
-            ],
-            stop_reason: "tool_use",
-          }),
-        },
-      })),
+  it("returns toolCalls when generateText responds with tool calls", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "",
+          toolCalls: [
+            {
+              toolCallId: "toolu_01",
+              toolName: "get_weather",
+              input: { location: "NYC" },
+            },
+          ],
+          finishReason: "tool-calls",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
     }));
 
     const { createLlmClient: createClient } = await import("../models/index.js");
@@ -179,156 +192,92 @@ describe("Anthropic adapter chat()", () => {
       args: { location: "NYC" },
     });
   });
-});
 
-describe("OpenAI adapter chat()", () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it("calls OpenAI SDK and returns LlmResponse with text", async () => {
-    vi.doMock("openai", () => ({
-      default: vi.fn().mockImplementation(() => ({
-        chat: {
-          completions: {
-            create: vi.fn().mockResolvedValue({
-              choices: [
-                {
-                  message: {
-                    content: "Hello from GPT",
-                    tool_calls: null,
-                  },
-                  finish_reason: "stop",
-                },
-              ],
-            }),
-          },
-        },
-      })),
-    }));
-
-    const { createLlmClient: createClient } = await import("../models/index.js");
-    const config = { provider: "openai", model: "gpt-4o", apiKey: "key" };
-    const client = createClient(config, "sk-openai-resolved");
-    const response = await client.chat(mockMessages, mockTools, abortSignal);
-
-    expect(response.text).toBe("Hello from GPT");
-    expect(response.toolCalls).toBeUndefined();
-  });
-
-  it("returns toolCalls when OpenAI responds with tool_calls", async () => {
-    vi.doMock("openai", () => ({
-      default: vi.fn().mockImplementation(() => ({
-        chat: {
-          completions: {
-            create: vi.fn().mockResolvedValue({
-              choices: [
-                {
-                  message: {
-                    content: null,
-                    tool_calls: [
-                      {
-                        id: "call_abc",
-                        type: "function",
-                        function: {
-                          name: "get_weather",
-                          arguments: JSON.stringify({ location: "SF" }),
-                        },
-                      },
-                    ],
-                  },
-                  finish_reason: "tool_calls",
-                },
-              ],
-            }),
-          },
-        },
-      })),
-    }));
-
-    const { createLlmClient: createClient } = await import("../models/index.js");
-    const config = { provider: "openai", model: "gpt-4o", apiKey: "key" };
-    const client = createClient(config, "sk-openai-resolved");
-    const response = await client.chat(mockMessages, [], abortSignal);
-
-    expect(response.toolCalls).toHaveLength(1);
-    expect(response.toolCalls![0]).toEqual({
-      toolCallId: "call_abc",
-      toolName: "get_weather",
-      args: { location: "SF" },
+  it("passes messages as ModelMessage[] to generateText", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+          capturedArgs = args;
+          return { text: "ok", toolCalls: [], finishReason: "stop", response: { messages: [] } };
+        }),
+      };
     });
-  });
-});
-
-describe("Google adapter chat()", () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it("calls Google SDK and returns LlmResponse with text", async () => {
-    vi.doMock("@google/generative-ai", () => ({
-      GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-        getGenerativeModel: vi.fn().mockReturnValue({
-          generateContent: vi.fn().mockResolvedValue({
-            response: {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: "Hello from Gemini" }],
-                  },
-                  finishReason: "STOP",
-                },
-              ],
-            },
-          }),
-        }),
-      })),
+    vi.doMock("@ai-sdk/openai", () => ({
+      createOpenAI: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "gpt-4o" }),
+      }),
     }));
 
     const { createLlmClient: createClient } = await import("../models/index.js");
-    const config = { provider: "google", model: "gemini-1.5-pro", apiKey: "key" };
-    const client = createClient(config, "google-resolved");
-    const response = await client.chat(mockMessages, mockTools, abortSignal);
+    const client = createClient({ provider: "openai", model: "gpt-4o", apiKey: "key" }, "sk-resolved");
+    const messages: Message[] = [
+      { id: "sys", data: { role: "system", content: "You are helpful" } },
+      { id: "usr", data: { role: "user", content: "Hi" } },
+    ];
+    await client.chat(messages, [], abortSignal);
 
-    expect(response.text).toBe("Hello from Gemini");
-    expect(response.toolCalls).toBeUndefined();
+    // generateText should receive the raw ModelMessage data (msg.data)
+    expect(capturedArgs).toBeDefined();
+    const passedMessages = capturedArgs!["messages"] as Array<{ role: string; content: string }>;
+    expect(passedMessages).toHaveLength(2);
+    expect(passedMessages[0]).toEqual({ role: "system", content: "You are helpful" });
+    expect(passedMessages[1]).toEqual({ role: "user", content: "Hi" });
   });
 
-  it("returns toolCalls when Google responds with function calls", async () => {
-    vi.doMock("@google/generative-ai", () => ({
-      GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-        getGenerativeModel: vi.fn().mockReturnValue({
-          generateContent: vi.fn().mockResolvedValue({
-            response: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          name: "get_weather",
-                          args: { location: "LA" },
-                        },
-                      },
-                    ],
-                  },
-                  finishReason: "STOP",
-                },
-              ],
-            },
-          }),
+  it("converts tools to ai-sdk tool format", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+          capturedArgs = args;
+          return { text: "ok", toolCalls: [], finishReason: "stop", response: { messages: [] } };
         }),
-      })),
+      };
+    });
+    vi.doMock("@ai-sdk/google", () => ({
+      createGoogleGenerativeAI: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "gemini-1.5-pro" }),
+      }),
     }));
 
     const { createLlmClient: createClient } = await import("../models/index.js");
-    const config = { provider: "google", model: "gemini-1.5-pro", apiKey: "key" };
-    const client = createClient(config, "google-resolved");
-    const response = await client.chat(mockMessages, [], abortSignal);
+    const client = createClient({ provider: "google", model: "gemini-1.5-pro", apiKey: "key" }, "g-resolved");
+    await client.chat(mockMessages, mockTools, abortSignal);
 
-    expect(response.toolCalls).toHaveLength(1);
-    expect(response.toolCalls![0].toolName).toBe("get_weather");
-    expect(response.toolCalls![0].args).toEqual({ location: "LA" });
-    expect(response.toolCalls![0].toolCallId).toBeDefined();
+    expect(capturedArgs).toBeDefined();
+    const passedTools = capturedArgs!["tools"] as Record<string, unknown>;
+    expect(passedTools).toBeDefined();
+    expect("get_weather" in passedTools).toBe(true);
+  });
+
+  it("does not pass tools when tool list is empty", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+          capturedArgs = args;
+          return { text: "ok", toolCalls: [], finishReason: "stop", response: { messages: [] } };
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient({ provider: "anthropic", model: "claude", apiKey: "key" }, "sk-resolved");
+    await client.chat(mockMessages, [], abortSignal);
+
+    expect(capturedArgs).toBeDefined();
+    expect(capturedArgs!["tools"]).toBeUndefined();
   });
 });

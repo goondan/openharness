@@ -1,22 +1,16 @@
 import type { ModelConfig, LlmClient } from "@goondan/openharness-types";
 import { ConfigError } from "../errors.js";
-import { createAnthropicClient } from "./anthropic.js";
-import { createOpenAIClient } from "./openai.js";
-import { createGoogleClient } from "./google.js";
+import { createAiSdkClient } from "./ai-sdk-adapter.js";
 
 export { Anthropic } from "./anthropic.js";
 export { OpenAI } from "./openai.js";
 export { Google } from "./google.js";
 
+const SUPPORTED_PROVIDERS = new Set(["anthropic", "openai", "google"]);
+
 export function createLlmClient(config: ModelConfig, apiKey: string): LlmClient {
-  switch (config.provider) {
-    case "anthropic":
-      return createAnthropicClient(config.model, apiKey, config.baseUrl);
-    case "openai":
-      return createOpenAIClient(config.model, apiKey, config.baseUrl);
-    case "google":
-      return createGoogleClient(config.model, apiKey);
-    default:
-      throw new ConfigError(`Unknown model provider: ${config.provider}`);
+  if (!SUPPORTED_PROVIDERS.has(config.provider)) {
+    throw new ConfigError(`Unknown model provider: ${config.provider}`);
   }
+  return createAiSdkClient(config.provider, config.model, apiKey, config.baseUrl);
 }

@@ -5,8 +5,8 @@ export default defineConfig({
   format: ["esm"],
   dts: true,
   external: [
-    "@anthropic-ai/sdk",
-    "@google/generative-ai",
-    "openai",
+    "@ai-sdk/anthropic",
+    "@ai-sdk/google",
+    "@ai-sdk/openai",
   ],
 });
