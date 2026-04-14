@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-types",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,7 +13,7 @@
     "dist"
   ],
   "peerDependencies": {
-    "ai": "^6.0.0"
+    "ai": "^6.0.159"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",

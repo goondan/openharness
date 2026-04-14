@@ -231,21 +231,41 @@ function env(name: string): EnvRef;  // 지연 해석 참조 객체
 
 function Anthropic(config: {
   model: string;
-  apiKey: string | EnvRef;
-  baseUrl?: string;
+  apiKey?: string | EnvRef;
+  authToken?: string | EnvRef;
+  baseURL?: string | EnvRef;
+  baseUrl?: string | EnvRef; // legacy alias
+  headers?: Record<string, string | EnvRef>;
+  fetch?: typeof fetch;
+  generateId?: () => string;
+  name?: string | EnvRef;
 }): ModelConfig;
 
 function OpenAI(config: {
   model: string;
-  apiKey: string | EnvRef;
-  baseUrl?: string;
+  apiKey?: string | EnvRef;
+  baseURL?: string | EnvRef;
+  baseUrl?: string | EnvRef; // legacy alias
+  organization?: string | EnvRef;
+  project?: string | EnvRef;
+  headers?: Record<string, string | EnvRef>;
+  fetch?: typeof fetch;
+  name?: string | EnvRef;
 }): ModelConfig;
 
 function Google(config: {
   model: string;
-  apiKey: string | EnvRef;
+  apiKey?: string | EnvRef;
+  baseURL?: string | EnvRef;
+  baseUrl?: string | EnvRef; // legacy alias
+  headers?: Record<string, string | EnvRef | undefined>;
+  fetch?: typeof fetch;
+  generateId?: () => string;
+  name?: string | EnvRef;
 }): ModelConfig;
 ```
+
+세 팩토리는 각 AI SDK provider의 `createAnthropic`, `createOpenAI`, `createGoogleGenerativeAI` 설정을 그대로 허용한다. `apiKey`는 선택값이며, provider 자체의 기본 환경 변수 해석 규칙을 사용할 수 있다.
 
 ### 5.6 CLI 인터페이스
 

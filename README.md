@@ -47,6 +47,7 @@ export default defineHarness({
       model: OpenAI({
         model: "gpt-4o-mini",
         apiKey: env("OPENAI_API_KEY"),
+        project: "openharness",
       }),
       extensions: [
         BasicSystemPrompt("You are helpful."),
@@ -59,6 +60,8 @@ export default defineHarness({
   },
 });
 ```
+
+`OpenAI`, `Anthropic`, `Google` 팩토리는 각 AI SDK provider의 `createOpenAI`, `createAnthropic`, `createGoogleGenerativeAI` 옵션을 그대로 받습니다. `apiKey`는 선택값이라 provider 기본 환경 변수 규칙을 그대로 써도 됩니다.
 
 ### 3. 실행
 

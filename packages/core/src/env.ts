@@ -18,3 +18,35 @@ export function resolveEnv(value: string | EnvRef): string {
   }
   return envValue;
 }
+
+export function resolveEnvDeep<T>(value: T): T {
+  if (isEnvRef(value)) {
+    return resolveEnv(value) as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveEnvDeep(item)) as T;
+  }
+
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [
+        key,
+        resolveEnvDeep(entryValue),
+      ]),
+    ) as T;
+  }
+
+  return value;
+}
+
+function isPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}

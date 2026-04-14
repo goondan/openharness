@@ -118,6 +118,39 @@ describe("createHarness", () => {
     await expect(createHarness(config)).rejects.toThrow(/not set/i);
   });
 
+  it("allows model configs without top-level apiKey", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: {
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            providerOptions: {
+              baseURL: "https://proxy.example.com/v1",
+              project: "openharness",
+            },
+          },
+        },
+      },
+    });
+
+    expect(createLlmClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        providerOptions: {
+          baseURL: "https://proxy.example.com/v1",
+          project: "openharness",
+        },
+      }),
+      undefined,
+    );
+
+    await runtime.close();
+  });
+
   // -----------------------------------------------------------------------
   // Test 4: Extension registration order matches declaration order
   // -----------------------------------------------------------------------
