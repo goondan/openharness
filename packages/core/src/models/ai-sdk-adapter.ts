@@ -1,4 +1,7 @@
 import { generateText, streamText, tool as aiTool, jsonSchema } from "ai";
+import type { AnthropicProviderSettings } from "@ai-sdk/anthropic";
+import type { GoogleGenerativeAIProviderSettings } from "@ai-sdk/google";
+import type { OpenAIProviderSettings } from "@ai-sdk/openai";
 import type { LanguageModel, ModelMessage } from "ai";
 import type {
   LlmClient,
@@ -10,49 +13,34 @@ import type {
   JsonObject,
 } from "@goondan/openharness-types";
 
-// ---------------------------------------------------------------------------
-// Provider instance cache — keyed by provider name
-// ---------------------------------------------------------------------------
-
 type ProviderFactory = {
   languageModel: (modelId: string) => LanguageModel;
 };
 
-const providerCache = new Map<string, ProviderFactory>();
-
 async function getProviderFactory(
   provider: string,
-  apiKey: string,
-  baseUrl?: string,
+  providerOptions: Record<string, unknown>,
 ): Promise<ProviderFactory> {
-  const cacheKey = `${provider}:${apiKey}:${baseUrl ?? ""}`;
-  const cached = providerCache.get(cacheKey);
-  if (cached) return cached;
-
   let factory: ProviderFactory;
 
   switch (provider) {
     case "anthropic": {
       const { createAnthropic } = await import("@ai-sdk/anthropic");
-      const p = createAnthropic({
-        apiKey,
-        ...(baseUrl ? { baseURL: baseUrl } : {}),
-      });
+      const p = createAnthropic(providerOptions as AnthropicProviderSettings);
       factory = { languageModel: (m: string) => p.languageModel(m) };
       break;
     }
     case "openai": {
       const { createOpenAI } = await import("@ai-sdk/openai");
-      const p = createOpenAI({
-        apiKey,
-        ...(baseUrl ? { baseURL: baseUrl } : {}),
-      });
+      const p = createOpenAI(providerOptions as OpenAIProviderSettings);
       factory = { languageModel: (m: string) => p.languageModel(m) };
       break;
     }
     case "google": {
       const { createGoogleGenerativeAI } = await import("@ai-sdk/google");
-      const p = createGoogleGenerativeAI({ apiKey });
+      const p = createGoogleGenerativeAI(
+        providerOptions as GoogleGenerativeAIProviderSettings,
+      );
       factory = { languageModel: (m: string) => p.languageModel(m) };
       break;
     }
@@ -60,7 +48,6 @@ async function getProviderFactory(
       throw new Error(`Unknown model provider: ${provider}`);
   }
 
-  providerCache.set(cacheKey, factory);
   return factory;
 }
 
@@ -99,9 +86,10 @@ function toModelMessages(messages: Message[]): ModelMessage[] {
 export function createAiSdkClient(
   provider: string,
   defaultModel: string,
-  apiKey: string,
-  baseUrl?: string,
+  providerOptions: Record<string, unknown> = {},
 ): LlmClient {
+  const providerFactoryPromise = getProviderFactory(provider, providerOptions);
+
   return {
     async chat(
       messages: Message[],
@@ -109,7 +97,7 @@ export function createAiSdkClient(
       signal: AbortSignal,
       options?: LlmChatOptions,
     ): Promise<LlmResponse> {
-      const factory = await getProviderFactory(provider, apiKey, baseUrl);
+      const factory = await providerFactoryPromise;
       const effectiveModel = options?.model ?? defaultModel;
       const model = factory.languageModel(effectiveModel);
 
@@ -156,7 +144,7 @@ export function createAiSdkClient(
       callbacks: LlmStreamCallbacks,
       options?: LlmChatOptions,
     ): Promise<LlmResponse> {
-      const factory = await getProviderFactory(provider, apiKey, baseUrl);
+      const factory = await providerFactoryPromise;
       const effectiveModel = options?.model ?? defaultModel;
       const model = factory.languageModel(effectiveModel);
 

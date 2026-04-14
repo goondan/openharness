@@ -97,7 +97,7 @@ export type {
 } from "./events.js";
 
 // config — includes value exports (defineHarness, env)
-export type { EnvRef, ModelConfig, AgentConfig, ConnectionConfig, HarnessConfig, ProcessTurnOptions } from "./config.js";
+export type { EnvRef, EnvResolvable, ModelConfig, AgentConfig, ConnectionConfig, HarnessConfig, ProcessTurnOptions } from "./config.js";
 export { defineHarness, env } from "./config.js";
 
 // runtime

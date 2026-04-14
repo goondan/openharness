@@ -43,6 +43,7 @@ export default defineHarness({
       model: OpenAI({
         model: "gpt-4o-mini",
         apiKey: env("OPENAI_API_KEY"),
+        project: "openharness",
       }),
       extensions: [
         BasicSystemPrompt("You are helpful."),
@@ -58,6 +59,8 @@ export default defineHarness({
 ```bash
 OPENAI_API_KEY=...
 ```
+
+`OpenAI`, `Anthropic`, `Google`은 AI SDK provider 팩토리 옵션을 그대로 받습니다. 예를 들어 `baseURL`, `project`, `organization`, `authToken`, `headers`를 직접 넣을 수 있고, `apiKey`는 필수가 아닙니다.
 
 ## 3. CLI 사용법
 
@@ -101,6 +104,7 @@ const config = defineHarness({
       model: OpenAI({
         model: "gpt-4o-mini",
         apiKey: env("OPENAI_API_KEY"),
+        project: "openharness",
       }),
     },
   },
@@ -118,4 +122,3 @@ await runtime.close();
 - 도구는 `tools`에 넣어야만 모델이 볼 수 있습니다.
 - 대화 기억은 `conversationId`를 같게 줘야 이어집니다.
 - ingress 없이도 `processTurn()`으로 바로 시작할 수 있습니다.
-

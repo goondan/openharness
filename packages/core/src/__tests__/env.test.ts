@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { env } from "@goondan/openharness-types";
-import { isEnvRef, resolveEnv } from "../env.js";
+import { isEnvRef, resolveEnv, resolveEnvDeep } from "../env.js";
 import { ConfigError } from "../errors.js";
 
 describe("env() helper", () => {
@@ -70,5 +70,47 @@ describe("resolveEnv()", () => {
   // Test 4: resolveEnv(plainString) → returns string as-is
   it("returns a plain string as-is", () => {
     expect(resolveEnv("plain-value")).toBe("plain-value");
+  });
+});
+
+describe("resolveEnvDeep()", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("resolves nested EnvRef values in plain objects and arrays", () => {
+    process.env["TEST_API_KEY"] = "resolved-api-key";
+    process.env["TEST_BASE_URL"] = "https://proxy.example.com/v1";
+    process.env["TEST_HEADER"] = "trace-id";
+
+    const resolved = resolveEnvDeep({
+      provider: "openai",
+      apiKey: env("TEST_API_KEY"),
+      providerOptions: {
+        baseURL: env("TEST_BASE_URL"),
+        headers: {
+          "x-trace-id": env("TEST_HEADER"),
+        },
+      },
+      tags: [env("TEST_HEADER")],
+    });
+
+    expect(resolved).toEqual({
+      provider: "openai",
+      apiKey: "resolved-api-key",
+      providerOptions: {
+        baseURL: "https://proxy.example.com/v1",
+        headers: {
+          "x-trace-id": "trace-id",
+        },
+      },
+      tags: ["trace-id"],
+    });
   });
 });

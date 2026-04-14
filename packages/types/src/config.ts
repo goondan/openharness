@@ -13,6 +13,17 @@ export interface EnvRef {
   readonly name: string;
 }
 
+export type EnvResolvable<T> =
+  T extends (...args: never[]) => unknown
+    ? T
+    : T extends string
+      ? T | EnvRef
+      : T extends Array<infer U>
+        ? Array<EnvResolvable<U>>
+        : T extends object
+          ? { [K in keyof T]: EnvResolvable<T[K]> }
+          : T;
+
 // -----------------------------------------------------------------------
 // Model / agent / connection config
 // -----------------------------------------------------------------------
@@ -20,8 +31,9 @@ export interface EnvRef {
 export interface ModelConfig {
   provider: string;
   model: string;
-  apiKey: string | EnvRef;
-  baseUrl?: string;
+  apiKey?: string | EnvRef;
+  baseUrl?: string | EnvRef;
+  providerOptions?: Record<string, unknown>;
 }
 
 export interface AgentConfig {

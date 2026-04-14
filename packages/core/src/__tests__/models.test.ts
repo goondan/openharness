@@ -19,6 +19,10 @@ describe("Anthropic()", () => {
   it("includes baseUrl when provided", () => {
     const config = Anthropic({ model: "claude-3-haiku-20240307", apiKey: "key", baseUrl: "https://custom.anthropic.com" });
     expect(config.baseUrl).toBe("https://custom.anthropic.com");
+    expect(config.providerOptions).toEqual({
+      apiKey: "key",
+      baseURL: "https://custom.anthropic.com",
+    });
   });
 
   it("accepts EnvRef as apiKey (not resolved at factory time)", () => {
@@ -31,6 +35,20 @@ describe("Anthropic()", () => {
   it("omits baseUrl when not provided", () => {
     const config = Anthropic({ model: "claude-3-5-sonnet-20241022", apiKey: "key" });
     expect("baseUrl" in config).toBe(false);
+  });
+
+  it("allows authToken-only config without apiKey", () => {
+    const config = Anthropic({
+      model: "claude-3-5-sonnet-20241022",
+      authToken: env("ANTHROPIC_AUTH_TOKEN"),
+      headers: { "x-proxy": "openharness" },
+    });
+
+    expect(config.apiKey).toBeUndefined();
+    expect(config.providerOptions).toEqual({
+      authToken: { name: "ANTHROPIC_AUTH_TOKEN" },
+      headers: { "x-proxy": "openharness" },
+    });
   });
 });
 
@@ -45,12 +63,33 @@ describe("OpenAI()", () => {
   it("includes baseUrl when provided", () => {
     const config = OpenAI({ model: "gpt-4o-mini", apiKey: "key", baseUrl: "https://api.custom.com/v1" });
     expect(config.baseUrl).toBe("https://api.custom.com/v1");
+    expect(config.providerOptions).toEqual({
+      apiKey: "key",
+      baseURL: "https://api.custom.com/v1",
+    });
   });
 
   it("accepts EnvRef as apiKey (not resolved at factory time)", () => {
     const ref = env("OPENAI_API_KEY");
     const config = OpenAI({ model: "gpt-4o", apiKey: ref });
     expect(config.apiKey).toBe(ref);
+  });
+
+  it("passes OpenAI provider settings through unchanged", () => {
+    const config = OpenAI({
+      model: "gpt-4o",
+      baseURL: "https://proxy.example.com/v1",
+      organization: "goondan",
+      project: "openharness",
+    });
+
+    expect(config.apiKey).toBeUndefined();
+    expect(config.baseUrl).toBe("https://proxy.example.com/v1");
+    expect(config.providerOptions).toEqual({
+      baseURL: "https://proxy.example.com/v1",
+      organization: "goondan",
+      project: "openharness",
+    });
   });
 });
 
@@ -68,9 +107,19 @@ describe("Google()", () => {
     expect(config.apiKey).toBe(ref);
   });
 
-  it("omits baseUrl (Google does not support custom endpoints)", () => {
-    const config = Google({ model: "gemini-1.5-pro", apiKey: "key" });
-    expect("baseUrl" in config).toBe(false);
+  it("passes Google provider settings through unchanged", () => {
+    const config = Google({
+      model: "gemini-1.5-pro",
+      baseURL: "https://proxy.example.com/v1beta",
+      headers: { "x-goog-user-project": "openharness" },
+    });
+
+    expect(config.apiKey).toBeUndefined();
+    expect(config.baseUrl).toBe("https://proxy.example.com/v1beta");
+    expect(config.providerOptions).toEqual({
+      baseURL: "https://proxy.example.com/v1beta",
+      headers: { "x-goog-user-project": "openharness" },
+    });
   });
 });
 
@@ -279,5 +328,131 @@ describe("AI SDK adapter chat()", () => {
 
     expect(capturedArgs).toBeDefined();
     expect(capturedArgs!["tools"]).toBeUndefined();
+  });
+
+  it("passes OpenAI provider options through to createOpenAI", async () => {
+    const createOpenAIMock = vi.fn().mockReturnValue({
+      languageModel: vi.fn().mockReturnValue({ modelId: "gpt-4o" }),
+    });
+
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "ok",
+          toolCalls: [],
+          finishReason: "stop",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/openai", () => ({
+      createOpenAI: createOpenAIMock,
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient({
+      provider: "openai",
+      model: "gpt-4o",
+      providerOptions: {
+        apiKey: "option-key",
+        baseURL: "https://proxy.example.com/v1",
+        project: "openharness",
+      },
+    });
+
+    await client.chat(mockMessages, [], abortSignal);
+
+    expect(createOpenAIMock).toHaveBeenCalledWith({
+      apiKey: "option-key",
+      baseURL: "https://proxy.example.com/v1",
+      project: "openharness",
+    });
+  });
+
+  it("does not force anthropic apiKey when authToken provider option exists", async () => {
+    const createAnthropicMock = vi.fn().mockReturnValue({
+      languageModel: vi.fn().mockReturnValue({ modelId: "claude-sonnet-4-20250514" }),
+    });
+
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "ok",
+          toolCalls: [],
+          finishReason: "stop",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: createAnthropicMock,
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient(
+      {
+        provider: "anthropic",
+        model: "claude-sonnet-4-20250514",
+        apiKey: "top-level-key",
+        providerOptions: {
+          authToken: "anthropic-auth-token",
+          baseURL: "https://proxy.example.com/v1",
+        },
+      },
+      "top-level-key",
+    );
+
+    await client.chat(mockMessages, [], abortSignal);
+
+    expect(createAnthropicMock).toHaveBeenCalledWith({
+      authToken: "anthropic-auth-token",
+      baseURL: "https://proxy.example.com/v1",
+    });
+  });
+
+  it("merges top-level apiKey into google provider options when needed", async () => {
+    const createGoogleGenerativeAIMock = vi.fn().mockReturnValue({
+      languageModel: vi.fn().mockReturnValue({ modelId: "gemini-2.5-flash" }),
+    });
+
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "ok",
+          toolCalls: [],
+          finishReason: "stop",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/google", () => ({
+      createGoogleGenerativeAI: createGoogleGenerativeAIMock,
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient(
+      {
+        provider: "google",
+        model: "gemini-2.5-flash",
+        apiKey: "google-top-level-key",
+        providerOptions: {
+          baseURL: "https://proxy.example.com/v1beta",
+        },
+      },
+      "google-top-level-key",
+    );
+
+    await client.chat(mockMessages, [], abortSignal);
+
+    expect(createGoogleGenerativeAIMock).toHaveBeenCalledWith({
+      apiKey: "google-top-level-key",
+      baseURL: "https://proxy.example.com/v1beta",
+    });
   });
 });

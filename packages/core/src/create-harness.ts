@@ -10,8 +10,9 @@ import type {
   ConnectionInfo,
   ToolInfo,
   ExtensionInfo,
+  ModelConfig,
 } from "@goondan/openharness-types";
-import { isEnvRef, resolveEnv } from "./env.js";
+import { resolveEnvDeep } from "./env.js";
 import { ConfigError } from "./errors.js";
 import { createLlmClient } from "./models/index.js";
 import { ToolRegistry } from "./tool-registry.js";
@@ -38,11 +39,16 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   // -----------------------------------------------------------------------
 
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {
-    // Resolve env refs in apiKey
-    const resolvedApiKey = resolveEnv(agentConfig.model.apiKey);
+    const resolvedModelConfig =
+      resolveEnvDeep(agentConfig.model) as ModelConfig;
 
     // Create LLM client
-    const llmClient = createLlmClient(agentConfig.model, resolvedApiKey);
+    const llmClient = createLlmClient(
+      resolvedModelConfig,
+      typeof resolvedModelConfig.apiKey === "string"
+        ? resolvedModelConfig.apiKey
+        : undefined,
+    );
 
     // Create per-agent infrastructure
     const toolRegistry = new ToolRegistry();

@@ -72,6 +72,9 @@ export default defineHarness({
       model: Anthropic({
         model: "claude-sonnet-4-20250514",
         apiKey: env("ANTHROPIC_API_KEY"),
+        headers: {
+          "x-app-name": "openharness",
+        },
       }),
       extensions: [
         BasicSystemPrompt("You are helpful."),
@@ -86,6 +89,7 @@ export default defineHarness({
 - 리소스 참조(`Model/claude`) 대신 JS 값 자체를 넣습니다.
 - env 참조는 YAML `valueFrom.env` 대신 `env("...")`를 씁니다.
 - 설정의 "해석 단계"가 줄고, import 시점에 구조가 더 명확해집니다.
+- AI SDK provider 옵션(`baseURL`, `project`, `authToken`, `headers` 등)을 모델 팩토리에 그대로 넘길 수 있습니다.
 
 ## 2. Runtime API 변경
 
