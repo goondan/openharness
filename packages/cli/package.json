@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-cli",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "type": "module",
   "bin": {
     "oh": "./dist/index.js"
@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
+    "prepack": "pnpm build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
