@@ -1,21 +1,26 @@
 {
   "name": "@goondan/openharness-base",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
+    "prepack": "pnpm build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness-types": "workspace:*"
+    "@goondan/openharness-types": "^0.1.8"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
