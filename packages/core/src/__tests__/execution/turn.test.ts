@@ -344,6 +344,7 @@ describe("executeTurn", () => {
     expect(errorListener).toHaveBeenCalledOnce();
     const errorPayload = errorListener.mock.calls[0][0];
     expect(errorPayload.type).toBe("turn.error");
+    expect(errorPayload.status).toBe("error");
     expect(errorPayload.error).toBeInstanceOf(Error);
     expect(errorPayload.error.message).toContain("LLM crashed");
 

@@ -25,6 +25,7 @@ export interface TurnErrorPayload {
   turnId: string;
   agentName: string;
   conversationId: string;
+  status: "aborted" | "error";
   error: Error;
 }
 

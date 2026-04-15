@@ -227,6 +227,7 @@ export async function executeTurn(
         turnId,
         agentName,
         conversationId,
+        status: "aborted",
         error,
       });
 
@@ -245,6 +246,7 @@ export async function executeTurn(
       turnId,
       agentName,
       conversationId,
+      status: "error",
       error,
     });
 

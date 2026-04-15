@@ -223,6 +223,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
             turnId,
             agentName,
             conversationId,
+            status: "error",
             error: err instanceof Error ? err : new Error(String(err)),
           });
         });

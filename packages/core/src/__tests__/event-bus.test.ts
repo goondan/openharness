@@ -116,6 +116,7 @@ describe("EventBus", () => {
       turnId: "t1",
       agentName: "agent",
       conversationId: "c1",
+      status: "error",
       error: new Error("oops"),
     };
 

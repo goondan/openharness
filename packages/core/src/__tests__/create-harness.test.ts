@@ -348,6 +348,54 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
+  it("runtime.events exposes aborted turn.error payloads with status", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    let chatCalled: () => void;
+    const chatStarted = new Promise<void>((resolve) => {
+      chatCalled = resolve;
+    });
+    const observedStatuses: Array<"aborted" | "error"> = [];
+
+    const slowClient: LlmClient = {
+      chat: vi.fn().mockImplementation(
+        (_msgs: Message[], _tools: ToolDefinition[], signal: AbortSignal) =>
+          new Promise<LlmResponse>((resolve, reject) => {
+            chatCalled!();
+            const timer = setTimeout(() => resolve({ text: "done" }), 5000);
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          }),
+      ),
+    };
+    (createLlmClient as ReturnType<typeof vi.fn>).mockReturnValue(slowClient);
+
+    const runtime = await createHarness(minimalConfig());
+    const unsubscribe = runtime.events.on("turn.error", (payload) => {
+      observedStatuses.push(payload.status);
+    });
+
+    const turnPromise = runtime.processTurn("default", "long task", {
+      conversationId: "conv-runtime-event-abort",
+    });
+
+    await chatStarted;
+
+    await runtime.control.abortConversation({
+      conversationId: "conv-runtime-event-abort",
+      reason: "user cancelled",
+    });
+
+    const result = await turnPromise;
+    unsubscribe();
+
+    expect(result.status).toBe("aborted");
+    expect(observedStatuses).toEqual(["aborted"]);
+
+    await runtime.close();
+  });
+
   // -----------------------------------------------------------------------
   // Test 10: defineHarness is identity function (no side effects)
   // -----------------------------------------------------------------------
