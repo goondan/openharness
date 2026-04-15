@@ -1,6 +1,11 @@
+import { jsonSchema } from "ai";
 import { describe, it, expect, vi } from "vitest";
 import { ToolRegistry } from "../tool-registry.js";
-import type { ToolDefinition, ToolContext, ToolResult } from "@goondan/openharness-types";
+import {
+  type ToolDefinition,
+  type ToolContext,
+  type ToolResult,
+} from "@goondan/openharness-types";
 
 // Helper to create a minimal ToolContext
 function makeContext(overrides?: Partial<ToolContext>): ToolContext {
@@ -130,6 +135,25 @@ describe("ToolRegistry", () => {
     if (!invalid.valid) {
       expect(invalid.errors).toContain("must match format");
     }
+  });
+
+  it("registers ai-sdk jsonSchema wrappers by compiling the wrapped schema", () => {
+    const registry = new ToolRegistry();
+    const parameters = jsonSchema({
+      type: "object",
+      properties: {
+        query: { type: "string" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    });
+
+    registry.register(makeTool("wrapped_schema_tool", parameters));
+
+    expect(registry.validate("wrapped_schema_tool", { query: "openharness" })).toEqual({ valid: true });
+
+    const invalid = registry.validate("wrapped_schema_tool", {});
+    expect(invalid.valid).toBe(false);
   });
 
   // Test 7: Tool handler called with correct ToolContext

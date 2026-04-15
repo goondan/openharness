@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-cli",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "type": "module",
   "bin": {
     "oh": "./dist/index.js"

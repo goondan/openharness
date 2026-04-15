@@ -1,7 +1,13 @@
 import type { ValidateFunction } from "ajv";
 import _Ajv2020 from "ajv/dist/2020.js";
 import _addFormats from "ajv-formats";
-import type { ToolDefinition, ToolContext, ToolResult, JsonObject } from "@goondan/openharness-types";
+import {
+  resolveToolParameters,
+  type ToolDefinition,
+  type ToolContext,
+  type ToolResult,
+  type JsonObject,
+} from "@goondan/openharness-types";
 
 // CommonJS default exports are wrapped when imported as ESM.
 const Ajv2020 = _Ajv2020 as unknown as typeof _Ajv2020.default;
@@ -20,7 +26,7 @@ export class ToolRegistry {
     if (this.tools.has(tool.name)) {
       throw new Error(`Tool "${tool.name}" is already registered`);
     }
-    const validate = this.ajv.compile(tool.parameters);
+    const validate = this.ajv.compile(resolveToolParameters(tool.parameters));
     this.tools.set(tool.name, tool);
     this.validators.set(tool.name, validate);
   }

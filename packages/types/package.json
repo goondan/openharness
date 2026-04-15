@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-types",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -22,7 +22,7 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsup": "^8.4.0"
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0"
   }
 }

@@ -1,4 +1,10 @@
-import { generateText, streamText, tool as aiTool, jsonSchema } from "ai";
+import {
+  generateText,
+  streamText,
+  tool as aiTool,
+  jsonSchema,
+  type Tool as AiSdkTool,
+} from "ai";
 import type { AnthropicProviderSettings } from "@ai-sdk/anthropic";
 import type { GoogleGenerativeAIProviderSettings } from "@ai-sdk/google";
 import type { OpenAIProviderSettings } from "@ai-sdk/openai";
@@ -12,6 +18,7 @@ import type {
   ToolDefinition,
   JsonObject,
 } from "@goondan/openharness-types";
+import { isJsonSchemaWrapper } from "@goondan/openharness-types";
 
 type ProviderFactory = {
   languageModel: (modelId: string) => LanguageModel;
@@ -57,14 +64,16 @@ async function getProviderFactory(
 
 function toAiSdkTools(
   tools: ToolDefinition[],
-): Record<string, ReturnType<typeof aiTool>> {
-  const result: Record<string, ReturnType<typeof aiTool>> = {};
+): Record<string, AiSdkTool<unknown, never>> {
+  const result: Record<string, AiSdkTool<unknown, never>> = {};
   for (const t of tools) {
     result[t.name] = aiTool({
       description: t.description,
-      inputSchema: jsonSchema(
-        t.parameters ?? { type: "object", properties: {} },
-      ),
+      inputSchema: isJsonSchemaWrapper(t.parameters)
+        ? t.parameters
+        : jsonSchema(
+            t.parameters ?? { type: "object", properties: {} },
+          ),
       // No execute handler — openharness manages tool execution in its own step loop
     });
   }

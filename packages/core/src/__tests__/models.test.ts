@@ -1,3 +1,4 @@
+import { jsonSchema } from "ai";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "@goondan/openharness-types";
 import { Anthropic, OpenAI, Google, createLlmClient } from "../models/index.js";
@@ -302,6 +303,53 @@ describe("AI SDK adapter chat()", () => {
     const passedTools = capturedArgs!["tools"] as Record<string, unknown>;
     expect(passedTools).toBeDefined();
     expect("get_weather" in passedTools).toBe(true);
+  });
+
+  it("passes ai-sdk jsonSchema wrappers through without re-wrapping them", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    const wrappedParameters = jsonSchema({
+      type: "object",
+      properties: {
+        location: { type: "string" },
+      },
+      required: ["location"],
+    });
+    const jsonSchemaMock = vi.fn((schema: Record<string, unknown>) => ({
+      kind: "wrapped",
+      jsonSchema: schema,
+    }));
+    const toolMock = vi.fn((definition: Record<string, unknown>) => definition);
+
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        tool: toolMock,
+        jsonSchema: jsonSchemaMock,
+        generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+          capturedArgs = args;
+          return { text: "ok", toolCalls: [], finishReason: "stop", response: { messages: [] } };
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/google", () => ({
+      createGoogleGenerativeAI: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "gemini-1.5-pro" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient({ provider: "google", model: "gemini-1.5-pro", apiKey: "key" }, "g-resolved");
+    await client.chat(
+      mockMessages,
+      [{ ...mockTools[0], parameters: wrappedParameters }],
+      abortSignal,
+    );
+
+    expect(jsonSchemaMock).not.toHaveBeenCalled();
+    expect(capturedArgs).toBeDefined();
+    const passedTools = capturedArgs!["tools"] as Record<string, { inputSchema: unknown }>;
+    expect(passedTools["get_weather"]?.inputSchema).toBe(wrappedParameters);
   });
 
   it("does not pass tools when tool list is empty", async () => {
