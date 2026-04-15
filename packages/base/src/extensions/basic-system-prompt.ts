@@ -25,7 +25,7 @@ export function BasicSystemPrompt(text: string): Extension {
 
           if (!alreadyExists) {
             ctx.conversation.emit({
-              type: "append",
+              type: "appendSystem",
               message: {
                 id: SYSTEM_MESSAGE_ID,
                 data: {

@@ -7,6 +7,7 @@ import type {
   ProcessTurnOptions,
   TurnResult,
   LlmClient,
+  EventPayload,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
@@ -52,21 +53,23 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _conversations: Map<string, ConversationStateImpl> = new Map();
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
+  private readonly _runtimeEvents: EventBus;
   private _closed = false;
 
-  constructor(agents: Map<string, AgentDeps>, ingressPipeline: IngressPipeline) {
+  constructor(agents: Map<string, AgentDeps>, ingressPipeline: IngressPipeline, runtimeEvents: EventBus) {
     this._agents = agents;
     this._ingressPipeline = ingressPipeline;
+    this._runtimeEvents = runtimeEvents;
   }
 
-  // -----------------------------------------------------------------------
-  // processTurn
-  // -----------------------------------------------------------------------
+  private _conversationKey(agentName: string, conversationId: string): string {
+    return `${agentName}::${conversationId}`;
+  }
 
-  async processTurn(
+  private async _processTurnInternal(
     agentName: string,
     input: string | InboundEnvelope,
-    options?: ProcessTurnOptions,
+    options?: (ProcessTurnOptions & { turnId?: string }),
   ): Promise<TurnResult> {
     if (this._closed) {
       throw new HarnessError("Runtime is closed");
@@ -77,25 +80,24 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       throw new ConfigError(`Unknown agent: "${agentName}"`);
     }
 
-    // Determine conversationId early so we can track the turn
     const conversationId =
       options?.conversationId ??
       (typeof input !== "string" && input.conversationId
         ? input.conversationId
         : randomUUID());
 
-    // Get or create conversation state
-    let conversationState = this._conversations.get(conversationId);
+    const conversationKey = this._conversationKey(agentName, conversationId);
+
+    let conversationState = this._conversations.get(conversationKey);
     if (!conversationState) {
       conversationState = createConversationState();
-      this._conversations.set(conversationId, conversationState);
+      this._conversations.set(conversationKey, conversationState);
     }
 
-    // Create an AbortController so we can abort this turn externally
     const abortController = new AbortController();
     const trackingId = randomUUID();
 
-    const turnPromise = executeTurn(agentName, input, { conversationId }, {
+    const turnPromise = executeTurn(agentName, input, options, {
       llmClient: agentDeps.llmClient,
       toolRegistry: agentDeps.toolRegistry,
       middlewareRegistry: agentDeps.middlewareRegistry,
@@ -120,11 +122,40 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   }
 
   // -----------------------------------------------------------------------
+  // processTurn
+  // -----------------------------------------------------------------------
+
+  async processTurn(
+    agentName: string,
+    input: string | InboundEnvelope,
+    options?: ProcessTurnOptions,
+  ): Promise<TurnResult> {
+    return this._processTurnInternal(agentName, input, options);
+  }
+
+  async dispatchTurn(
+    agentName: string,
+    input: InboundEnvelope,
+    options: { conversationId: string; turnId: string },
+  ): Promise<TurnResult> {
+    return this._processTurnInternal(agentName, input, options);
+  }
+
+  // -----------------------------------------------------------------------
   // ingress
   // -----------------------------------------------------------------------
 
   get ingress(): IngressApi {
     return this._ingressPipeline;
+  }
+
+  get events(): HarnessRuntime["events"] {
+    return {
+      on: <T extends EventPayload["type"]>(
+        event: T,
+        listener: (payload: Extract<EventPayload, { type: T }>) => void,
+      ) => this._runtimeEvents.on(event, listener),
+    };
   }
 
   // -----------------------------------------------------------------------

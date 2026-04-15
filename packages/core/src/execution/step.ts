@@ -91,7 +91,7 @@ export async function executeStep(
           stepCtx.abortSignal,
         );
 
-    // d. FR-CORE-007: Append LLM assistant response to conversation
+    // d. FR-CORE-007: Record the LLM assistant response as a non-system message
     const assistantContent: NonNullable<AssistantModelMessage["content"]> extends infer T
       ? T extends string
         ? never
@@ -117,7 +117,7 @@ export async function executeStep(
     // Only append if there's something to say
     if (assistantContent.length > 0) {
       stepCtx.conversation.emit({
-        type: "append",
+        type: "appendMessage",
         message: {
           id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
           data: {
@@ -148,9 +148,9 @@ export async function executeStep(
           eventBus,
         });
 
-        // FR-CORE-007: Append tool result to conversation
+        // FR-CORE-007: Record the tool result as a non-system message
         stepCtx.conversation.emit({
-          type: "append",
+          type: "appendMessage",
           message: {
             id: `tool-result-${tc.toolCallId}`,
             data: {

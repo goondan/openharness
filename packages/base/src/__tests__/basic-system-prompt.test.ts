@@ -23,7 +23,7 @@ function makeMockConversationState(): ConversationState & { emitted: MessageEven
     emitted,
     emit: vi.fn((event: MessageEvent) => {
       emitted.push(event);
-      if (event.type === "append") {
+      if (event.type === "appendSystem" || event.type === "appendMessage") {
         messages.push(event.message);
       }
     }),
@@ -146,8 +146,8 @@ describe("BasicSystemPrompt", () => {
     // Verify system message was emitted
     expect(conversation.emit).toHaveBeenCalledOnce();
     const emittedEvent = conversation.emitted[0];
-    expect(emittedEvent.type).toBe("append");
-    if (emittedEvent.type === "append") {
+    expect(emittedEvent.type).toBe("appendSystem");
+    if (emittedEvent.type === "appendSystem") {
       expect(emittedEvent.message.id).toBe("sys-basic-system-prompt");
       expect(emittedEvent.message.data.role).toBe("system");
       expect(emittedEvent.message.data.content).toBe("You are helpful.");
@@ -165,7 +165,7 @@ describe("BasicSystemPrompt", () => {
     const middleware = registeredMiddleware[0].handler;
     const next = vi.fn(async () => stubTurnResult);
 
-    // First turn — should append
+    // First turn — should appendSystem
     const ctx1 = makeTurnContext(conversation);
     await middleware(ctx1, next);
     expect(conversation.emitted).toHaveLength(1);
@@ -173,7 +173,7 @@ describe("BasicSystemPrompt", () => {
     // Second turn — system message already in conversation.messages, should skip
     const ctx2 = makeTurnContext(conversation);
     await middleware(ctx2, next);
-    expect(conversation.emitted).toHaveLength(1); // still 1, no new append
+    expect(conversation.emitted).toHaveLength(1); // still 1, no new system event
 
     // Third turn — still no duplication
     const ctx3 = makeTurnContext(conversation);

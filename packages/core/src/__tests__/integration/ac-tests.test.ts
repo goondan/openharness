@@ -30,6 +30,19 @@ function makeTextMessage(
   return { id, data: { role, content } as Message["data"] };
 }
 
+function appendEvent(message: Message): MessageEvent {
+  if (message.data.role === "system") {
+    return {
+      type: "appendSystem",
+      message: message as Extract<MessageEvent, { type: "appendSystem" }>["message"],
+    };
+  }
+  return {
+    type: "appendMessage",
+    message: message as Extract<MessageEvent, { type: "appendMessage" }>["message"],
+  };
+}
+
 function messageRole(message: Message): Message["data"]["role"] {
   return message.data.role;
 }
@@ -50,9 +63,8 @@ function BasicSystemPrompt(text: string): Extension {
       api.pipeline.register(
         "turn",
         async (ctx, next) => {
-          ctx.conversation.emit({
-            type: "append",
-            message: {
+          ctx.conversation.emit(
+            appendEvent({
               id: `sys-${Date.now()}`,
               data: {
                 role: "system",
@@ -61,8 +73,8 @@ function BasicSystemPrompt(text: string): Extension {
               metadata: {
                 __createdBy: "basic-system-prompt",
               },
-            },
-          });
+            }),
+          );
           return next();
         },
         { priority: 10 },
@@ -171,6 +183,7 @@ describe("AC-1: Minimal execution with BasicSystemPrompt", () => {
     const systemMessages = messagesArg.filter((m) => messageRole(m) === "system");
     expect(systemMessages.length).toBeGreaterThanOrEqual(1);
     expect(systemMessages.some((m) => messageContent(m) === "You are helpful.")).toBe(true);
+    expect(messageRole(messagesArg[0]!)).toBe("system");
 
     // There must be a user message with "hello"
     const userMessages = messagesArg.filter((m) => messageRole(m) === "user");
@@ -319,22 +332,10 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     original["_turnActive"] = true;
 
     // Emit several events
-    original.emit({
-      type: "append",
-      message: makeTextMessage("m1", "user", "hello"),
-    });
-    original.emit({
-      type: "append",
-      message: makeTextMessage("m2", "assistant", "hi there"),
-    });
-    original.emit({
-      type: "append",
-      message: makeTextMessage("m3", "user", "how are you?"),
-    });
-    original.emit({
-      type: "append",
-      message: makeTextMessage("m4", "assistant", "I am fine"),
-    });
+    original.emit(appendEvent(makeTextMessage("m1", "user", "hello")));
+    original.emit(appendEvent(makeTextMessage("m2", "assistant", "hi there")));
+    original.emit(appendEvent(makeTextMessage("m3", "user", "how are you?")));
+    original.emit(appendEvent(makeTextMessage("m4", "assistant", "I am fine")));
 
     const originalMessages = [...original.messages];
     const originalEvents = [...original.events] as MessageEvent[];
@@ -357,10 +358,7 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
     original["_turnActive"] = true;
 
     for (let i = 1; i <= 5; i++) {
-      original.emit({
-        type: "append",
-        message: makeTextMessage(`m${i}`, "user", `message ${i}`),
-      });
+      original.emit(appendEvent(makeTextMessage(`m${i}`, "user", `message ${i}`)));
     }
     original.emit({ type: "truncate", keepLast: 2 });
 
@@ -962,14 +960,13 @@ describe("AC-14: Third-party Extension with types-only import", () => {
       register(api: ExtensionApi): void {
         // Register a turn middleware that prepends a system message
         api.pipeline.register("turn", async (ctx, next) => {
-          ctx.conversation.emit({
-            type: "append",
-            message: {
+          ctx.conversation.emit(
+            appendEvent({
               id: `tp-sys-${Date.now()}`,
               data: { role: "system", content: "You are a third-party assistant." },
               metadata: { __createdBy: "third-party-system-prompt" },
-            },
-          });
+            }),
+          );
           return next();
         });
       },

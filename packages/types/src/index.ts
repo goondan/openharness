@@ -1,6 +1,8 @@
 // tool — foundational primitives
 export type {
   JsonSchema,
+  JsonSchemaWrapper,
+  ToolParameters,
   JsonObject,
   JsonValue,
   ToolResult,
@@ -8,12 +10,18 @@ export type {
   ToolDefinition,
   ToolInfo,
 } from "./tool.js";
+export {
+  isJsonSchemaWrapper,
+  resolveToolParameters,
+} from "./tool.js";
 
 // conversation
 export type {
   Message,
   MessageEvent,
   ConversationState,
+  NonSystemMessage,
+  SystemMessage,
 } from "./conversation.js";
 export type {
   ModelMessage,
@@ -101,4 +109,12 @@ export type { EnvRef, EnvResolvable, ModelConfig, AgentConfig, ConnectionConfig,
 export { defineHarness, env } from "./config.js";
 
 // runtime
-export type { AbortResult, ControlApi, HarnessRuntime } from "./runtime.js";
+export type {
+  AbortResult,
+  ControlApi,
+  HarnessRuntime,
+  RuntimeEventListener,
+  RuntimeEventType,
+  RuntimeEventsApi,
+  RuntimeEventUnsubscribeFn,
+} from "./runtime.js";

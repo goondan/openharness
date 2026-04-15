@@ -1,126 +1,97 @@
-# ingress-pipeline — Ingress 2단계 파이프라인
+# ingress-pipeline - Connector, routing, fire-and-forget dispatch
 
 ## 1. 한 줄 요약
 
-외부 이벤트를 2단계 파이프라인(ingress → route)으로 처리하여, 적절한 에이전트의 적절한 대화에 Turn을 비동기로 접수한다.
-
----
+Ingress는 raw payload를 검증/정규화한 뒤 routing rule로 agent와 conversation을 결정하고, 선택된 agent의 route middleware를 거쳐 Turn을 비동기로 접수한다.
 
 ## 2. 상위 스펙 연결
 
-- **Related Goals:** G-1 (순수한 코어), G-2 (Composable Extension), G-3 (Code-first)
-- **Related Requirements:** FR-INGRESS-001~009
-- **Related AC:** AC-9, AC-10, AC-11
-
----
+- Related Goals: `G-1`, `G-3`, `G-5`
+- Related Requirements: `FR-INGRESS-001` ~ `FR-INGRESS-007`
+- Related AC: `AC-04`
 
 ## 3. Behavior Specification
 
-### 3.1 Flow 목록
+### 3.1 Flow: `receive()`
 
-#### Flow ID: INGRESS-RECEIVE-01 — 전체 파이프라인 실행
+**ID:** `INGRESS-RECEIVE-01`
 
-- **Actor:** 외부 호스트 (HTTP 서버, 큐 consumer 등)
-- **Trigger:** `runtime.ingress.receive({ connectionName, payload })` 호출
-- **Preconditions:**
-  - 해당 connectionName에 대응하는 Connection이 등록되어 있다.
-- **Main Flow:**
-  1. Connection의 Connector를 조회한다.
-  2. **Ingress 단계 (Connection 수준):** Connection 수준 미들웨어를 실행한 후, 내부적으로 verify와 normalize를 순차 수행한다. `connector.verify`가 정의되어 있으면 `connector.verify(ctx)`를 호출하여 서명 확인, 중복 체크 등을 수행한다 (verify가 미정의면 건너뜀). 이어서 `connector.normalize(ctx)`를 호출하여 소스별 페이로드를 InboundEnvelope 표준 형식으로 변환한다. 1:N fan-out을 허용한다 (배열 반환).
-  3. **Route 단계 (Agent 수준):** 각 InboundEnvelope에 대해 Agent 수준 미들웨어를 실행한 후, 내부적으로 라우팅 규칙 매칭과 Turn 접수를 수행한다. Connection의 라우팅 규칙을 선언 순서대로 평가하고 (first-match-wins), 매칭된 규칙에서 대상 agentName과 conversationId를 결정한 뒤, 매칭된 에이전트에 Turn을 비동기로 접수한다.
-  4. 접수 결과(IngressAcceptResult 배열)를 반환한다. 결과는 Turn 완료가 아니라 accepted handle이다.
-  5. `ingress.accepted` 이벤트를 발행한다 (각 접수건별).
-- **Alternative Flow:**
-  - verify 실패 (ingress 단계 내): 빈 배열 `[]`을 반환하고 `ingress.rejected` 이벤트를 발행한다. route 단계 실행하지 않음.
-  - normalize가 빈 배열 반환 (ingress 단계 내): 처리할 이벤트 없음. 빈 결과 배열 반환.
-  - 매칭되는 라우팅 규칙 없음 (route 단계 내): 해당 envelope을 reject. `ingress.rejected` 이벤트 발행.
-  - conversationId를 결정할 수 없음 (3개 경로 모두 없음): reject. `ingress.rejected` 이벤트 발행.
-  - 대상 agentName이 등록되지 않은 경우: reject. `ingress.rejected` 이벤트 발행.
-- **Outputs:** IngressAcceptResult[]
-- **Side Effects:** Turn이 비동기로 접수됨.
-- **Failure Modes:**
-  - connectionName이 등록되지 않은 경우: 즉시 에러 반환.
-  - Connector verify/normalize 예외 (ingress 단계): 빈 배열 `[]`을 반환하고 `ingress.rejected` 이벤트를 발행한다.
+- Trigger: `runtime.ingress.receive({ connectionName, payload, receivedAt? })`
+- Main Flow:
+  1. `ingress.received` 이벤트를 발행한다.
+  2. connection을 조회한다.
+  3. connection-level `ingress` middleware 체인을 실행한다.
+  4. core ingress 단계에서 `connector.verify?()` 후 `connector.normalize()`를 수행한다.
+  5. normalize 결과를 배열로 fan-out 한다.
+  6. 각 envelope에 대해 route+dispatch를 수행한다.
+  7. accepted 결과 배열을 반환한다.
+- Failure:
+  - unknown connection이면 즉시 예외
+  - verify/normalize 예외면 `ingress.rejected`를 발행하고 빈 배열 반환
 
-#### Flow ID: INGRESS-DISPATCH-01 — 직접 접수 (ingress 단계 건너뜀)
+### 3.2 Flow: route + dispatch
 
-- **Actor:** 외부 코드
-- **Trigger:** `runtime.ingress.dispatch({ connectionName, envelope })` 호출
-- **Preconditions:**
-  - 이미 정규화된 InboundEnvelope가 전달된다.
-- **Main Flow:**
-  1. Route 단계부터 실행한다 (ingress 단계 건너뜀).
-  2. 이하 INGRESS-RECEIVE-01의 Route 단계와 동일.
-- **Outputs:** IngressAcceptResult
-- **Failure Modes:**
-  - 매칭 실패, conversationId 부재: INGRESS-RECEIVE-01과 동일.
+**ID:** `INGRESS-ROUTE-01`
 
-#### Flow ID: INGRESS-ROUTE-01 — conversationId 해석
+- Trigger: fan-out된 envelope 1건 처리
+- Main Flow:
+  1. `routeEnvelope()`로 first-match routing을 수행한다.
+  2. `conversationId`를 우선순위 규칙으로 결정한다.
+  3. route result를 만든다. 이때 `turnId`를 미리 생성한다.
+  4. 선택된 agent의 `route` middleware 체인을 실행한다.
+  5. route 결과가 유효하면 Turn을 fire-and-forget으로 시작한다.
+  6. `ingress.accepted`를 발행하고 handle을 반환한다.
+- Failure:
+  - 매칭 rule 없음, 미등록 agent, `conversationId` 부재면 `ingress.rejected`
+  - route middleware가 throw 하거나 invalid result를 만들면 `ingress.rejected`
 
-- **Actor:** 코어 (Route 단계 내부)
-- **Trigger:** 라우팅 규칙 매칭 시
-- **Preconditions:**
-  - 매칭된 라우팅 규칙이 있다.
-- **Main Flow:**
-  - conversationId 해석 우선순위 (첫 번째로 결정되는 값 사용):
-    1. `rule.conversationId` — 규칙에 명시적으로 지정된 고정 값.
-    2. `rule.conversationIdProperty` — envelope.properties에서 해당 키의 값을 추출.
-       - `rule.conversationIdPrefix`가 있으면 접두사를 붙인다.
-    3. `envelope.conversationId` — Connector가 normalize 시 설정한 값.
-  - 세 경로 모두에서 값이 없으면 reject.
-- **Outputs:** 결정된 conversationId.
-- **Failure Modes:**
-  - 세 경로 모두 값 없음: reject.
+### 3.3 Flow: `dispatch()`
 
----
+**ID:** `INGRESS-DISPATCH-01`
+
+- Trigger: `runtime.ingress.dispatch({ connectionName, envelope })`
+- Behavior:
+  - verify/normalize를 생략하고 `INGRESS-ROUTE-01`부터 실행한다.
+  - reject되면 예외를 던진다.
+
+### 3.4 Conversation ID 해석 순서
+
+**ID:** `INGRESS-CONV-01`
+
+1. `rule.conversationId`
+2. `rule.conversationIdProperty`로 `envelope.properties[key]` 추출
+   - `conversationIdPrefix`가 있으면 접두사 부착
+3. `envelope.conversationId`
+
+세 경로 모두 실패하면 reject다.
 
 ## 4. Constraint Specification
 
-### Constraint ID: INGRESS-CONST-001 — Connector는 정규화 어댑터
+### INGRESS-CONST-001 - Connector는 transport 서버가 아니다
 
-- **Category:** 아키텍처
-- **Description:** Connector는 transport 서버가 아니다. HTTP 서버, 큐 consumer, 스케줄러 등은 외부 호스트의 책임이며, Connector는 수신된 페이로드를 검증하고 정규화하는 순수 함수 역할만 한다.
-- **Scope:** 전체
-- **Measurement:** Connector 인터페이스에 listen/bind/serve 등의 메서드가 없음.
-- **Verification:** 타입 정의 검사.
+- Connector는 payload 검증과 정규화만 책임진다.
+- HTTP server, queue consumer, scheduler는 외부 호스트 책임이다.
 
-### Constraint ID: INGRESS-CONST-002 — first-match-wins 라우팅
+### INGRESS-CONST-002 - first-match-wins
 
-- **Category:** 동작 보장
-- **Description:** 라우팅 규칙은 선언 순서대로 평가하며 첫 번째 매칭 규칙이 적용된다. 이후 규칙은 평가하지 않는다.
-- **Scope:** INGRESS-RECEIVE-01, INGRESS-DISPATCH-01
-- **Measurement:** 두 규칙이 모두 매칭 가능할 때 첫 번째가 적용되는 테스트.
-- **Verification:** 유닛 테스트.
+- routing rule은 선언 순서가 의미 있다.
+- 첫 번째 매칭 rule이 agent 결정권을 가진다.
 
-### Constraint ID: INGRESS-CONST-003 — conversationId 필수
+### INGRESS-CONST-003 - route middleware는 post-match 단계다
 
-- **Category:** 데이터 무결성
-- **Description:** Turn 접수 시 conversationId가 반드시 결정되어야 한다. 세 경로 모두에서 결정할 수 없으면 reject.
-- **Scope:** INGRESS-ROUTE-01
-- **Measurement:** conversationId 부재 시 reject 테스트.
-- **Verification:** AC-11.
+- route middleware는 rule selection 자체를 대신하지 않는다.
+- 일단 선택된 agent에 대해 dispatch 직전 검사/차단/결과 조정을 담당한다.
 
-### Constraint ID: INGRESS-CONST-004 — 비동기 접수
+### INGRESS-CONST-004 - dispatch는 비동기 접수다
 
-- **Category:** 동작 보장
-- **Description:** `receive()`와 `dispatch()`는 Turn 완료를 기다리지 않고 accepted handle을 반환한다. Turn은 비동기로 실행된다.
-- **Scope:** INGRESS-RECEIVE-01, INGRESS-DISPATCH-01
-- **Measurement:** receive() 반환 후 Turn이 아직 진행 중일 수 있는 테스트.
-- **Verification:** 통합 테스트.
+- `receive()`/`dispatch()`는 Turn 완료를 기다리지 않는다.
+- accepted handle은 “접수 성공”이지 “Turn 완료”가 아니다.
 
-### Constraint ID: INGRESS-CONST-005 — 미들웨어 범위 분리
+### INGRESS-CONST-005 - turnId 상관관계 유지
 
-- **Category:** 아키텍처
-- **Description:** Connection 수준 Extension은 ingress 단계에 개입한다. Agent 수준 Extension은 route 단계에 개입한다. 범위를 넘어서는 개입은 불가. Extension은 `api.pipeline.register("ingress" | "route", handler)`로 Ingress 미들웨어를 등록한다.
-- **Scope:** 전체
-- **Measurement:** Connection Extension이 route 단계에 개입하지 못하는 테스트.
-- **Verification:** 유닛 테스트.
-
----
+- `IngressAcceptResult.turnId`는 이후 해당 Turn의 `turn.*` 이벤트와 동일한 식별자다.
 
 ## 5. Interface Specification
-
-### 5.1 Connector 계약
 
 ```ts
 interface Connector {
@@ -129,61 +100,29 @@ interface Connector {
   normalize(ctx: ConnectorContext): Promise<InboundEnvelope | InboundEnvelope[]>;
 }
 
-interface ConnectorContext {
-  connectionName: string;
-  payload: unknown;
-  receivedAt: string;  // ISO 8601
-}
-```
-
-### 5.2 InboundEnvelope
-
-```ts
 interface InboundEnvelope {
-  name: string;                    // 이벤트 이름 (예: "slack.message")
-  content: InboundContentPart[];   // 이벤트 내용
-  properties: Record<string, string | number | boolean>;  // 라우팅/conversationId에 사용 가능
-  conversationId?: string;         // Connector가 설정 가능
-  source: EventSource;             // 원본 소스 정보
-  metadata?: Record<string, unknown>;  // 자유 메타데이터
-}
-
-type InboundContentPart =
-  | { type: "text"; text: string }
-  | { type: "image"; url: string; alt?: string }
-  | { type: "file"; url: string; name: string; mimeType?: string };
-
-interface EventSource {
-  connector: string;       // Connector 이름
-  connectionName: string;  // Connection 이름
-  receivedAt: string;      // ISO 8601
-}
-```
-
-### 5.3 Connection 구성
-
-```ts
-interface ConnectionConfig {
-  connector: Connector;
-  extensions?: Extension[];  // Connection 수준 Extension (pre-route)
-  rules: RoutingRule[];
+  name: string;
+  content: InboundContentPart[];
+  properties: Record<string, string | number | boolean>;
+  conversationId?: string;
+  source: {
+    connector: string;
+    connectionName: string;
+    receivedAt: string;
+  };
+  metadata?: Record<string, unknown>;
 }
 
 interface RoutingRule {
   match: RoutingMatch;
-  agent: string;                       // 대상 에이전트 이름
-  conversationId?: string;             // 고정 conversationId
-  conversationIdProperty?: string;     // envelope.properties에서 추출할 키
-  conversationIdPrefix?: string;       // property 값에 붙일 접두사
-}
-
-interface RoutingMatch {
-  event?: string;                      // envelope.name과 매칭
-  [key: string]: unknown;              // 추가 매칭 조건 (envelope.properties와 비교)
+  agent: string;
+  conversationId?: string;
+  conversationIdProperty?: string;
+  conversationIdPrefix?: string;
 }
 ```
 
-### 5.4 Ingress API 계약
+### 5.1 Ingress API
 
 ```ts
 interface IngressApi {
@@ -201,54 +140,33 @@ interface IngressApi {
 
   listConnections(): ConnectionInfo[];
 }
-
-interface IngressAcceptResult {
-  accepted: true;
-  connectionName: string;
-  agentName: string;
-  conversationId: string;
-  eventName: string;
-  turnId: string;
-}
 ```
 
-### 5.5 Ingress 이벤트
+### 5.2 이벤트
 
-| 이벤트 | payload 핵심 필드 |
-|--------|------------------|
-| `ingress.received` | connectionName, payload |
-| `ingress.accepted` | connectionName, agentName, conversationId, turnId |
-| `ingress.rejected` | connectionName, reason |
-
----
+| 이벤트 | 목적 |
+| --- | --- |
+| `ingress.received` | payload 수신 관찰 |
+| `ingress.accepted` | agent/conversation/turnId 접수 관찰 |
+| `ingress.rejected` | verify/normalize/route 실패 원인 관찰 |
 
 ## 6. Realization Specification
 
-- **Module Boundaries:** Ingress 파이프라인은 코어 패키지의 독립 모듈. Connector/Connection 등록과 2단계 파이프라인 실행을 담당.
-- **Data Ownership:** ConnectionConfig는 createHarness 시 등록되며 런타임 중 변경 불가. Connector 인스턴스는 Connection당 하나.
-- **Concurrency Strategy:** `receive()`가 N개의 InboundEnvelope를 생성하면 각각 독립적으로 Route 단계를 실행한다. Turn 접수는 비동기이므로 receive()는 빠르게 반환된다.
-- **Failure Handling:**
-  - Ingress 단계 예외 (verify/normalize): reject로 처리, ingress.rejected 이벤트.
-  - Route 단계 실패 (매칭 실패, 접수 실패): reject로 처리, ingress.rejected 이벤트.
-  - 개별 envelope의 실패가 다른 envelope 처리에 영향을 주지 않는다 (fan-out 시).
-
----
+- Pipeline runtime: [pipeline.ts](/Users/channy/workspace/openharness/packages/core/src/ingress/pipeline.ts:1)
+- Routing logic: [router.ts](/Users/channy/workspace/openharness/packages/core/src/ingress/router.ts:1)
+- Runtime wiring: [create-harness.ts](/Users/channy/workspace/openharness/packages/core/src/create-harness.ts:1)
 
 ## 7. Dependency Map
 
-- **Depends On:** `@goondan/openharness-types` (Connector, InboundEnvelope, Connection 타입), execution-loop.md (dispatch 후 Turn 실행)
-- **Blocks:** 없음
-- **Parallelizable With:** execution-loop.md, conversation-state.md, extension-system.md
-
----
+- Depends On: `configuration-api`, `extension-system`, `execution-loop`
+- Blocks: Slack/webhook/cron style ingress adapter 구현
+- Parallelizable With: `surface/configuration-api`
 
 ## 8. Acceptance Criteria
 
-- **Given** SlackConnector와 `{ match: { event: "slack.message" }, agent: "assistant" }` 규칙이 있는 Connection에서, **When** `receive({ connectionName: "slack-main", payload: rawSlackBody })`를 호출하면, **Then** ingress → route가 순서대로 실행되고 accepted 결과가 반환된다. (AC-9)
-- **Given** 규칙에 `conversationIdProperty: "channel"`이 설정되고 envelope.properties에 `channel: "C123"`이 있으면, **When** Route 단계를 실행하면, **Then** conversationId가 "C123"으로 결정된다. (AC-10)
-- **Given** 규칙에 conversationId 관련 설정이 없고 Connector도 conversationId를 설정하지 않았으면, **When** Route 단계를 실행하면, **Then** reject된다. (AC-11)
-- **Given** normalize가 3개의 InboundEnvelope를 반환하면, **When** receive를 실행하면, **Then** 3건의 Route 단계가 각각 실행되고 IngressAcceptResult 3개가 반환된다.
-- **Given** 두 규칙이 모두 매칭 가능한 envelope에서, **When** Route를 실행하면, **Then** 선언 순서상 첫 번째 규칙이 적용된다.
-- **Given** receive()가 accepted를 반환한 직후, **When** Turn이 아직 실행 중이면, **Then** receive()는 이미 반환되어 있다 (비동기 접수).
-- **Given** Connection 수준 Extension이 ingress 미들웨어를 등록했으면, **When** receive를 실행하면, **Then** Connector.verify/normalize 전에 미들웨어가 실행된다.
-- **Given** 이미 정규화된 InboundEnvelope로 `dispatch()`를 호출하면, **When** 실행하면, **Then** ingress 단계를 건너뛰고 Route 단계만 실행된다.
+- Given connector가 envelope 3개를 normalize 하면, When `receive()`를 호출하면, Then envelope마다 route+dispatch가 독립 수행되고 accepted 결과 3개가 반환된다.
+- Given 두 개 이상의 rule이 모두 매칭되면, When route를 수행하면, Then 첫 번째 rule만 적용된다.
+- Given matched rule이 `conversationIdProperty`를 가지면, When 해당 property가 envelope에 있으면, Then 그 값이 conversationId가 된다.
+- Given envelope가 특정 agent로 route되면, When agent extension의 `route` middleware가 등록돼 있으면, Then 그 agent의 middleware만 실행된다.
+- Given `receive()`가 `turnId=X`를 반환하면, When 실제 Turn이 시작되면, Then `turn.start.turnId === X`다.
+- Given verify 또는 normalize가 실패하면, When `receive()`를 호출하면, Then 예외 대신 빈 배열과 `ingress.rejected` 이벤트가 발생한다.

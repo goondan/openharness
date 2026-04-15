@@ -48,7 +48,7 @@ describeE2E("E2E: Google Gemini API", () => {
             "turn",
             async (ctx, next) => {
               ctx.conversation.emit({
-                type: "append",
+                type: "appendSystem",
                 message: {
                   id: `sys-${Date.now()}`,
                   data: { role: "system", content: text },

@@ -311,7 +311,7 @@ describe("executeStep — streaming (FR-CORE-010)", () => {
 
     const conv = makeConversation();
     conv.emit({
-      type: "append",
+      type: "appendMessage",
       message: {
         id: "msg-1",
         data: { role: "user", content: "Hello" },

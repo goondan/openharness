@@ -15,6 +15,8 @@ import type { ProcessTurnOptions } from "@goondan/openharness-types";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
 
+type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -60,7 +62,7 @@ function extractText(envelope: InboundEnvelope): string {
 export async function executeTurn(
   agentName: string,
   input: string | InboundEnvelope,
-  options: ProcessTurnOptions | undefined,
+  options: ExecuteTurnOptions | undefined,
   deps: {
     llmClient: LlmClient;
     toolRegistry: ToolRegistry;
@@ -75,7 +77,7 @@ export async function executeTurn(
     deps;
 
   // 1. Generate unique turnId
-  const turnId = generateTurnId();
+  const turnId = options?.turnId ?? generateTurnId();
 
   // 2. Determine conversationId
   const conversationId =
@@ -195,10 +197,10 @@ export async function executeTurn(
     // 4. Set conversationState._turnActive = true (inside try so errors reset it)
     conversationState._turnActive = true;
 
-    // 5. FR-CORE-007: Append inbound message to conversation
+    // 5. FR-CORE-007: Record inbound message as a non-system conversation event
     const text = extractText(envelope);
     conversationState.emit({
-      type: "append",
+      type: "appendMessage",
       message: {
         id: generateMessageId(),
         data: {

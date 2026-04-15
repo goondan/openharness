@@ -39,20 +39,23 @@ export class ConversationStateImpl implements ConversationState {
     }
 
     // Validate event before appending (do NOT mutate events on error)
-    this._validateEvent(event);
+    validateEventAgainstMessages(event, this._messages);
 
     // Append to events stream
     this._events.push(event);
 
-    // Incremental optimization: for append events we can apply directly
-    // without full replay. For other mutations we do a full replay to
-    // ensure correctness (the messages array may need non-trivial changes).
-    if (event.type === "append") {
-      this._messages.push(event.message);
-    } else {
-      // Full replay for replace/remove/truncate
-      this._messages = replay(this._events);
+    if (event.type === "appendSystem") {
+      this._messages = insertSystemMessage(this._messages, event.message);
+      return;
     }
+
+    if (event.type === "appendMessage") {
+      this._messages = appendNonSystemMessage(this._messages, event.message);
+      return;
+    }
+
+    // Full replay for replace/remove/truncate
+    this._messages = replay(this._events);
   }
 
   /**
@@ -60,42 +63,10 @@ export class ConversationStateImpl implements ConversationState {
    * Throws if replay fails; preserves original state on error.
    */
   restore(events: MessageEvent[]): void {
-    // Attempt replay on the new events first — if it throws, existing state is preserved
     const newMessages = replay(events);
 
-    // Only mutate state after successful replay
     this._events = [...events];
     this._messages = newMessages;
-  }
-
-  /**
-   * Validates an event against the current message state before appending.
-   * Throws descriptive errors on invalid references.
-   */
-  private _validateEvent(event: MessageEvent): void {
-    if (event.type === "replace") {
-      const exists = this._messages.some((m) => m.id === event.messageId);
-      if (!exists) {
-        throw new Error(
-          `replace: message with id "${event.messageId}" does not exist in current conversation state.`,
-        );
-      }
-    } else if (event.type === "remove") {
-      const exists = this._messages.some((m) => m.id === event.messageId);
-      if (!exists) {
-        throw new Error(
-          `remove: message with id "${event.messageId}" does not exist in current conversation state.`,
-        );
-      }
-    }
-    if (event.type === "truncate") {
-      if (event.keepLast < 0) {
-        throw new Error(
-          `truncate: keepLast must be >= 0, got ${event.keepLast}.`,
-        );
-      }
-    }
-    // append is always valid
   }
 }
 
@@ -109,28 +80,26 @@ export function replay(events: readonly MessageEvent[]): Message[] {
   const messages: Message[] = [];
 
   for (const event of events) {
+    validateEventAgainstMessages(event, messages, "replay");
+
     switch (event.type) {
-      case "append": {
-        messages.push(event.message);
+      case "appendSystem": {
+        const nextMessages = insertSystemMessage(messages, event.message);
+        messages.splice(0, messages.length, ...nextMessages);
+        break;
+      }
+      case "appendMessage": {
+        const nextMessages = appendNonSystemMessage(messages, event.message);
+        messages.splice(0, messages.length, ...nextMessages);
         break;
       }
       case "replace": {
         const idx = messages.findIndex((m) => m.id === event.messageId);
-        if (idx === -1) {
-          throw new Error(
-            `replay: replace references non-existent message id "${event.messageId}".`,
-          );
-        }
         messages[idx] = event.message;
         break;
       }
       case "remove": {
         const idx = messages.findIndex((m) => m.id === event.messageId);
-        if (idx === -1) {
-          throw new Error(
-            `replay: remove references non-existent message id "${event.messageId}".`,
-          );
-        }
         messages.splice(idx, 1);
         break;
       }
@@ -145,6 +114,91 @@ export function replay(events: readonly MessageEvent[]): Message[] {
   }
 
   return messages;
+}
+
+function insertSystemMessage(messages: readonly Message[], message: Message): Message[] {
+  const next = [...messages];
+  const firstNonSystemIndex = next.findIndex((item) => item.data.role !== "system");
+
+  if (firstNonSystemIndex === -1) {
+    next.push(message);
+    return next;
+  }
+
+  next.splice(firstNonSystemIndex, 0, message);
+  return next;
+}
+
+function appendNonSystemMessage(messages: readonly Message[], message: Message): Message[] {
+  const next = [...messages];
+  next.push(message);
+  return next;
+}
+
+function validateEventAgainstMessages(
+  event: MessageEvent,
+  messages: readonly Message[],
+  source: "emit" | "replay" = "emit",
+): void {
+  switch (event.type) {
+    case "appendSystem":
+      assertSystemRole(event.message, event.type, source);
+      return;
+    case "appendMessage":
+      assertNonSystemRole(event.message, event.type, source);
+      return;
+    case "replace": {
+      const existing = messages.find((message) => message.id === event.messageId);
+      if (!existing) {
+        throw new Error(
+          `${source}: replace references non-existent message id "${event.messageId}".`,
+        );
+      }
+      if (existing.data.role !== event.message.data.role) {
+        throw new Error(
+          `${source}: replace cannot change role from "${existing.data.role}" to "${event.message.data.role}" for message id "${event.messageId}". ` +
+            "Use remove + appendSystem/appendMessage instead.",
+        );
+      }
+      return;
+    }
+    case "remove": {
+      const exists = messages.some((message) => message.id === event.messageId);
+      if (!exists) {
+        throw new Error(
+          `${source}: remove references non-existent message id "${event.messageId}".`,
+        );
+      }
+      return;
+    }
+    case "truncate":
+      if (event.keepLast < 0) {
+        throw new Error(
+          `${source}: truncate keepLast must be >= 0, got ${event.keepLast}.`,
+        );
+      }
+      return;
+  }
+}
+
+function assertSystemRole(message: Message, eventType: "appendSystem", source: "emit" | "replay"): void {
+  if (message.data.role !== "system") {
+    throw new Error(
+      `${source}: ${eventType} requires role "system", got "${message.data.role}".`,
+    );
+  }
+}
+
+function assertNonSystemRole(
+  message: Message,
+  eventType: "appendMessage",
+  source: "emit" | "replay",
+): void {
+  if (message.data.role === "system") {
+    throw new Error(
+      `${source}: ${eventType} does not accept role "system". Use appendSystem instead.`,
+    );
+  }
 }
 
 /**

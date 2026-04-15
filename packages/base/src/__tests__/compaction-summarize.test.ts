@@ -171,16 +171,16 @@ describe("CompactionSummarize", () => {
     const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
 
     // keepCount = floor(10/2) = 5, removeCount = 12 - 5 = 7
-    // Should have 7 remove events + 1 append event
+    // Should have 7 remove events + 1 appendSystem event
     const removeEvents = emitted.filter((e) => e.type === "remove");
-    const appendEvents = emitted.filter((e) => e.type === "append");
+    const appendEvents = emitted.filter((e) => e.type === "appendSystem");
 
     expect(removeEvents).toHaveLength(7);
     expect(appendEvents).toHaveLength(1);
 
     // The appended message should be a system summary
     const appendEvent = appendEvents[0];
-    if (appendEvent.type === "append") {
+    if (appendEvent.type === "appendSystem") {
       expect(appendEvent.message.data.role).toBe("system");
       expect(appendEvent.message.data.content).toContain("[Summary of earlier conversation]:");
       expect(appendEvent.message.metadata?.__createdBy).toBe("compaction-summarize");
@@ -234,8 +234,8 @@ describe("CompactionSummarize", () => {
     expect(ctx.llm.chat).toHaveBeenCalledOnce();
 
     const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-    const appendEvent = emitted.find((e) => e.type === "append");
-    if (appendEvent && appendEvent.type === "append") {
+    const appendEvent = emitted.find((e) => e.type === "appendSystem");
+    if (appendEvent && appendEvent.type === "appendSystem") {
       const content = appendEvent.message.data.content as string;
       // Should include the LLM-generated summary
       expect(content).toContain("LLM-generated summary of the conversation.");
@@ -271,8 +271,8 @@ describe("CompactionSummarize", () => {
     expect(summarizer.mock.calls[0][0]).toHaveLength(7);
 
     const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-    const appendEvent = emitted.find((e) => e.type === "append");
-    if (appendEvent && appendEvent.type === "append") {
+    const appendEvent = emitted.find((e) => e.type === "appendSystem");
+    if (appendEvent && appendEvent.type === "appendSystem") {
       const content = appendEvent.message.data.content as string;
       expect(content).toContain("Custom summary of 7 messages");
     }

@@ -84,7 +84,7 @@ export function CompactionSummarize(config: {
 
           // Prepend summary as a system message
           ctx.conversation.emit({
-            type: "append",
+            type: "appendSystem",
             message: {
               id: `summary-${randomUUID()}`,
               data: {

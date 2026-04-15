@@ -11,6 +11,7 @@ import type {
   ToolInfo,
   ExtensionInfo,
   ModelConfig,
+  EventPayload,
 } from "@goondan/openharness-types";
 import { resolveEnvDeep } from "./env.js";
 import { ConfigError } from "./errors.js";
@@ -31,11 +32,51 @@ const DEFAULT_MAX_STEPS = 25;
 
 export async function createHarness(config: HarnessConfig): Promise<HarnessRuntime> {
   const agentDepsMap = new Map<string, AgentDeps>();
+  const runtimeEventBus = new EventBus();
   const agentInfoMap: Record<string, AgentInfo> = {};
   const connectionInfoMap: Record<string, ConnectionInfo> = {};
+  const agentExtensionInfoMap = new Map<string, ExtensionInfo[]>();
+  const agentToolInfoMap = new Map<string, ToolInfo[]>();
+  const agentMaxStepsMap = new Map<string, number>();
 
   // -----------------------------------------------------------------------
-  // 1. Process agents
+  // 1. Precompute runtime metadata snapshots
+  // -----------------------------------------------------------------------
+
+  for (const [agentName, agentConfig] of Object.entries(config.agents)) {
+    const maxSteps = agentConfig.maxSteps ?? DEFAULT_MAX_STEPS;
+    const extensionInfos: ExtensionInfo[] = (agentConfig.extensions ?? []).map((e) => ({
+      name: e.name,
+    }));
+    const toolInfos: ToolInfo[] = (agentConfig.tools ?? []).map((t) => ({
+      name: t.name,
+      description: t.description,
+    }));
+
+    agentMaxStepsMap.set(agentName, maxSteps);
+    agentExtensionInfoMap.set(agentName, extensionInfos);
+    agentToolInfoMap.set(agentName, toolInfos);
+
+    agentInfoMap[agentName] = {
+      name: agentName,
+      model: { provider: agentConfig.model.provider, model: agentConfig.model.model },
+      extensionCount: extensionInfos.length,
+      toolCount: toolInfos.length,
+    };
+  }
+
+  if (config.connections) {
+    for (const [connName, connConfig] of Object.entries(config.connections)) {
+      connectionInfoMap[connName] = {
+        name: connName,
+        connectorName: connConfig.connector.name,
+        ruleCount: connConfig.rules.length,
+      };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 2. Process agents
   // -----------------------------------------------------------------------
 
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {
@@ -53,25 +94,11 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     // Create per-agent infrastructure
     const toolRegistry = new ToolRegistry();
     const eventBus = new EventBus();
+    eventBus.tap((payload: EventPayload) => {
+      runtimeEventBus.emit(payload.type, payload);
+    });
     const middlewareRegistry = new MiddlewareRegistry();
-    const maxSteps = agentConfig.maxSteps ?? DEFAULT_MAX_STEPS;
-
-    // Build runtime info for extensions
-    const extensionInfos: ExtensionInfo[] = (agentConfig.extensions ?? []).map((e) => ({
-      name: e.name,
-    }));
-    const toolInfos: ToolInfo[] = (agentConfig.tools ?? []).map((t) => ({
-      name: t.name,
-      description: t.description,
-    }));
-
-    // Build agent info for all agents (needed by RuntimeInfo)
-    agentInfoMap[agentName] = {
-      name: agentName,
-      model: { provider: agentConfig.model.provider, model: agentConfig.model.model },
-      extensionCount: (agentConfig.extensions ?? []).length,
-      toolCount: (agentConfig.tools ?? []).length,
-    };
+    const maxSteps = agentMaxStepsMap.get(agentName) ?? DEFAULT_MAX_STEPS;
 
     // Register extensions
     if (agentConfig.extensions && agentConfig.extensions.length > 0) {
@@ -79,8 +106,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
         agent: {
           name: agentName,
           model: { provider: agentConfig.model.provider, model: agentConfig.model.model },
-          extensions: extensionInfos,
-          tools: toolInfos,
+          extensions: agentExtensionInfoMap.get(agentName) ?? [],
+          tools: agentToolInfoMap.get(agentName) ?? [],
           maxSteps,
         },
         agents: agentInfoMap,
@@ -117,20 +144,6 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   }
 
   // -----------------------------------------------------------------------
-  // 2. Build connection info
-  // -----------------------------------------------------------------------
-
-  if (config.connections) {
-    for (const [connName, connConfig] of Object.entries(config.connections)) {
-      connectionInfoMap[connName] = {
-        name: connName,
-        connectorName: connConfig.connector.name,
-        ruleCount: connConfig.rules.length,
-      };
-    }
-  }
-
-  // -----------------------------------------------------------------------
   // 3. Create IngressPipeline
   // -----------------------------------------------------------------------
 
@@ -138,9 +151,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     string,
     { connector: Connector; rules: RoutingRule[]; connectionMiddleware: MiddlewareRegistry }
   >();
-
-  // Global agent-level middleware (shared across ingress pipeline)
-  const agentMiddleware = new MiddlewareRegistry();
+  const ingressEventBus = new EventBus();
+  ingressEventBus.tap((payload: EventPayload) => {
+    runtimeEventBus.emit(payload.type, payload);
+  });
 
   if (config.connections) {
     for (const [connName, connConfig] of Object.entries(config.connections)) {
@@ -163,7 +177,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
         registerExtensions(connConfig.extensions, {
           toolRegistry: new ToolRegistry(),
-          eventBus: new EventBus(),
+          eventBus: ingressEventBus,
           middlewareRegistry: connectionMiddleware,
           runtimeInfo,
           conversationState,
@@ -181,9 +195,6 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   const registeredAgents = new Set(Object.keys(config.agents));
 
   // Create the runtime first (we need a reference for dispatchTurn)
-  // Use a shared event bus for the ingress pipeline
-  const ingressEventBus = new EventBus();
-
   // Build the runtime so dispatchTurn can call processTurn
   // We use a late-binding approach: create pipeline with a callback that
   // references the runtime (which is created after the pipeline).
@@ -191,7 +202,12 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
   const ingressPipeline = new IngressPipeline({
     connections: connectionsMap,
-    agentMiddleware,
+    agentMiddlewareByAgent: new Map(
+      Array.from(agentDepsMap.entries()).map(([agentName, deps]) => [
+        agentName,
+        deps.middlewareRegistry,
+      ]),
+    ),
     registeredAgents,
     eventBus: ingressEventBus,
     dispatchTurn: (turnId, agentName, envelope, conversationId) => {
@@ -200,7 +216,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
       // Fire-and-forget: start turn asynchronously
       runtimeRef
-        .processTurn(agentName, envelope, { conversationId })
+        .dispatchTurn(agentName, envelope, { conversationId, turnId })
         .catch((err) => {
           ingressEventBus.emit("turn.error", {
             type: "turn.error",
@@ -213,7 +229,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     },
   });
 
-  const runtime = new HarnessRuntimeImpl(agentDepsMap, ingressPipeline);
+  const runtime = new HarnessRuntimeImpl(agentDepsMap, ingressPipeline, runtimeEventBus);
   runtimeRef = runtime;
 
   return runtime;

@@ -212,6 +212,38 @@ describe("runCommand agent-selection", () => {
     expect(mockHarness.processTurn).toHaveBeenCalledWith("onlyAgent", "hello", expect.anything());
   });
 
+  it("passes --max-steps override into the selected agent config", async () => {
+    const { loadConfig } = await import("../config-loader.js");
+    const { createHarness } = await import("@goondan/openharness");
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      agents: {
+        onlyAgent: {
+          model: { provider: "openai", model: "gpt-4o", apiKey: "test-key" },
+        },
+      },
+    } as never);
+
+    const mockHarness = {
+      processTurn: vi.fn().mockResolvedValue({ text: "hello" }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(createHarness).mockResolvedValue(mockHarness as never);
+
+    const { runCommand } = await import("../commands/run.js");
+    await runCommand("hello", { config: "/fake/harness.config.ts", maxSteps: 7 });
+
+    expect(createHarness).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: {
+          onlyAgent: expect.objectContaining({
+            maxSteps: 7,
+          }),
+        },
+      }),
+    );
+  });
+
   it("multiple agents without --agent flag calls process.exit(2)", async () => {
     const { loadConfig } = await import("../config-loader.js");
 

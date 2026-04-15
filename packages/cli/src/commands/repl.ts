@@ -58,7 +58,21 @@ export async function replCommand(options: ReplOptions): Promise<void> {
   // Create harness
   let harness;
   try {
-    harness = await createHarness(config);
+    const effectiveConfig =
+      options.maxSteps === undefined
+        ? config
+        : {
+            ...config,
+            agents: {
+              ...config.agents,
+              [agentName]: {
+                ...config.agents[agentName]!,
+                maxSteps: options.maxSteps,
+              },
+            },
+          };
+
+    harness = await createHarness(effectiveConfig);
   } catch (err) {
     console.error(`Error creating harness: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

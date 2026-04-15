@@ -12,6 +12,7 @@ export class EventBus {
   // Map from event type → set of listeners
   private readonly _listeners: Map<EventType, Set<(payload: EventPayload) => void>> =
     new Map();
+  private readonly _tapListeners: Set<(payload: EventPayload) => void> = new Set();
 
   on<T extends EventType>(event: T, listener: ListenerForType<T>): UnsubscribeFn {
     let listeners = this._listeners.get(event);
@@ -29,9 +30,20 @@ export class EventBus {
 
   emit<T extends EventType>(event: T, payload: Extract<EventPayload, { type: T }>): void {
     const listeners = this._listeners.get(event);
-    if (!listeners) return;
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(payload);
+        } catch (err) {
+          console.warn(
+            `[EventBus] Listener for "${event}" threw an error:`,
+            err
+          );
+        }
+      }
+    }
 
-    for (const listener of listeners) {
+    for (const listener of this._tapListeners) {
       try {
         listener(payload);
       } catch (err) {
@@ -41,5 +53,13 @@ export class EventBus {
         );
       }
     }
+  }
+
+  tap(listener: (payload: EventPayload) => void): UnsubscribeFn {
+    this._tapListeners.add(listener);
+
+    return () => {
+      this._tapListeners.delete(listener);
+    };
   }
 }

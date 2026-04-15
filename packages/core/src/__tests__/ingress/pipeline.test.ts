@@ -56,7 +56,7 @@ interface MakePipelineOptions {
   agentNames?: string[];
   connectionName?: string;
   connectionMiddleware?: MiddlewareRegistry;
-  agentMiddleware?: MiddlewareRegistry;
+  agentMiddlewareByAgent?: Map<string, MiddlewareRegistry>;
   dispatchTurn?: (turnId: string, agentName: string, envelope: InboundEnvelope, conversationId: string) => void;
 }
 
@@ -67,7 +67,9 @@ function makePipeline(opts: MakePipelineOptions = {}) {
     agentNames = ["agent1"],
     connectionName = "conn1",
     connectionMiddleware = new MiddlewareRegistry(),
-    agentMiddleware = new MiddlewareRegistry(),
+    agentMiddlewareByAgent = new Map(
+      agentNames.map((agentName) => [agentName, new MiddlewareRegistry()]),
+    ),
     dispatchTurn = vi.fn(),
   } = opts;
 
@@ -88,7 +90,7 @@ function makePipeline(opts: MakePipelineOptions = {}) {
 
   const pipeline = new IngressPipeline({
     connections,
-    agentMiddleware,
+    agentMiddlewareByAgent,
     registeredAgents,
     eventBus,
     dispatchTurn,
@@ -349,7 +351,9 @@ describe("IngressPipeline", () => {
       }
     );
 
-    const { pipeline } = makePipeline({ agentMiddleware });
+    const { pipeline } = makePipeline({
+      agentMiddlewareByAgent: new Map([["agent1", agentMiddleware]]),
+    });
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
@@ -392,7 +396,9 @@ describe("IngressPipeline", () => {
       }
     );
 
-    const { pipeline } = makePipeline({ agentMiddleware });
+    const { pipeline } = makePipeline({
+      agentMiddlewareByAgent: new Map([["agent1", agentMiddleware]]),
+    });
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
@@ -424,7 +430,10 @@ describe("IngressPipeline", () => {
 
     const pipeline = new IngressPipeline({
       connections,
-      agentMiddleware: new MiddlewareRegistry(),
+      agentMiddlewareByAgent: new Map([
+        ["agent1", new MiddlewareRegistry()],
+        ["agent2", new MiddlewareRegistry()],
+      ]),
       registeredAgents: new Set(["agent1", "agent2"]),
       eventBus: new EventBus(),
       dispatchTurn: vi.fn(),

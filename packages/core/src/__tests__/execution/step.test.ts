@@ -11,6 +11,7 @@ import type {
   LlmResponse,
   ToolDefinition,
   Message,
+  MessageEvent,
 } from "@goondan/openharness-types";
 
 // -----------------------------------------------------------------------
@@ -433,8 +434,11 @@ describe("executeStep", () => {
     const conv = makeConversation();
     // Pre-populate conversation with a message
     conv.emit({
-      type: "append",
-      message: makeMessage("msg-1", "user", "Hello"),
+      type: "appendMessage",
+      message: makeMessage("msg-1", "user", "Hello") as Extract<
+        MessageEvent,
+        { type: "appendMessage" }
+      >["message"],
     });
 
     const ctx = makeStepContext({ conversation: conv });

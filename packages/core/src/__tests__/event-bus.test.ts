@@ -180,4 +180,28 @@ describe("EventBus", () => {
     expect(turnCalls).toHaveLength(1);
     expect(stepCalls).toHaveLength(0);
   });
+
+  it("tap receives every emitted event regardless of type", () => {
+    const received: EventPayload[] = [];
+
+    bus.tap((payload) => {
+      received.push(payload);
+    });
+
+    bus.emit("turn.start", {
+      type: "turn.start",
+      turnId: "t1",
+      agentName: "agent",
+      conversationId: "c1",
+    });
+    bus.emit("step.start", {
+      type: "step.start",
+      turnId: "t1",
+      agentName: "agent",
+      conversationId: "c1",
+      stepNumber: 1,
+    });
+
+    expect(received.map((payload) => payload.type)).toEqual(["turn.start", "step.start"]);
+  });
 });

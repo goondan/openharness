@@ -27,7 +27,7 @@ export interface IngressPipelineConfig {
       connectionMiddleware: MiddlewareRegistry;
     }
   >;
-  agentMiddleware: MiddlewareRegistry;
+  agentMiddlewareByAgent: Map<string, MiddlewareRegistry>;
   registeredAgents: Set<string>;
   eventBus: EventBus;
   /**
@@ -209,31 +209,36 @@ export class IngressPipeline implements IngressApi {
     rules: RoutingRule[],
     receivedAt: string
   ): Promise<IngressAcceptResult | null> {
-    const { agentMiddleware, registeredAgents, eventBus, dispatchTurn } =
+    const { agentMiddlewareByAgent, registeredAgents, eventBus, dispatchTurn } =
       this._config;
 
-    // "route" middleware chain handles routing only — dispatch happens after
-    const routeCore = async (ctx: RouteContext): Promise<RouteResult> => {
-      const routeMatch = routeEnvelope(ctx.envelope, rules, registeredAgents);
-      if (!routeMatch.matched) {
-        throw new RouteRejectedError(routeMatch.reason);
-      }
+    const routeMatch = routeEnvelope(envelope, rules, registeredAgents);
+    if (!routeMatch.matched) {
+      eventBus.emit("ingress.rejected", {
+        type: "ingress.rejected",
+        connectionName,
+        reason: routeMatch.reason,
+      });
+      return null;
+    }
 
-      const { agentName, conversationId } = routeMatch;
-
-      return {
-        accepted: true,
-        connectionName: ctx.connectionName,
-        agentName,
-        conversationId,
-        eventName: ctx.envelope.name,
-        turnId: randomUUID(),
-      };
+    const baseResult: RouteResult = {
+      accepted: true,
+      connectionName,
+      agentName: routeMatch.agentName,
+      conversationId: routeMatch.conversationId,
+      eventName: envelope.name,
+      turnId: `turn-${randomUUID()}`,
     };
 
-    const routeChain = agentMiddleware.buildChain<RouteContext, RouteResult>(
+    const routeMiddleware =
+      agentMiddlewareByAgent.get(routeMatch.agentName) ?? null;
+    const routeChain = (routeMiddleware ?? {
+      buildChain: <Ctx, Res>(_level: string, coreHandler: (ctx: Ctx) => Promise<Res>) =>
+        (ctx: Ctx) => coreHandler(ctx),
+    }).buildChain<RouteContext, RouteResult>(
       "route",
-      routeCore
+      async () => baseResult,
     );
 
     let result: RouteResult;
@@ -246,6 +251,24 @@ export class IngressPipeline implements IngressApi {
         type: "ingress.rejected",
         connectionName,
         reason,
+      });
+      return null;
+    }
+
+    if (!registeredAgents.has(result.agentName)) {
+      eventBus.emit("ingress.rejected", {
+        type: "ingress.rejected",
+        connectionName,
+        reason: `Agent "${result.agentName}" is not registered`,
+      });
+      return null;
+    }
+
+    if (!result.conversationId) {
+      eventBus.emit("ingress.rejected", {
+        type: "ingress.rejected",
+        connectionName,
+        reason: "Route middleware returned an empty conversationId",
       });
       return null;
     }
@@ -272,16 +295,5 @@ export class IngressPipeline implements IngressApi {
     });
 
     return acceptResult;
-  }
-}
-
-// -----------------------------------------------------------------------
-// Internal error type
-// -----------------------------------------------------------------------
-
-class RouteRejectedError extends Error {
-  constructor(reason: string) {
-    super(reason);
-    this.name = "RouteRejectedError";
   }
 }

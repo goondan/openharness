@@ -44,6 +44,12 @@ vi.mock("../models/index.js", () => ({
 }));
 
 describe("createHarness", () => {
+  beforeEach(async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockReset();
+    vi.mocked(createLlmClient).mockImplementation(() => mockLlmClient());
+  });
+
   // -----------------------------------------------------------------------
   // Test 1: createHarness with minimal config → returns HarnessRuntime
   // -----------------------------------------------------------------------
@@ -57,6 +63,10 @@ describe("createHarness", () => {
     // Ingress pipeline is functional
     expect(runtime.ingress).toBeDefined();
     expect(typeof runtime.ingress.receive).toBe("function");
+
+    // Runtime events surface is functional
+    expect(runtime.events).toBeDefined();
+    expect(typeof runtime.events.on).toBe("function");
 
     // Control surface is functional
     expect(runtime.control).toBeDefined();
@@ -349,5 +359,322 @@ describe("createHarness", () => {
     expect(result).toBe(config);
     // No mutation
     expect(result).toEqual(config);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 11: runtime snapshots include all agents and connections
+  // -----------------------------------------------------------------------
+  it("builds complete api.runtime snapshots before registering extensions", async () => {
+    const snapshots: Array<{
+      agentName: string;
+      agentKeys: string[];
+      connectionKeys: string[];
+    }> = [];
+
+    const captureRuntime = (name: string): Extension => ({
+      name,
+      register(api) {
+        snapshots.push({
+          agentName: api.runtime.agent.name,
+          agentKeys: Object.keys(api.runtime.agents).sort(),
+          connectionKeys: Object.keys(api.runtime.connections).sort(),
+        });
+      },
+    });
+
+    const runtime = await createHarness({
+      agents: {
+        agentA: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-a" },
+          extensions: [captureRuntime("capture-a")],
+        },
+        agentB: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-b" },
+          extensions: [captureRuntime("capture-b")],
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async () => ({
+              name: "message",
+              content: [{ type: "text", text: "hello" }],
+              properties: {},
+              conversationId: "conv-1",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: new Date().toISOString(),
+              },
+            }),
+          },
+          rules: [{ match: { event: "message" }, agent: "agentA" }],
+        },
+      },
+    });
+
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots).toEqual([
+      {
+        agentName: "agentA",
+        agentKeys: ["agentA", "agentB"],
+        connectionKeys: ["inbound"],
+      },
+      {
+        agentName: "agentB",
+        agentKeys: ["agentA", "agentB"],
+        connectionKeys: ["inbound"],
+      },
+    ]);
+
+    await runtime.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 12: conversation state is isolated per agent
+  // -----------------------------------------------------------------------
+  it("isolates conversation state by agent even when conversationId is shared", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+
+    const agentAClient: LlmClient = {
+      chat: vi.fn().mockResolvedValue({ text: "agent-a-response" }),
+    };
+    const agentBClient: LlmClient = {
+      chat: vi.fn().mockResolvedValue({ text: "agent-b-response" }),
+    };
+
+    vi.mocked(createLlmClient)
+      .mockReturnValueOnce(agentAClient)
+      .mockReturnValueOnce(agentBClient);
+
+    const runtime = await createHarness({
+      agents: {
+        agentA: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-a" },
+        },
+        agentB: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-b" },
+        },
+      },
+    });
+
+    await runtime.processTurn("agentA", "hello from agent A", {
+      conversationId: "shared-conv",
+    });
+    await runtime.processTurn("agentB", "hello from agent B", {
+      conversationId: "shared-conv",
+    });
+
+    const [messagesForAgentB] = vi.mocked(agentBClient.chat).mock.calls[0] as [
+      Message[],
+      unknown,
+      unknown,
+    ];
+
+    expect(messagesForAgentB).toHaveLength(1);
+    expect(messagesForAgentB[0]?.data.role).toBe("user");
+    expect(messagesForAgentB[0]?.data.content).toBe("hello from agent B");
+
+    await runtime.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 13: route middleware comes from the matched agent only
+  // -----------------------------------------------------------------------
+  it("runs route middleware only for the matched agent's extensions", async () => {
+    const routeCalls: string[] = [];
+
+    const routeExtension = (agentLabel: string): Extension => ({
+      name: `route-${agentLabel}`,
+      register(api) {
+        api.pipeline.register("route", async (_ctx, next) => {
+          routeCalls.push(agentLabel);
+          return next();
+        });
+      },
+    });
+
+    const runtime = await createHarness({
+      agents: {
+        agentA: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-a" },
+          extensions: [routeExtension("agentA")],
+        },
+        agentB: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key-b" },
+          extensions: [routeExtension("agentB")],
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async () => ({
+              name: "message",
+              content: [{ type: "text", text: "hello" }],
+              properties: {},
+              conversationId: "conv-1",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: new Date().toISOString(),
+              },
+            }),
+          },
+          rules: [{ match: { event: "message" }, agent: "agentB" }],
+        },
+      },
+    });
+
+    const results = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "hello" },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(routeCalls).toEqual(["agentB"]);
+
+    await runtime.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 14: ingress accepted turnId matches turn.start turnId
+  // -----------------------------------------------------------------------
+  it("reuses the ingress turnId for the actual turn execution", async () => {
+    let acceptedTurnId: string | undefined;
+    let startedTurnId: string | undefined;
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key" },
+          extensions: [
+            {
+              name: "capture-turn-start",
+              register(api) {
+                api.on("turn.start", (payload) => {
+                  startedTurnId = (payload as { turnId: string }).turnId;
+                });
+              },
+            },
+          ],
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async () => ({
+              name: "message",
+              content: [{ type: "text", text: "hello" }],
+              properties: {},
+              conversationId: "turn-id-conv",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: new Date().toISOString(),
+              },
+            }),
+          },
+          extensions: [
+            {
+              name: "capture-ingress-accepted",
+              register(api) {
+                api.on("ingress.accepted", (payload) => {
+                  acceptedTurnId = (payload as { turnId: string }).turnId;
+                });
+              },
+            },
+          ],
+          rules: [{ match: { event: "message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const results = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "hello" },
+    });
+
+    await Promise.resolve();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.turnId).toBeTruthy();
+    expect(acceptedTurnId).toBe(results[0]?.turnId);
+    expect(startedTurnId).toBe(results[0]?.turnId);
+
+    await runtime.close();
+  });
+
+  it("runtime.events receives processTurn lifecycle events", async () => {
+    const runtime = await createHarness(minimalConfig());
+    const observed: TurnResult[] = [];
+
+    const unsubscribe = runtime.events.on("turn.done", (payload) => {
+      observed.push(payload.result);
+    });
+
+    const result = await runtime.processTurn("default", "capture runtime events");
+
+    unsubscribe();
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.turnId).toBe(result.turnId);
+    expect(observed[0]?.conversationId).toBe(result.conversationId);
+
+    await runtime.close();
+  });
+
+  it("runtime.events receives ingress lifecycle events", async () => {
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key" },
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async () => ({
+              name: "message",
+              content: [{ type: "text", text: "hello" }],
+              properties: {},
+              conversationId: "runtime-events-conv",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: new Date().toISOString(),
+              },
+            }),
+          },
+          rules: [{ match: { event: "message" }, agent: "default" }],
+        },
+      },
+    });
+    const receivedTypes: string[] = [];
+
+    const unsubReceived = runtime.events.on("ingress.received", (payload) => {
+      receivedTypes.push(payload.type);
+    });
+    const unsubAccepted = runtime.events.on("ingress.accepted", (payload) => {
+      receivedTypes.push(payload.type);
+    });
+
+    const results = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "hello" },
+    });
+
+    await Promise.resolve();
+
+    unsubReceived();
+    unsubAccepted();
+
+    expect(results).toHaveLength(1);
+    expect(receivedTypes).toEqual(["ingress.received", "ingress.accepted"]);
+
+    await runtime.close();
   });
 });
