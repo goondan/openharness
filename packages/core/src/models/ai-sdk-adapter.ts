@@ -16,9 +16,9 @@ import type {
   LlmResponse,
   Message,
   ToolDefinition,
-  JsonObject,
 } from "@goondan/openharness-types";
 import { isJsonSchemaWrapper } from "@goondan/openharness-types";
+import { normalizeToolArgs } from "../tool-args.js";
 
 type ProviderFactory = {
   languageModel: (modelId: string) => LanguageModel;
@@ -139,7 +139,7 @@ export function createAiSdkClient(
           ? result.toolCalls.map((tc) => ({
               toolCallId: tc.toolCallId,
               toolName: tc.toolName,
-              args: (tc.input ?? {}) as JsonObject,
+              args: normalizeToolArgs(tc.input ?? {}),
             }))
           : undefined;
 
@@ -207,7 +207,7 @@ export function createAiSdkClient(
             ? toolCalls.map((tc) => ({
                 toolCallId: tc.toolCallId,
                 toolName: tc.toolName,
-                args: (tc.input ?? {}) as JsonObject,
+                args: normalizeToolArgs(tc.input ?? {}),
               }))
             : undefined,
       };

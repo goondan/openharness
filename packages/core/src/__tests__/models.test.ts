@@ -243,6 +243,44 @@ describe("AI SDK adapter chat()", () => {
     });
   });
 
+  it("decodes JSON-string tool call input from generateText", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "",
+          toolCalls: [
+            {
+              toolCallId: "toolu_01",
+              toolName: "get_weather",
+              input: JSON.stringify({ location: "NYC" }),
+            },
+          ],
+          finishReason: "tool-calls",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls![0]).toEqual({
+      toolCallId: "toolu_01",
+      toolName: "get_weather",
+      args: { location: "NYC" },
+    });
+  });
+
   it("passes messages as ModelMessage[] to generateText", async () => {
     let capturedArgs: Record<string, unknown> | undefined;
     vi.doMock("ai", async (importOriginal) => {

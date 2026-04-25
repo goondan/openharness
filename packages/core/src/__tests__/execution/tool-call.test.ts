@@ -44,6 +44,10 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
   };
 }
 
+function unsafeToolArgs(value: unknown): ToolCallContext["toolArgs"] {
+  return value as ToolCallContext["toolArgs"];
+}
+
 function makeTool(
   name: string,
   handler?: ToolDefinition["handler"],
@@ -136,6 +140,43 @@ describe("executeToolCall", () => {
 
     expect(result.type).toBe("error");
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("recovers JSON-string args before validation and handler invocation", async () => {
+    let capturedArgs: unknown;
+    const handler = vi.fn(async (args): Promise<ToolResult> => {
+      capturedArgs = args;
+      return { type: "text", text: "hello Alice" };
+    });
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(
+      makeTool("strict_tool", handler, {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        additionalProperties: false,
+      })
+    );
+
+    const eventBus = new EventBus();
+    const startListener = vi.fn();
+    const doneListener = vi.fn();
+    eventBus.on("tool.start", startListener);
+    eventBus.on("tool.done", doneListener);
+
+    const ctx = makeToolCallContext({
+      toolName: "strict_tool",
+      toolArgs: unsafeToolArgs(JSON.stringify({ name: "Alice" })),
+    });
+    const deps = makeDeps({ toolRegistry, eventBus });
+
+    const result = await executeToolCall("call-json-string", ctx, deps);
+
+    expect(result).toEqual({ type: "text", text: "hello Alice" });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(capturedArgs).toEqual({ name: "Alice" });
+    expect(startListener.mock.calls[0][0].args).toEqual({ name: "Alice" });
+    expect(doneListener.mock.calls[0][0].args).toEqual({ name: "Alice" });
   });
 
   // Test 4: ToolCall middleware wraps execution

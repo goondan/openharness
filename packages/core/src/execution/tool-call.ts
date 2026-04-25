@@ -2,6 +2,7 @@ import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharn
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import { normalizeToolArgs } from "../tool-args.js";
 
 /**
  * Execute a single tool call with full middleware chain, validation, event emission.
@@ -24,6 +25,8 @@ export async function executeToolCall(
 ): Promise<ToolResult> {
   const { toolRegistry, middlewareRegistry, eventBus } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
+  const normalizedToolArgs = normalizeToolArgs(toolArgs);
+  const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
 
   // 1. Emit tool.start before building / running chain
   eventBus.emit("tool.start", {
@@ -34,7 +37,7 @@ export async function executeToolCall(
     stepNumber,
     toolCallId,
     toolName,
-    args: toolArgs,
+    args: normalizedToolArgs,
   });
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
@@ -46,7 +49,7 @@ export async function executeToolCall(
     }
 
     // Validate args via JSON Schema
-    const validation = toolRegistry.validate(toolName, toolArgs);
+    const validation = toolRegistry.validate(toolName, normalizedToolArgs);
     if (!validation.valid) {
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
     }
@@ -59,7 +62,7 @@ export async function executeToolCall(
     };
 
     // Call the tool handler — errors propagate up
-    return await tool.handler(toolArgs, toolContext);
+    return await tool.handler(normalizedToolArgs, toolContext);
   };
 
   // 3. Build the full middleware chain
@@ -67,7 +70,7 @@ export async function executeToolCall(
 
   // 4. Run the chain, handling errors
   try {
-    const result = await chain(ctx);
+    const result = await chain(normalizedCtx);
 
     // Emit tool.done on success
     eventBus.emit("tool.done", {
@@ -78,7 +81,7 @@ export async function executeToolCall(
       stepNumber,
       toolCallId,
       toolName,
-      args: toolArgs,
+      args: normalizedToolArgs,
       result,
     });
 
@@ -95,7 +98,7 @@ export async function executeToolCall(
       stepNumber,
       toolCallId,
       toolName,
-      args: toolArgs,
+      args: normalizedToolArgs,
       error,
     });
 
