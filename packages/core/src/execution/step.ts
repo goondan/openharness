@@ -190,6 +190,7 @@ export async function executeStep(
       finishReason: llmResponse.finishReason,
       rawFinishReason: llmResponse.rawFinishReason,
       toolCalls: toolCallResults,
+      ...(llmResponse.usage ? { usage: llmResponse.usage } : {}),
     };
   };
 

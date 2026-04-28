@@ -208,6 +208,56 @@ describe("AI SDK adapter chat()", () => {
     expect(response.rawFinishReason).toBe("stop");
   });
 
+  it("maps generateText usage into LlmResponse usage", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "usage response",
+          toolCalls: [],
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+            inputTokenDetails: {
+              cacheReadTokens: 3,
+              cacheWriteTokens: 2,
+            },
+            outputTokenDetails: {
+              reasoningTokens: 4,
+            },
+          },
+          finishReason: "stop",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      inputTokenDetails: {
+        cacheReadTokens: 3,
+        cacheWriteTokens: 2,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 4,
+      },
+    });
+  });
+
   it("returns toolCalls when generateText responds with tool calls", async () => {
     vi.doMock("ai", async (importOriginal) => {
       const actual = await importOriginal<typeof import("ai")>();

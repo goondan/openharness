@@ -122,6 +122,33 @@ describe("executeStep", () => {
     expect(llmClient.chat).toHaveBeenCalledOnce();
   });
 
+  it("propagates LLM usage into StepResult and step.done", async () => {
+    const usage = {
+      inputTokens: 7,
+      outputTokens: 4,
+      totalTokens: 11,
+      inputTokenDetails: {
+        cacheReadTokens: 2,
+        cacheWriteTokens: 1,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 3,
+      },
+    };
+    const llmClient = makeLlmClient({ text: "Hello, world!", usage });
+    const eventBus = new EventBus();
+    const doneListener = vi.fn();
+    eventBus.on("step.done", doneListener);
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, eventBus });
+
+    const result = await executeStep(ctx, deps);
+
+    expect(result.usage).toEqual(usage);
+    expect(doneListener).toHaveBeenCalledOnce();
+    expect(doneListener.mock.calls[0][0].result.usage).toEqual(usage);
+  });
+
   // Test 2: LLM returns tool calls → each tool executed via executeToolCall
   it("LLM returns tool calls → each tool is executed", async () => {
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "tool result" }));

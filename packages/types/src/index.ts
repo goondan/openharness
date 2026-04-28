@@ -58,6 +58,7 @@ export type {
   StepContext,
   ToolCallContext,
   ToolCallSummary,
+  LlmUsage,
   StepSummary,
   TurnResult,
   StepResult,

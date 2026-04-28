@@ -4,6 +4,7 @@ import {
   tool as aiTool,
   jsonSchema,
   type Tool as AiSdkTool,
+  type LanguageModelUsage,
 } from "ai";
 import type { AnthropicProviderSettings } from "@ai-sdk/anthropic";
 import type { GoogleGenerativeAIProviderSettings } from "@ai-sdk/google";
@@ -15,6 +16,7 @@ import type {
   LlmStreamCallbacks,
   LlmResponse,
   LlmFinishReason,
+  LlmUsage,
   Message,
   ToolDefinition,
 } from "@goondan/openharness-types";
@@ -104,6 +106,29 @@ function normalizeFinishReason(value: unknown): LlmFinishReason | undefined {
     : undefined;
 }
 
+function toLlmUsage(usage: LanguageModelUsage | undefined): LlmUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    inputTokenDetails: usage.inputTokenDetails
+      ? {
+          cacheReadTokens: usage.inputTokenDetails.cacheReadTokens,
+          cacheWriteTokens: usage.inputTokenDetails.cacheWriteTokens,
+        }
+      : undefined,
+    outputTokenDetails: usage.outputTokenDetails
+      ? {
+          reasoningTokens: usage.outputTokenDetails.reasoningTokens,
+        }
+      : undefined,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public: createAiSdkClient
 // ---------------------------------------------------------------------------
@@ -159,11 +184,14 @@ export function createAiSdkClient(
             }))
           : undefined;
 
+      const usage = toLlmUsage(result.usage);
+
       return {
         text,
         toolCalls,
         finishReason: normalizeFinishReason(result.finishReason),
         rawFinishReason: result.rawFinishReason,
+        ...(usage ? { usage } : {}),
       };
     },
 
@@ -222,6 +250,7 @@ export function createAiSdkClient(
       const toolCalls = await result.toolCalls;
       const finishReason = await result.finishReason;
       const rawFinishReason = await result.rawFinishReason;
+      const usage = toLlmUsage(await result.usage);
 
       return {
         text: text && text.trim().length > 0 ? text : undefined,
@@ -235,6 +264,7 @@ export function createAiSdkClient(
                 args: normalizeToolArgs(tc.input ?? {}),
               }))
             : undefined,
+        ...(usage ? { usage } : {}),
       };
     },
   };

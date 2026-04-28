@@ -104,6 +104,61 @@ describe("AI SDK adapter streamChat()", () => {
     expect(response.rawFinishReason).toBe("stop");
   });
 
+  it("maps streamText usage into LlmResponse usage", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        streamText: vi.fn().mockReturnValue({
+          fullStream: createMockFullStream([]),
+          text: Promise.resolve("usage response"),
+          toolCalls: Promise.resolve([]),
+          usage: Promise.resolve({
+            inputTokens: 12,
+            outputTokens: 8,
+            totalTokens: 20,
+            inputTokenDetails: {
+              cacheReadTokens: 6,
+              cacheWriteTokens: 1,
+            },
+            outputTokenDetails: {
+              reasoningTokens: 5,
+            },
+          }),
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+
+    const response = await client.streamChat!(
+      mockMessages,
+      [],
+      abortSignal,
+      {},
+    );
+
+    expect(response.usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 8,
+      totalTokens: 20,
+      inputTokenDetails: {
+        cacheReadTokens: 6,
+        cacheWriteTokens: 1,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 5,
+      },
+    });
+  });
+
   it("invokes onToolCallDelta callback for tool-input-delta parts, resolving toolName from tool-input-start", async () => {
     // ai-sdk v6 TextStreamPart: tool-input-start uses `id` (not `toolCallId`),
     // tool-input-delta uses `id` + `delta` (not `toolCallId` + `inputTextDelta`)

@@ -6,6 +6,7 @@ import type {
   StepSummary,
   InboundEnvelope,
   LlmClient,
+  LlmUsage,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -37,6 +38,53 @@ function extractText(envelope: InboundEnvelope): string {
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
     .join("\n");
+}
+
+function addTokenCounts(
+  a: number | undefined,
+  b: number | undefined,
+): number | undefined {
+  if (a === undefined) {
+    return b;
+  }
+  if (b === undefined) {
+    return a;
+  }
+  return a + b;
+}
+
+function addUsage(
+  total: LlmUsage | undefined,
+  usage: LlmUsage | undefined,
+): LlmUsage | undefined {
+  if (!usage) {
+    return total;
+  }
+  if (!total) {
+    return usage;
+  }
+
+  return {
+    inputTokens: addTokenCounts(total.inputTokens, usage.inputTokens),
+    outputTokens: addTokenCounts(total.outputTokens, usage.outputTokens),
+    totalTokens: addTokenCounts(total.totalTokens, usage.totalTokens),
+    inputTokenDetails: {
+      cacheReadTokens: addTokenCounts(
+        total.inputTokenDetails?.cacheReadTokens,
+        usage.inputTokenDetails?.cacheReadTokens,
+      ),
+      cacheWriteTokens: addTokenCounts(
+        total.inputTokenDetails?.cacheWriteTokens,
+        usage.inputTokenDetails?.cacheWriteTokens,
+      ),
+    },
+    outputTokenDetails: {
+      reasoningTokens: addTokenCounts(
+        total.outputTokenDetails?.reasoningTokens,
+        usage.outputTokenDetails?.reasoningTokens,
+      ),
+    },
+  };
 }
 
 // -----------------------------------------------------------------------
@@ -127,6 +175,7 @@ export async function executeTurn(
   const coreHandler = async (ctx: TurnContext): Promise<TurnResult> => {
     const steps: StepSummary[] = [];
     let lastStepResult: StepResult | undefined;
+    let totalUsage: LlmUsage | undefined;
 
     for (let stepNumber = 1; stepNumber <= maxSteps; stepNumber++) {
       // Check abortSignal before each step
@@ -137,6 +186,7 @@ export async function executeTurn(
           conversationId,
           status: "aborted",
           steps,
+          ...(totalUsage ? { totalUsage } : {}),
         };
       }
 
@@ -161,8 +211,10 @@ export async function executeTurn(
         })),
         finishReason: lastStepResult.finishReason,
         rawFinishReason: lastStepResult.rawFinishReason,
+        ...(lastStepResult.usage ? { usage: lastStepResult.usage } : {}),
       };
       steps.push(stepSummary);
+      totalUsage = addUsage(totalUsage, lastStepResult.usage);
 
       // If no tool calls → turn is done (text response)
       if (!lastStepResult.toolCalls || lastStepResult.toolCalls.length === 0) {
@@ -175,6 +227,7 @@ export async function executeTurn(
           finishReason: lastStepResult.finishReason,
           rawFinishReason: lastStepResult.rawFinishReason,
           steps,
+          ...(totalUsage ? { totalUsage } : {}),
         };
       }
 
@@ -191,6 +244,7 @@ export async function executeTurn(
       finishReason: lastStepResult?.finishReason,
       rawFinishReason: lastStepResult?.rawFinishReason,
       steps,
+      ...(totalUsage ? { totalUsage } : {}),
     };
   };
 

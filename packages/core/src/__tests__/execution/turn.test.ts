@@ -166,6 +166,85 @@ describe("executeTurn", () => {
     expect(toolHandler).toHaveBeenCalledOnce();
   });
 
+  it("adds step usage to StepSummary and aggregates TurnResult totalUsage", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("my_tool"));
+
+    const llmClient = makeLlmClient([
+      {
+        text: "Using tool",
+        toolCalls: [{ toolCallId: "call-1", toolName: "my_tool", args: { value: "x" } }],
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+          inputTokenDetails: {
+            cacheReadTokens: 3,
+            cacheWriteTokens: 1,
+          },
+          outputTokenDetails: {
+            reasoningTokens: 2,
+          },
+        },
+      },
+      {
+        text: "Final answer",
+        usage: {
+          inputTokens: 20,
+          outputTokens: 7,
+          totalTokens: 27,
+          inputTokenDetails: {
+            cacheReadTokens: 4,
+            cacheWriteTokens: 2,
+          },
+          outputTokenDetails: {
+            reasoningTokens: 5,
+          },
+        },
+      },
+    ]);
+
+    const deps = makeDeps({ llmClient, toolRegistry });
+    const result = await executeTurn("agent-1", "Do something", undefined, deps);
+
+    expect(result.steps[0].usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      inputTokenDetails: {
+        cacheReadTokens: 3,
+        cacheWriteTokens: 1,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 2,
+      },
+    });
+    expect(result.steps[1].usage).toEqual({
+      inputTokens: 20,
+      outputTokens: 7,
+      totalTokens: 27,
+      inputTokenDetails: {
+        cacheReadTokens: 4,
+        cacheWriteTokens: 2,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 5,
+      },
+    });
+    expect(result.totalUsage).toEqual({
+      inputTokens: 30,
+      outputTokens: 12,
+      totalTokens: 42,
+      inputTokenDetails: {
+        cacheReadTokens: 7,
+        cacheWriteTokens: 3,
+      },
+      outputTokenDetails: {
+        reasoningTokens: 7,
+      },
+    });
+  });
+
   // Test 3: maxSteps reached → status "maxStepsReached"
   it("maxSteps reached → status maxStepsReached", async () => {
     const toolRegistry = new ToolRegistry();

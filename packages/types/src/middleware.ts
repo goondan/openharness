@@ -55,6 +55,19 @@ export interface ToolCallSummary {
   error?: Error;
 }
 
+export interface LlmUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  inputTokenDetails?: {
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
+  outputTokenDetails?: {
+    reasoningTokens?: number;
+  };
+}
+
 export interface StepSummary {
   stepNumber: number;
   toolCalls: ToolCallSummary[];
@@ -62,6 +75,7 @@ export interface StepSummary {
   finishReason?: LlmFinishReason;
   /** Provider-specific raw finish reason, when the adapter exposes one. */
   rawFinishReason?: string;
+  usage?: LlmUsage;
 }
 
 export type LlmFinishReason =
@@ -83,6 +97,7 @@ export interface TurnResult {
   /** Provider-specific raw finish reason from the last LLM step in this turn. */
   rawFinishReason?: string;
   steps: StepSummary[];
+  totalUsage?: LlmUsage;
   error?: Error;
 }
 
@@ -96,6 +111,7 @@ export interface StepResult {
     args: JsonObject;
     result?: ToolResult;
   }>;
+  usage?: LlmUsage;
 }
 
 // -----------------------------------------------------------------------
@@ -162,6 +178,7 @@ export interface LlmResponse {
   toolCalls?: Array<{ toolCallId: string; toolName: string; args: JsonObject }>;
   finishReason?: LlmFinishReason;
   rawFinishReason?: string;
+  usage?: LlmUsage;
 }
 
 export interface LlmChatOptions {
