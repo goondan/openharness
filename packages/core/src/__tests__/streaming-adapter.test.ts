@@ -70,6 +70,8 @@ describe("AI SDK adapter streamChat()", () => {
           fullStream: createMockFullStream(streamParts),
           text: Promise.resolve("Hello world!"),
           toolCalls: Promise.resolve([]),
+          finishReason: Promise.resolve("stop"),
+          rawFinishReason: Promise.resolve("stop"),
         }),
       };
     });
@@ -98,6 +100,8 @@ describe("AI SDK adapter streamChat()", () => {
     expect(deltas).toEqual(["Hello", " world", "!"]);
     expect(response.text).toBe("Hello world!");
     expect(response.toolCalls).toBeUndefined();
+    expect(response.finishReason).toBe("stop");
+    expect(response.rawFinishReason).toBe("stop");
   });
 
   it("invokes onToolCallDelta callback for tool-input-delta parts, resolving toolName from tool-input-start", async () => {
@@ -119,6 +123,8 @@ describe("AI SDK adapter streamChat()", () => {
           toolCalls: Promise.resolve([
             { toolCallId: "toolu_01", toolName: "get_weather", input: { location: "NYC" } },
           ]),
+          finishReason: Promise.resolve("tool-calls"),
+          rawFinishReason: Promise.resolve("tool_use"),
         }),
       };
     });
@@ -165,6 +171,8 @@ describe("AI SDK adapter streamChat()", () => {
       toolName: "get_weather",
       args: { location: "NYC" },
     });
+    expect(response.finishReason).toBe("tool-calls");
+    expect(response.rawFinishReason).toBe("tool_use");
   });
 
   it("decodes JSON-string tool call input from streamText", async () => {

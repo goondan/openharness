@@ -159,6 +159,8 @@ export async function executeTurn(
           args: tc.args,
           result: tc.result,
         })),
+        finishReason: lastStepResult.finishReason,
+        rawFinishReason: lastStepResult.rawFinishReason,
       };
       steps.push(stepSummary);
 
@@ -170,6 +172,8 @@ export async function executeTurn(
           conversationId,
           status: "completed",
           text: lastStepResult.text,
+          finishReason: lastStepResult.finishReason,
+          rawFinishReason: lastStepResult.rawFinishReason,
           steps,
         };
       }
@@ -184,6 +188,8 @@ export async function executeTurn(
       conversationId,
       status: "maxStepsReached",
       text: lastStepResult?.text,
+      finishReason: lastStepResult?.finishReason,
+      rawFinishReason: lastStepResult?.rawFinishReason,
       steps,
     };
   };

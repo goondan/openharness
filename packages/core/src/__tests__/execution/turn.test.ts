@@ -110,7 +110,11 @@ function registerTurnMiddleware(
 describe("executeTurn", () => {
   // Test 1: Simple turn: input → 1 step → text response → TurnResult
   it("simple turn: string input → 1 step → text response → TurnResult", async () => {
-    const llmClient = makeLlmClient({ text: "Hello, world!" });
+    const llmClient = makeLlmClient({
+      text: "Hello, world!",
+      finishReason: "stop",
+      rawFinishReason: "stop",
+    });
     const deps = makeDeps({ llmClient });
 
     const result = await executeTurn("agent-1", "Hi there", undefined, deps);
@@ -120,6 +124,10 @@ describe("executeTurn", () => {
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0].stepNumber).toBe(1);
     expect(result.steps[0].toolCalls).toHaveLength(0);
+    expect(result.finishReason).toBe("stop");
+    expect(result.rawFinishReason).toBe("stop");
+    expect(result.steps[0].finishReason).toBe("stop");
+    expect(result.steps[0].rawFinishReason).toBe("stop");
     expect(result.agentName).toBe("agent-1");
     expect(result.turnId).toBeDefined();
     expect(result.conversationId).toBeDefined();
@@ -135,9 +143,11 @@ describe("executeTurn", () => {
     const llmClient = makeLlmClient([
       {
         text: "Using tool",
+        finishReason: "tool-calls",
+        rawFinishReason: "tool_use",
         toolCalls: [{ toolCallId: "call-1", toolName: "my_tool", args: { value: "x" } }],
       },
-      { text: "Final answer" },
+      { text: "Final answer", finishReason: "stop", rawFinishReason: "stop" },
     ]);
 
     const deps = makeDeps({ llmClient, toolRegistry });
@@ -146,6 +156,10 @@ describe("executeTurn", () => {
     expect(result.status).toBe("completed");
     expect(result.text).toBe("Final answer");
     expect(result.steps).toHaveLength(2);
+    expect(result.finishReason).toBe("stop");
+    expect(result.rawFinishReason).toBe("stop");
+    expect(result.steps[0].finishReason).toBe("tool-calls");
+    expect(result.steps[1].finishReason).toBe("stop");
     expect(result.steps[0].toolCalls).toHaveLength(1);
     expect(result.steps[0].toolCalls[0].toolName).toBe("my_tool");
     expect(result.steps[1].toolCalls).toHaveLength(0);

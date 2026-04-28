@@ -69,6 +69,7 @@ export type {
   ToolCallMiddleware,
   IngressMiddleware,
   RouteMiddleware,
+  LlmFinishReason,
   LlmResponse,
   LlmChatOptions,
   LlmStreamCallbacks,

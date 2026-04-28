@@ -206,7 +206,11 @@ describe("executeStep", () => {
 
   // Test 6: step.start and step.done events emitted
   it("step.start and step.done events are emitted", async () => {
-    const llmClient = makeLlmClient({ text: "result" });
+    const llmClient = makeLlmClient({
+      text: "result",
+      finishReason: "stop",
+      rawFinishReason: "stop",
+    });
     const eventBus = new EventBus();
     const startListener = vi.fn();
     const doneListener = vi.fn();
@@ -239,6 +243,8 @@ describe("executeStep", () => {
     expect(donePayload.conversationId).toBe("conv-z");
     expect(donePayload.stepNumber).toBe(3);
     expect(donePayload.result).toEqual(result);
+    expect(result.finishReason).toBe("stop");
+    expect(result.rawFinishReason).toBe("stop");
   });
 
   // Test 7: step.error event emitted on failure

@@ -58,7 +58,19 @@ export interface ToolCallSummary {
 export interface StepSummary {
   stepNumber: number;
   toolCalls: ToolCallSummary[];
+  /** Finish reason from the LLM response that produced this step. */
+  finishReason?: LlmFinishReason;
+  /** Provider-specific raw finish reason, when the adapter exposes one. */
+  rawFinishReason?: string;
 }
+
+export type LlmFinishReason =
+  | "stop"
+  | "length"
+  | "content-filter"
+  | "tool-calls"
+  | "error"
+  | "other";
 
 export interface TurnResult {
   turnId: string;
@@ -66,12 +78,18 @@ export interface TurnResult {
   conversationId: string;
   status: "completed" | "aborted" | "error" | "maxStepsReached";
   text?: string;
+  /** Finish reason from the last LLM step in this turn. */
+  finishReason?: LlmFinishReason;
+  /** Provider-specific raw finish reason from the last LLM step in this turn. */
+  rawFinishReason?: string;
   steps: StepSummary[];
   error?: Error;
 }
 
 export interface StepResult {
   text?: string;
+  finishReason?: LlmFinishReason;
+  rawFinishReason?: string;
   toolCalls: Array<{
     toolCallId: string;
     toolName: string;
@@ -142,6 +160,8 @@ export type RouteMiddleware = (
 export interface LlmResponse {
   text?: string;
   toolCalls?: Array<{ toolCallId: string; toolName: string; args: JsonObject }>;
+  finishReason?: LlmFinishReason;
+  rawFinishReason?: string;
 }
 
 export interface LlmChatOptions {

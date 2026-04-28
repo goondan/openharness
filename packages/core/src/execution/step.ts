@@ -187,6 +187,8 @@ export async function executeStep(
     // f. Return StepResult
     return {
       text: llmResponse.text,
+      finishReason: llmResponse.finishReason,
+      rawFinishReason: llmResponse.rawFinishReason,
       toolCalls: toolCallResults,
     };
   };

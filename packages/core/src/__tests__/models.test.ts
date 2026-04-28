@@ -186,6 +186,7 @@ describe("AI SDK adapter chat()", () => {
           text: "Hello from AI SDK",
           toolCalls: [],
           finishReason: "stop",
+          rawFinishReason: "stop",
           response: { messages: [] },
         }),
       };
@@ -203,6 +204,8 @@ describe("AI SDK adapter chat()", () => {
 
     expect(response.text).toBe("Hello from AI SDK");
     expect(response.toolCalls).toBeUndefined();
+    expect(response.finishReason).toBe("stop");
+    expect(response.rawFinishReason).toBe("stop");
   });
 
   it("returns toolCalls when generateText responds with tool calls", async () => {
@@ -220,6 +223,7 @@ describe("AI SDK adapter chat()", () => {
             },
           ],
           finishReason: "tool-calls",
+          rawFinishReason: "tool_use",
           response: { messages: [] },
         }),
       };
@@ -241,6 +245,8 @@ describe("AI SDK adapter chat()", () => {
       toolName: "get_weather",
       args: { location: "NYC" },
     });
+    expect(response.finishReason).toBe("tool-calls");
+    expect(response.rawFinishReason).toBe("tool_use");
   });
 
   it("decodes JSON-string tool call input from generateText", async () => {

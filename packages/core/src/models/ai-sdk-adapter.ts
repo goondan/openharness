@@ -14,6 +14,7 @@ import type {
   LlmChatOptions,
   LlmStreamCallbacks,
   LlmResponse,
+  LlmFinishReason,
   Message,
   ToolDefinition,
 } from "@goondan/openharness-types";
@@ -88,6 +89,21 @@ function toModelMessages(messages: Message[]): ModelMessage[] {
   return messages.map((m) => m.data);
 }
 
+const LLM_FINISH_REASONS = new Set<LlmFinishReason>([
+  "stop",
+  "length",
+  "content-filter",
+  "tool-calls",
+  "error",
+  "other",
+]);
+
+function normalizeFinishReason(value: unknown): LlmFinishReason | undefined {
+  return typeof value === "string" && LLM_FINISH_REASONS.has(value as LlmFinishReason)
+    ? (value as LlmFinishReason)
+    : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Public: createAiSdkClient
 // ---------------------------------------------------------------------------
@@ -143,7 +159,12 @@ export function createAiSdkClient(
             }))
           : undefined;
 
-      return { text, toolCalls };
+      return {
+        text,
+        toolCalls,
+        finishReason: normalizeFinishReason(result.finishReason),
+        rawFinishReason: result.rawFinishReason,
+      };
     },
 
     async streamChat(
@@ -199,9 +220,13 @@ export function createAiSdkClient(
       // After stream completes, build LlmResponse from resolved promises
       const text = await result.text;
       const toolCalls = await result.toolCalls;
+      const finishReason = await result.finishReason;
+      const rawFinishReason = await result.rawFinishReason;
 
       return {
         text: text && text.trim().length > 0 ? text : undefined,
+        finishReason: normalizeFinishReason(finishReason),
+        rawFinishReason,
         toolCalls:
           toolCalls && toolCalls.length > 0
             ? toolCalls.map((tc) => ({
