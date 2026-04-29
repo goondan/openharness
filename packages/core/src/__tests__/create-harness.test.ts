@@ -58,6 +58,15 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+
+function firstPendingHitlRequestId(result: TurnResult): string {
+  const requestId = result.pendingHitlRequestIds?.[0];
+  if (!requestId) {
+    throw new Error("Expected a pending HITL request id");
+  }
+  return requestId;
+}
+
 async function waitUntil(assertion: () => void | Promise<void>, timeoutMs = 1000): Promise<void> {
   const startedAt = Date.now();
   let lastError: unknown;
@@ -239,7 +248,7 @@ describe("createHarness", () => {
     });
 
     expect(result.status).toBe("waitingForHuman");
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
     expect(requestId).not.toContain("call-hitl-1");
     expect(handler).not.toHaveBeenCalled();
     const pending = await runtime1.control.listPendingHitl({ conversationId: "hitl-conv" });
@@ -529,15 +538,22 @@ describe("createHarness", () => {
 
   it("does not start a direct processTurn when a HITL barrier is pending", async () => {
     const { createLlmClient } = await import("../models/index.js");
-    const chat = vi.fn().mockResolvedValue({
-      toolCalls: [
-        { toolCallId: "call-direct-barrier-1", toolName: "direct_barrier_tool", args: {} },
-      ],
-      finishReason: "tool-calls",
-    } satisfies LlmResponse);
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-direct-barrier-1", toolName: "direct_barrier_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValueOnce({
+        text: "approved with queued input",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
     vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
 
     const store = new InMemoryHitlStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved" }));
     const runtime = await createHarness({
       agents: {
         default: {
@@ -547,7 +563,7 @@ describe("createHarness", () => {
             description: "Requires approval before direct barrier",
             parameters: { type: "object", additionalProperties: false },
             hitl: { mode: "required", response: { type: "approval" } },
-            handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+            handler,
           }],
         },
       },
@@ -565,6 +581,22 @@ describe("createHarness", () => {
     expect(second.status).toBe("waitingForHuman");
     expect(second.pendingHitlBatchId).toBe(first.pendingHitlBatchId);
     expect(chat).toHaveBeenCalledOnce();
+    const batchAfterSecondInput = await runtime.control.getHitlBatch(first.pendingHitlBatchId!);
+    expect(batchAfterSecondInput?.queuedSteerCount).toBe(1);
+
+    await runtime.control.submitHitlResult({
+      requestId: firstPendingHitlRequestId(first),
+      result: { kind: "approve" },
+    });
+
+    await waitUntil(() => {
+      expect(handler).toHaveBeenCalledOnce();
+      expect(chat).toHaveBeenCalledTimes(2);
+    });
+    const continuationMessages = chat.mock.calls[1]?.[0] as Message[] | undefined;
+    expect(continuationMessages?.some((message) =>
+      message.data.role === "user" && message.data.content === "must not append over barrier",
+    )).toBe(true);
 
     await runtime.close();
   });
@@ -1042,7 +1074,7 @@ describe("createHarness", () => {
     const result = await runtime1.processTurn("default", "create rejected recovery request", {
       conversationId: "rejected-recovery-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
     await runtime1.close();
 
     await store.reject(requestId, {
@@ -1111,7 +1143,7 @@ describe("createHarness", () => {
     const result = await runtime1.processTurn("default", "create retryable recovery request", {
       conversationId: "retryable-recovery-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
     await runtime1.close();
 
     await store.resolve(requestId, {
@@ -1205,7 +1237,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "run form tool", {
       conversationId: "form-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const invalid = await runtime.control.submitHitlResult({
       requestId,
@@ -1230,6 +1262,141 @@ describe("createHarness", () => {
       result: { decision: "approve", value: { wrong: "shape" }, submittedAt: new Date().toISOString() },
     });
     expect(duplicateWithInvalidPayload.status).toBe("duplicate");
+
+    await runtime.close();
+  });
+
+  it("validates HITL approval result shape before resuming", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-approval-shape-1", toolName: "approval_shape_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse).mockResolvedValue({
+        text: "approval handled",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new InMemoryHitlStore();
+    const tool: ToolDefinition = {
+      name: "approval_shape_tool",
+      description: "Requires approval only",
+      parameters: { type: "object", additionalProperties: false },
+      hitl: {
+        mode: "required",
+        response: { type: "approval" },
+      },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+    };
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [tool],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "run approval tool", {
+      conversationId: "approval-shape-hitl-conv",
+    });
+    const requestId = firstPendingHitlRequestId(result);
+
+    const invalid = await runtime.control.submitHitlResult({
+      requestId,
+      result: { kind: "text", value: "not an approval" },
+    });
+    expect(invalid.status).toBe("invalid");
+    expect(tool.handler).not.toHaveBeenCalled();
+
+    const accepted = await runtime.control.submitHitlResult({
+      requestId,
+      result: { kind: "approve" },
+    });
+    expect(accepted.status).toBe("accepted");
+    await waitUntil(() => expect(tool.handler).toHaveBeenCalledOnce());
+
+    await runtime.close();
+  });
+
+  it("validates HITL text length and passes submitted text as value by default", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-text-1", toolName: "text_tool", args: { prefix: "old", value: "old" } },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse).mockResolvedValue({
+        text: "text handled",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new InMemoryHitlStore();
+    const capturedArgs: unknown[] = [];
+    const tool: ToolDefinition = {
+      name: "text_tool",
+      description: "Requires text input",
+      parameters: {
+        type: "object",
+        properties: {
+          prefix: { type: "string" },
+          value: { type: "string" },
+        },
+        required: ["prefix", "value"],
+        additionalProperties: false,
+      },
+      hitl: {
+        mode: "required",
+        response: { type: "text", minLength: 3, maxLength: 8 },
+      },
+      handler: vi.fn(async (args) => {
+        capturedArgs.push(args);
+        return { type: "text" as const, text: "text result" };
+      }),
+    };
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [tool],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "run text tool", {
+      conversationId: "text-hitl-conv",
+    });
+    const requestId = firstPendingHitlRequestId(result);
+
+    const tooShort = await runtime.control.submitHitlResult({
+      requestId,
+      result: { kind: "text", value: "no" },
+    });
+    expect(tooShort.status).toBe("invalid");
+
+    const tooLong = await runtime.control.submitHitlResult({
+      requestId,
+      result: { kind: "text", value: "too-long-value" },
+    });
+    expect(tooLong.status).toBe("invalid");
+    expect(tool.handler).not.toHaveBeenCalled();
+
+    const accepted = await runtime.control.submitHitlResult({
+      requestId,
+      result: { kind: "text", value: "new" },
+    });
+    expect(accepted.status).toBe("accepted");
+    await waitUntil(() => expect(tool.handler).toHaveBeenCalledOnce());
+    expect(capturedArgs[0]).toEqual({ prefix: "old", value: "new" });
 
     await runtime.close();
   });
@@ -1285,7 +1452,7 @@ describe("createHarness", () => {
     const result = await runtime1.processTurn("default", "run blocked tool", {
       conversationId: "blocked-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const submitPromise = runtime1.control.submitHitlResult({
       requestId,
@@ -1360,7 +1527,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "create close abort request", {
       conversationId: "close-abort-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const submitted = await runtime.control.submitHitlResult({
       requestId,
@@ -1414,7 +1581,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "create closed control request", {
       conversationId: "closed-control-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
     await runtime.close();
 
     const submitted = await runtime.control.submitHitlResult({
@@ -1466,7 +1633,7 @@ describe("createHarness", () => {
     const result = await runtime1.processTurn("default", "create missing tool request", {
       conversationId: "missing-tool-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
     await runtime1.close();
 
     const runtime2 = await createHarness({
@@ -1539,7 +1706,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "create stale failure request", {
       conversationId: "stale-fail-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const submitted = await runtime.control.submitHitlResult({
       requestId,
@@ -1595,7 +1762,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "create fail write request", {
       conversationId: "fail-write-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const submitted = await runtime.control.submitHitlResult({
       requestId,
@@ -1649,7 +1816,7 @@ describe("createHarness", () => {
     const result = await runtime.processTurn("default", "create resolve fail request", {
       conversationId: "resolve-fail-hitl-conv",
     });
-    const requestId = result.pendingHitlRequestIds?.[0]!;
+    const requestId = firstPendingHitlRequestId(result);
 
     const submitted = await runtime.control.submitHitlResult({
       requestId,

@@ -183,6 +183,23 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : randomUUID());
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
 
+    const queuedForHitl = await this.queueHitlSteer(
+      agentName,
+      createProgrammaticEnvelope(input, conversationId),
+      conversationId,
+    );
+    if (queuedForHitl) {
+      return {
+        turnId,
+        agentName,
+        conversationId,
+        status: "waitingForHuman",
+        steps: [],
+        pendingHitlBatchId: queuedForHitl.batchId,
+        pendingHitlRequestIds: queuedForHitl.pendingRequestIds,
+      };
+    }
+
     const hitlBarrier = await this._getHitlBarrierTurnResult(agentName, conversationId, turnId);
     if (hitlBarrier) {
       return hitlBarrier;
@@ -1137,6 +1154,26 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   }
 }
 
+function createProgrammaticEnvelope(input: string | InboundEnvelope, conversationId: string): InboundEnvelope {
+  if (typeof input !== "string") {
+    return {
+      ...input,
+      conversationId: input.conversationId ?? conversationId,
+    };
+  }
+  return {
+    name: "text",
+    content: [{ type: "text", text: input }],
+    properties: {},
+    conversationId,
+    source: {
+      connector: "programmatic",
+      connectionName: "programmatic",
+      receivedAt: new Date().toISOString(),
+    },
+  };
+}
+
 function validateHitlScope(
   record: HitlRequestRecord,
   agentName: string | undefined,
@@ -1162,10 +1199,19 @@ function validateHitlResult(
   const value = getHitlResultValue(result);
   switch (record.responseSchema.type) {
     case "approval":
+      if (!isHitlApproveResult(result)) {
+        return "HITL approval response requires an approval result";
+      }
       return null;
     case "text":
       if (typeof value !== "string") {
         return "HITL text response requires a string value";
+      }
+      if (record.responseSchema.minLength !== undefined && value.length < record.responseSchema.minLength) {
+        return `HITL text response must be at least ${record.responseSchema.minLength} characters`;
+      }
+      if (record.responseSchema.maxLength !== undefined && value.length > record.responseSchema.maxLength) {
+        return `HITL text response must be at most ${record.responseSchema.maxLength} characters`;
       }
       return record.responseSchema.schema
         ? validateSchema(record.responseSchema.schema, value)
@@ -1265,6 +1311,15 @@ function defaultHitlMapping(record: HitlRequestRecord): { action: "approve"; arg
       args: value,
     };
   }
+  if (record.responseSchema.type === "text" && typeof value === "string") {
+    return {
+      action: "approve",
+      args: {
+        ...record.originalArgs,
+        value,
+      },
+    };
+  }
 
   return { action: "approve", args: record.originalArgs };
 }
@@ -1278,6 +1333,13 @@ function isHitlRejectResult(result: HitlHumanResult | undefined): boolean {
     return false;
   }
   return "kind" in result ? result.kind === "reject" : result.decision === "reject";
+}
+
+function isHitlApproveResult(result: HitlHumanResult | undefined): boolean {
+  if (!result) {
+    return false;
+  }
+  return "kind" in result ? result.kind === "approve" : result.decision === "approve";
 }
 
 function getHitlRejectReason(result: HitlHumanResult | undefined): string | undefined {

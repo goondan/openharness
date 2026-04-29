@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { createHarness } from "@goondan/openharness";
+import type { HarnessConfig, HarnessRuntime } from "@goondan/openharness-types";
 import { loadEnv } from "../env-loader.js";
 import { loadConfig } from "../config-loader.js";
 
@@ -28,7 +29,7 @@ export async function replCommand(options: ReplOptions): Promise<void> {
   loadEnv(workdir);
 
   // Load harness config
-  let config;
+  let config: HarnessConfig;
   try {
     config = await loadConfig(configPath);
   } catch (err) {
@@ -56,7 +57,7 @@ export async function replCommand(options: ReplOptions): Promise<void> {
   }
 
   // Create harness
-  let harness;
+  let harness: HarnessRuntime;
   try {
     const effectiveConfig =
       options.maxSteps === undefined

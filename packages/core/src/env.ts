@@ -5,6 +5,8 @@ export function isEnvRef(value: unknown): value is EnvRef {
   return (
     typeof value === "object" &&
     value !== null &&
+    "__openharnessEnvRef" in value &&
+    (value as { __openharnessEnvRef?: unknown }).__openharnessEnvRef === true &&
     "name" in value &&
     typeof (value as Record<string, unknown>).name === "string"
   );

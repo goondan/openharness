@@ -10,6 +10,7 @@ import type { HitlRuntimeConfig } from "./hitl.js";
 declare const ENV_REF_BRAND: unique symbol;
 
 export interface EnvRef {
+  readonly __openharnessEnvRef: true;
   readonly [ENV_REF_BRAND]: true;
   readonly name: string;
 }
@@ -81,5 +82,10 @@ export function defineHarness(config: HarnessConfig): HarnessConfig {
 // -----------------------------------------------------------------------
 
 export function env(name: string): EnvRef {
-  return { name } as EnvRef;
+  const ref = { name } as EnvRef;
+  Object.defineProperty(ref, "__openharnessEnvRef", {
+    value: true,
+    enumerable: false,
+  });
+  return ref;
 }

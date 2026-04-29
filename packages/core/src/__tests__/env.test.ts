@@ -39,6 +39,10 @@ describe("isEnvRef()", () => {
   it("returns false for an object with a non-string name property", () => {
     expect(isEnvRef({ name: 42 })).toBe(false);
   });
+
+  it("returns false for a plain provider option object with a name property", () => {
+    expect(isEnvRef({ name: "custom-provider-name" })).toBe(false);
+  });
 });
 
 describe("resolveEnv()", () => {
@@ -111,6 +115,27 @@ describe("resolveEnvDeep()", () => {
         },
       },
       tags: ["trace-id"],
+    });
+  });
+
+  it("keeps provider option name fields as plain strings", () => {
+    process.env["TEST_API_KEY"] = "resolved-api-key";
+    process.env["custom-provider-name"] = "this-must-not-replace-the-object";
+
+    const resolved = resolveEnvDeep({
+      provider: "anthropic",
+      providerOptions: {
+        apiKey: env("TEST_API_KEY"),
+        name: "custom-provider-name",
+      },
+    });
+
+    expect(resolved).toEqual({
+      provider: "anthropic",
+      providerOptions: {
+        apiKey: "resolved-api-key",
+        name: "custom-provider-name",
+      },
     });
   });
 });

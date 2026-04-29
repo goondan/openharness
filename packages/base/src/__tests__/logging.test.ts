@@ -57,7 +57,9 @@ function emit(
   event: string,
   payload: unknown,
 ) {
-  eventListeners.get(event)?.forEach((l) => l(payload));
+  for (const listener of eventListeners.get(event) ?? []) {
+    listener(payload);
+  }
 }
 
 // ---------------------------------------------------------------------------
