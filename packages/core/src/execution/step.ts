@@ -310,7 +310,7 @@ export async function executeStep(
           }
         } catch (err) {
           if (!exposedForHuman) {
-            await hitlStore.cancelBatch(batchId, "HITL batch preparation failed").catch(() => undefined);
+            await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
           }
           throw err;
         }
@@ -538,4 +538,37 @@ async function executeNonHitlToolCall(
   }
 
   return result;
+}
+
+async function closeUnexposedHitlBatchAfterPreparationFailure(
+  hitlStore: HitlStore,
+  batchId: string,
+  cause: unknown,
+): Promise<void> {
+  const batch = await hitlStore.getBatch(batchId).catch(() => null);
+  if (!batch) {
+    return;
+  }
+
+  const missingNonHitlResults = batch.toolCalls.filter(
+    (toolCall) =>
+      !toolCall.requiresHitl &&
+      !batch.toolResults.some((result) => result.toolCallId === toolCall.toolCallId),
+  );
+  if (missingNonHitlResults.length === 0) {
+    await hitlStore.markBatchWaitingForHuman(batchId).catch(() => undefined);
+    return;
+  }
+
+  if (batch.toolExecutions.length > 0) {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    await hitlStore.failBatch(batchId, {
+      error: `HITL batch preparation failed after peer tool execution started: ${error}`,
+      retryable: false,
+      failedAt: new Date().toISOString(),
+    }).catch(() => undefined);
+    return;
+  }
+
+  await hitlStore.cancelBatch(batchId, "HITL batch preparation failed before peer execution").catch(() => undefined);
 }

@@ -11,6 +11,7 @@ import type {
   InboundEnvelope,
   ToolResult,
   HitlBatchAppendCommit,
+  HitlBatchCompletion,
   HitlBatchFilter,
   HitlBatchRecord,
   HitlBatchToolResult,
@@ -94,8 +95,11 @@ class LeaseStealingFailStore extends InMemoryHitlStore {
   override async failBatch(
     batchId: string,
     _failure: HitlFailure,
-    guard: HitlLeaseGuard,
+    guard?: HitlLeaseGuard,
   ): Promise<HitlBatchRecord> {
+    if (!guard) {
+      throw new Error("expected lease guard");
+    }
     await super.releaseBatchLease(batchId, guard);
     await super.acquireBatchLease(batchId, "other-runtime", 1000);
     throw new Error("simulated stale failure write");
@@ -106,7 +110,7 @@ class FailingFailStore extends InMemoryHitlStore {
   override async failBatch(
     _batchId: string,
     _failure: HitlFailure,
-    _guard: HitlLeaseGuard,
+    _guard?: HitlLeaseGuard,
   ): Promise<HitlBatchRecord> {
     throw new Error("fail store write failed");
   }
@@ -204,6 +208,22 @@ class FailingOnceLegacyCompleteStore extends InMemoryHitlStore {
   }
 }
 
+class FailingOnceCompleteBatchStore extends InMemoryHitlStore {
+  private failed = false;
+
+  override async completeBatch(
+    batchId: string,
+    completion: HitlBatchCompletion,
+    guard: HitlLeaseGuard,
+  ): Promise<HitlBatchRecord> {
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("complete batch store write failed");
+    }
+    return super.completeBatch(batchId, completion, guard);
+  }
+}
+
 class FailingOnceDispatchEnqueueStore extends InMemoryHitlStore {
   private failed = false;
 
@@ -211,6 +231,21 @@ class FailingOnceDispatchEnqueueStore extends InMemoryHitlStore {
     if (!this.failed && input.source === "dispatch") {
       this.failed = true;
       throw new Error("dispatch steer enqueue failed");
+    }
+    return super.enqueueSteer(batchId, input);
+  }
+}
+
+class BlockingDispatchEnqueueStore extends InMemoryHitlStore {
+  readonly dispatchStarted = deferred<void>();
+  readonly allowDispatch = deferred<void>();
+  private blocked = false;
+
+  override async enqueueSteer(batchId: string, input: HitlQueuedSteerInput): Promise<HitlQueuedSteer> {
+    if (!this.blocked && input.source === "dispatch") {
+      this.blocked = true;
+      this.dispatchStarted.resolve();
+      await this.allowDispatch.promise;
     }
     return super.enqueueSteer(batchId, input);
   }
@@ -691,7 +726,7 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
-  it("steers ingress into the active turn while a HITL batch is still preparing", async () => {
+  it("rejects ingress while a HITL batch is still preparing", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const firstChatStarted = deferred<void>();
     const releaseFirstChat = deferred<LlmResponse>();
@@ -701,7 +736,7 @@ describe("createHarness", () => {
         return releaseFirstChat.promise;
       })
       .mockResolvedValue({
-        text: "preparing steer observed",
+        text: "preparing rejection observed",
         toolCalls: [],
         finishReason: "stop",
       } satisfies LlmResponse);
@@ -773,19 +808,18 @@ describe("createHarness", () => {
     } satisfies LlmResponse);
     await normalStarted.promise;
 
-    const steered = await runtime.ingress.receive({
+    const rejected = await runtime.ingress.receive({
       connectionName: "preparing-steer",
       payload: { text: "steered while preparing" },
     });
-    expect(steered).toHaveLength(1);
-    expect(steered[0].disposition).toBe("steered");
+    expect(rejected).toHaveLength(0);
 
     releaseNormal.resolve({ type: "text", text: "normal done" });
     const result = await turnPromise;
     expect(result.status).toBe("waitingForHuman");
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
-      expect(batch?.queuedSteerCount).toBe(1);
+      expect(batch?.queuedSteerCount).toBe(0);
     });
 
     const submitted = await runtime.control.submitHitlResult({
@@ -794,18 +828,18 @@ describe("createHarness", () => {
     });
     expect(submitted.status).toBe("accepted");
     await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
-    expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("steered while preparing");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("steered while preparing");
 
     await runtime.close();
   });
 
-  it("steers direct processTurn input into the active turn while a HITL batch is still preparing", async () => {
+  it("rejects direct processTurn input while a HITL batch is still preparing", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const releaseFirstChat = deferred<LlmResponse>();
     const chat = vi.fn()
       .mockImplementationOnce(async () => releaseFirstChat.promise)
       .mockResolvedValue({
-        text: "direct preparing steer observed",
+        text: "direct preparing rejection observed",
         toolCalls: [],
         finishReason: "stop",
       } satisfies LlmResponse);
@@ -853,19 +887,18 @@ describe("createHarness", () => {
     } satisfies LlmResponse);
     await normalStarted.promise;
 
-    const secondTurnPromise = runtime.processTurn("default", "direct while preparing", {
+    const second = await runtime.processTurn("default", "direct while preparing", {
       conversationId: "direct-preparing-steer-conv",
     });
     releaseNormal.resolve({ type: "text", text: "normal done" });
 
     const result = await turnPromise;
-    const second = await secondTurnPromise;
     expect(result.status).toBe("waitingForHuman");
-    expect(second.status).toBe("waitingForHuman");
-    expect(second.pendingHitlBatchId).toBe(result.pendingHitlBatchId);
+    expect(second.status).toBe("error");
+    expect(second.error?.message).toContain("active HITL barrier");
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
-      expect(batch?.queuedSteerCount).toBe(1);
+      expect(batch?.queuedSteerCount).toBe(0);
     });
 
     const submitted = await runtime.control.submitHitlResult({
@@ -874,7 +907,7 @@ describe("createHarness", () => {
     });
     expect(submitted.status).toBe("accepted");
     await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
-    expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("direct while preparing");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("direct while preparing");
 
     await runtime.close();
   });
@@ -944,7 +977,81 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
-  it("cancels a preparation batch when peer result recording fails before HITL is exposed", async () => {
+  it("queues new direct input durably after HITL handoff closes active steering", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const firstChatStarted = deferred<void>();
+    const releaseFirstChat = deferred<LlmResponse>();
+    const chat = vi.fn()
+      .mockImplementationOnce(async () => {
+        firstChatStarted.resolve();
+        return releaseFirstChat.promise;
+      })
+      .mockResolvedValue({
+        text: "handoff steer observed",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new BlockingDispatchEnqueueStore();
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "handoff_hitl_tool",
+            description: "Requires approval during handoff",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler: vi.fn(async () => ({ type: "text" as const, text: "approved handoff tool" })),
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const turnPromise = runtime.processTurn("default", "start handoff HITL", {
+      conversationId: "handoff-steer-conv",
+    });
+    await firstChatStarted.promise;
+    const beforeHandoff = runtime.processTurn("default", "direct before handoff", {
+      conversationId: "handoff-steer-conv",
+    });
+    releaseFirstChat.resolve({
+      toolCalls: [
+        { toolCallId: "call-handoff-hitl", toolName: "handoff_hitl_tool", args: {} },
+      ],
+      finishReason: "tool-calls",
+    } satisfies LlmResponse);
+
+    await store.dispatchStarted.promise;
+    const duringHandoff = await runtime.processTurn("default", "direct during handoff", {
+      conversationId: "handoff-steer-conv",
+    });
+    expect(duringHandoff.status).toBe("waitingForHuman");
+
+    store.allowDispatch.resolve();
+    const result = await turnPromise;
+    expect((await beforeHandoff).status).toBe("waitingForHuman");
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.queuedSteerCount).toBe(2);
+    });
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: result.pendingHitlRequestIds![0]!,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+    await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
+    const continuation = JSON.stringify(chat.mock.calls[1]?.[0]);
+    expect(continuation).toContain("direct before handoff");
+    expect(continuation).toContain("direct during handoff");
+
+    await runtime.close();
+  });
+
+  it("fails a preparation batch when peer result recording fails after peer execution started", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const chat = vi.fn()
       .mockResolvedValueOnce({
@@ -995,6 +1102,7 @@ describe("createHarness", () => {
     expect(normal).toHaveBeenCalledOnce();
     expect(hitl).not.toHaveBeenCalled();
     expect(await runtime.control.listPendingHitl({ conversationId: "prep-failure-conv" })).toHaveLength(0);
+    expect(await store.getOpenBatchByConversation("default", "prep-failure-conv")).toBeNull();
 
     const next = await runtime.processTurn("default", "should not be blocked", {
       conversationId: "prep-failure-conv",
@@ -1576,6 +1684,181 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
+  it("keeps rejected HITL completion persistence failures retryable because no handler side effect started", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-reject-complete-retry-1", toolName: "reject_complete_retry_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({
+        text: "reject retry observed",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new FailingOnceCompleteRequestStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "reject_complete_retry_tool",
+            description: "Rejected before handler execution",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "start reject retry HITL", {
+      conversationId: "reject-complete-retry-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: result.pendingHitlRequestIds![0]!,
+      result: { decision: "reject", reason: "no", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(true);
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledTimes(1);
+
+    const resumed = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
+    expect(resumed.status).toBe("completed");
+    expect(handler).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    await runtime.close();
+  });
+
+  it("does not complete a batch when the HITL continuation returns an error", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-continuation-error-1", toolName: "continuation_error_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockRejectedValueOnce(new Error("continuation exploded"));
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved before continuation error" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "continuation_error_tool",
+            description: "Requires approval before a failing continuation",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "start continuation error HITL", {
+      conversationId: "continuation-error-conv",
+    });
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: result.pendingHitlRequestIds![0]!,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(false);
+      expect(batch?.completion).toBeUndefined();
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    const retried = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
+    expect(retried.status).toBe("notReady");
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    await runtime.close();
+  });
+
+  it("does not rerun a continuation when completeBatch persistence fails after the continuation settles", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-complete-batch-fail-1", toolName: "complete_batch_fail_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({
+        text: "continuation finished before complete batch failure",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new FailingOnceCompleteBatchStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved before complete batch failure" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "complete_batch_fail_tool",
+            description: "Requires approval before completeBatch failure",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "start complete batch failure HITL", {
+      conversationId: "complete-batch-failure-conv",
+    });
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: result.pendingHitlRequestIds![0]!,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(false);
+      expect(batch?.completion).toBeUndefined();
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    const retried = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
+    expect(retried.status).toBe("notReady");
+    expect(handler).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    await runtime.close();
+  });
+
   it("allows a HITL continuation to settle on a new pending HITL batch", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const chat = vi.fn()
@@ -1643,10 +1926,10 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
-  it("startup recovery cancels incomplete preparing batches so they do not block the conversation", async () => {
+  it("startup recovery exposes a fully prepared HITL-only preparing batch", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const chat = vi.fn().mockResolvedValue({
-      text: "recovered from preparing",
+      text: "should not start over recovered HITL",
       toolCalls: [],
       finishReason: "stop",
     } satisfies LlmResponse);
@@ -1705,13 +1988,291 @@ describe("createHarness", () => {
 
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch("preparing-recovery-batch");
-      expect(batch?.status).toBe("canceled");
+      expect(batch?.status).toBe("waitingForHuman");
+      expect(batch?.requests).toHaveLength(1);
     });
-    const result = await runtime.processTurn("default", "should not be blocked by preparing", {
-      conversationId: "preparing-recovery-conv",
+    const pending = await runtime.control.listPendingHitl({ conversationId: "preparing-recovery-conv" });
+    expect(pending.map((request) => request.requestId)).toEqual(["preparing-recovery-request"]);
+    expect(chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("startup recovery exposes preparing batches when all non-HITL peer results were recorded", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    await store.createBatch({
+      batch: {
+        batchId: "preparing-recorded-peer-batch",
+        status: "preparing",
+        agentName: "default",
+        conversationId: "preparing-recorded-peer-conv",
+        turnId: "turn-preparing-recorded-peer",
+        stepNumber: 1,
+        toolCalls: [
+          {
+            toolCallId: "call-preparing-recorded-normal",
+            toolCallIndex: 0,
+            toolName: "preparing_recorded_normal_tool",
+            toolArgs: {},
+            requiresHitl: false,
+          },
+          {
+            toolCallId: "call-preparing-recorded-hitl",
+            toolCallIndex: 1,
+            toolName: "preparing_recorded_hitl_tool",
+            toolArgs: {},
+            requiresHitl: true,
+            requestId: "preparing-recorded-peer-request",
+          },
+        ],
+        toolResults: [],
+        toolExecutions: [],
+        conversationEvents: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      requests: [{
+        requestId: "preparing-recorded-peer-request",
+        batchId: "preparing-recorded-peer-batch",
+        status: "pending",
+        agentName: "default",
+        conversationId: "preparing-recorded-peer-conv",
+        turnId: "turn-preparing-recorded-peer",
+        stepNumber: 1,
+        toolCallId: "call-preparing-recorded-hitl",
+        toolCallIndex: 1,
+        toolName: "preparing_recorded_hitl_tool",
+        originalArgs: {},
+        responseSchema: { type: "approval" },
+        createdAt: now,
+        updatedAt: now,
+      }],
     });
-    expect(result.status).toBe("completed");
-    expect(result.text).toBe("recovered from preparing");
+    await store.recordBatchToolResult("preparing-recorded-peer-batch", {
+      batchId: "preparing-recorded-peer-batch",
+      toolCallId: "call-preparing-recorded-normal",
+      toolCallIndex: 0,
+      toolName: "preparing_recorded_normal_tool",
+      result: { type: "text", text: "normal result already durable" },
+      recordedAt: now,
+    });
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+        },
+      },
+      hitl: { store, resumeOnStartup: true },
+    });
+
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch("preparing-recorded-peer-batch");
+      expect(batch?.status).toBe("waitingForHuman");
+      expect(batch?.toolResults).toHaveLength(1);
+    });
+
+    await runtime.close();
+  });
+
+  it("startup recovery fails preparing batches when peer execution started without a durable result", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn().mockResolvedValue({
+      text: "not blocked by failed preparing marker",
+      toolCalls: [],
+      finishReason: "stop",
+    } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    await store.createBatch({
+      batch: {
+        batchId: "preparing-marker-failed-batch",
+        status: "preparing",
+        agentName: "default",
+        conversationId: "preparing-marker-failed-conv",
+        turnId: "turn-preparing-marker-failed",
+        stepNumber: 1,
+        toolCalls: [
+          {
+            toolCallId: "call-preparing-marker-normal",
+            toolCallIndex: 0,
+            toolName: "preparing_marker_normal_tool",
+            toolArgs: {},
+            requiresHitl: false,
+          },
+          {
+            toolCallId: "call-preparing-marker-hitl",
+            toolCallIndex: 1,
+            toolName: "preparing_marker_hitl_tool",
+            toolArgs: {},
+            requiresHitl: true,
+            requestId: "preparing-marker-failed-request",
+          },
+        ],
+        toolResults: [],
+        toolExecutions: [],
+        conversationEvents: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      requests: [{
+        requestId: "preparing-marker-failed-request",
+        batchId: "preparing-marker-failed-batch",
+        status: "pending",
+        agentName: "default",
+        conversationId: "preparing-marker-failed-conv",
+        turnId: "turn-preparing-marker-failed",
+        stepNumber: 1,
+        toolCallId: "call-preparing-marker-hitl",
+        toolCallIndex: 1,
+        toolName: "preparing_marker_hitl_tool",
+        originalArgs: {},
+        responseSchema: { type: "approval" },
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+    await store.startBatchToolExecution("preparing-marker-failed-batch", {
+      batchId: "preparing-marker-failed-batch",
+      toolCallId: "call-preparing-marker-normal",
+      toolCallIndex: 0,
+      toolName: "preparing_marker_normal_tool",
+      startedAt: now,
+    });
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+        },
+      },
+      hitl: { store, resumeOnStartup: true },
+    });
+
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch("preparing-marker-failed-batch");
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(false);
+      expect(batch?.requests[0]?.status).toBe("failed");
+    });
+    expect(await runtime.control.listPendingHitl({ conversationId: "preparing-marker-failed-conv" })).toHaveLength(0);
+
+    const next = await runtime.processTurn("default", "new turn after failed preparing marker", {
+      conversationId: "preparing-marker-failed-conv",
+    });
+    expect(next.status).toBe("completed");
+    expect(next.text).toBe("not blocked by failed preparing marker");
+
+    await runtime.close();
+  });
+
+  it("startup recovery does not auto-rerun batches that already committed continuation append", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn().mockResolvedValue({
+      text: "must not rerun committed continuation",
+      toolCalls: [],
+      finishReason: "stop",
+    } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    await store.createBatch({
+      batch: {
+        batchId: "continuing-recovery-batch",
+        status: "preparing",
+        agentName: "default",
+        conversationId: "continuing-recovery-conv",
+        turnId: "turn-continuing-recovery",
+        stepNumber: 1,
+        toolCalls: [{
+          toolCallId: "call-continuing-recovery",
+          toolCallIndex: 0,
+          toolName: "continuing_recovery_tool",
+          toolArgs: {},
+          requiresHitl: true,
+          requestId: "continuing-recovery-request",
+        }],
+        toolResults: [],
+        toolExecutions: [],
+        conversationEvents: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      requests: [{
+        requestId: "continuing-recovery-request",
+        batchId: "continuing-recovery-batch",
+        status: "pending",
+        agentName: "default",
+        conversationId: "continuing-recovery-conv",
+        turnId: "turn-continuing-recovery",
+        stepNumber: 1,
+        toolCallId: "call-continuing-recovery",
+        toolCallIndex: 0,
+        toolName: "continuing_recovery_tool",
+        originalArgs: {},
+        responseSchema: { type: "approval" },
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+    await store.markBatchWaitingForHuman("continuing-recovery-batch");
+    await store.rejectRequest("continuing-recovery-request", {
+      decision: "reject",
+      reason: "not approved",
+      submittedAt: now,
+    });
+    const lease = await store.acquireBatchLease("continuing-recovery-batch", "previous-runtime", 1000);
+    expect(lease.status).toBe("acquired");
+    if (lease.status !== "acquired") throw new Error("expected lease");
+    await store.completeRequestWithToolResult({
+      batchId: "continuing-recovery-batch",
+      requestId: "continuing-recovery-request",
+      toolResult: {
+        batchId: "continuing-recovery-batch",
+        toolCallId: "call-continuing-recovery",
+        toolCallIndex: 0,
+        toolName: "continuing_recovery_tool",
+        result: { type: "error", error: "not approved" },
+        finalArgs: {},
+        recordedAt: now,
+      },
+      completion: {
+        toolResult: { type: "error", error: "not approved" },
+        finalArgs: {},
+        completedAt: now,
+      },
+      guard: lease.guard,
+    });
+    await store.commitBatchAppend("continuing-recovery-batch", {
+      committedAt: now,
+      toolResultEventIds: ["tool-result-continuing-recovery-batch-call-continuing-recovery"],
+      queuedSteerEventIds: [],
+      queuedSteerIds: [],
+      continuationTurnId: "turn-continuing-recovery-continuation",
+      conversationEvents: [],
+    }, lease.guard);
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+        },
+      },
+      hitl: { store, resumeOnStartup: true },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(chat).not.toHaveBeenCalled();
+    const batch = await runtime.control.getHitlBatch("continuing-recovery-batch");
+    expect(batch?.status).toBe("continuing");
+
+    const resumed = await runtime.control.resumeHitlBatch("continuing-recovery-batch");
+    expect(resumed.status).toBe("notReady");
+    expect(chat).not.toHaveBeenCalled();
 
     await runtime.close();
   });

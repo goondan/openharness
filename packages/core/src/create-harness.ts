@@ -237,6 +237,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
         return queuedForHitl;
       }
 
+      if (await runtimeRef.hasPreSteerHitlBarrier(agentName, conversationId)) {
+        throw new ConfigError(`Conversation "${conversationId}" has an active HITL barrier`);
+      }
+
       const steered = runtimeRef.steerTurn(agentName, envelope, conversationId);
       if (steered) {
         return steered;

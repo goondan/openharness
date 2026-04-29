@@ -21,6 +21,7 @@ type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
 export interface TurnSteeringController {
   drain(): InboundEnvelope[];
+  seal?(): void;
   peek?(): readonly InboundEnvelope[];
   ack?(count: number): void;
   close?(): void;
@@ -98,6 +99,7 @@ async function queueSteeredInputsForHitl(
   }
 
   if (steering.peek && steering.ack) {
+    steering.seal?.();
     const inputs = steering.peek();
     let queued = 0;
     for (const input of inputs) {

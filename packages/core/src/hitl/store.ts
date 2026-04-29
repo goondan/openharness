@@ -395,10 +395,9 @@ export class InMemoryHitlStore implements HitlStore {
       return { status: "busy", batch: clone(batch) };
     }
 
-    const nextStatus: HitlBatchStatus = batch.status === "continuing" ? "continuing" : "resuming";
     const updated = touchBatch({
       ...batch,
-      status: nextStatus,
+      status: "resuming",
       lease: {
         ownerId,
         token: `${ownerId}:${++this.leaseSequence}`,
@@ -518,6 +517,16 @@ export class InMemoryHitlStore implements HitlStore {
   ): Promise<HitlBatchRecord> {
     const batch = mustGetBatch(this.batches, batchId);
     assertBatchLease(batch, guard);
+    if (batch.status !== "continuing") {
+      throw new HitlStoreError(`Cannot complete HITL batch from ${batch.status}`);
+    }
+    if (
+      completion.continuationStatus !== "completed" &&
+      completion.continuationStatus !== "maxStepsReached" &&
+      completion.continuationStatus !== "waitingForHuman"
+    ) {
+      throw new HitlStoreError(`Cannot complete HITL batch with continuation status ${completion.continuationStatus}`);
+    }
     const updated = touchBatch({
       ...batch,
       status: "completed",
@@ -528,9 +537,26 @@ export class InMemoryHitlStore implements HitlStore {
     return clone(updated);
   }
 
-  async failBatch(batchId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlBatchRecord> {
+  async failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord> {
     const batch = mustGetBatch(this.batches, batchId);
-    assertBatchLease(batch, guard);
+    if (guard) {
+      assertBatchLease(batch, guard);
+    } else if (batch.status !== "preparing" && batch.status !== "continuing") {
+      throw new HitlStoreError(`Cannot fail HITL batch from ${batch.status} without a lease guard`);
+    }
+    for (const request of this.requests.values()) {
+      if (request.batchId !== batchId || isTerminalRequestStatus(request.status)) {
+        continue;
+      }
+      this.requests.set(
+        request.requestId,
+        touchRequest({
+          ...request,
+          status: "failed",
+          failure: clone(failure),
+        }),
+      );
+    }
     const updated = touchBatch({
       ...batch,
       status: "failed",
@@ -768,8 +794,17 @@ function isResumableBatch(batch: HitlBatchRecord): boolean {
   return (
     batch.status === "ready" ||
     batch.status === "resuming" ||
-    batch.status === "continuing" ||
     (batch.status === "failed" && batch.failure?.retryable === true)
+  );
+}
+
+function isTerminalRequestStatus(status: HitlRequestStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "expired" ||
+    status === "canceled" ||
+    status === "blocked"
   );
 }
 

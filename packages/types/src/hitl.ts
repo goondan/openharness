@@ -131,7 +131,7 @@ export interface HitlBatchAppendCommit {
 export interface HitlBatchCompletion {
   completedAt: string;
   continuationTurnId: string;
-  continuationStatus: "completed" | "aborted" | "error" | "maxStepsReached" | "waitingForHuman";
+  continuationStatus: "completed" | "maxStepsReached" | "waitingForHuman";
 }
 
 export interface HitlBatchRecord {
@@ -311,7 +311,7 @@ export interface HitlStore {
   failRequest(requestId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
   commitBatchAppend(batchId: string, appendCommit: HitlBatchAppendCommit, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
   completeBatch(batchId: string, completion: HitlBatchCompletion, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
-  failBatch(batchId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord>;
   cancelBatch(batchId: string, reason?: string): Promise<HitlBatchRecord>;
   releaseBatchLease(batchId: string, guard: HitlLeaseGuard): Promise<void>;
 }
