@@ -90,7 +90,7 @@
 ### EXEC-CONST-003 - Step은 순차적이다
 
 - 같은 Turn 안의 Step은 병렬이 아니다.
-- 한 Step 안의 tool call도 현재 구현은 순차 실행이다.
+- 한 Step 안의 tool call도 순차 실행된다.
 
 ### EXEC-CONST-004 - 스트리밍은 관찰용 부가기능이다
 

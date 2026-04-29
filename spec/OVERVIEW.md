@@ -4,20 +4,14 @@
 
 에이전트 개발자가 OpenHarness를 이용해 LLM 실행 루프, 대화 상태, ingress, 도구/확장 구성을 코드로 명시적으로 조립하고 실험할 수 있게 한다.
 
-## 2. 문제 정의와 배경
+## 2. Desired State
 
-### 2.1 As-Is
+OpenHarness는 얇고 조립 가능한 agent runtime으로 동작한다. 코어는 실행 루프, 대화 상태, ingress, 이벤트, 확장 등록 같은 공통 런타임 계약을 제공하고, 제품별 전략은 Extension/Tool/Connector/Connection이 명시적으로 구성한다.
 
-- 많은 에이전트 프레임워크는 시스템 프롬프트, 메모리 전략, 기본 도구, ingress 동작을 코어에 내장한다.
-- 이런 구조는 빠른 시작에는 유리하지만, 입력 구성이나 도구 전략을 교체하면서 실험하기 어렵다.
-- OpenHarness는 이 문제를 해결하려는 얇은 코어를 지향하지만, 문서가 구현 계약을 충분히 설명하지 못해 확장 작성자와 사용자가 내부 동작을 다시 읽어야 했다.
-
-### 2.2 해결하려는 핵심 문제
-
-- 코어가 무엇을 해주고 무엇을 절대 해주지 않는지 명확해야 한다.
-- Extension, Tool, Connector가 어떤 경계에서 동작하는지 문서만 읽고 판단할 수 있어야 한다.
-- CLI, programmatic API, ingress가 동일한 계약을 공유해야 한다.
-- 실제 구현과 스펙이 어긋나면 실험 가능성이 아니라 디버깅 비용만 늘어난다.
+- 코어 책임과 확장 책임은 문서화된 계약으로 분리된다.
+- Extension, Tool, Connector는 코어 포크 없이 각자의 경계 안에서 동작한다.
+- CLI, programmatic API, ingress는 같은 runtime 계약을 공유한다.
+- 스펙은 구현의 목표 상태와 검증 가능한 수용 기준을 정의한다.
 
 ## 3. 목표
 
@@ -29,12 +23,13 @@
 | G-4 | 확장 가능 계약 | 서드파티 Extension/Tool/Connector가 코어 포크 없이 동작할 수 있어야 한다. |
 | G-5 | 관찰 가능성 | Turn/Step/Tool/Ingress 주요 시점이 이벤트로 노출되고, ingress accepted handle과 실제 turn 실행이 상관관계를 가진다. |
 | G-6 | 안전한 실험 | 전략 교체, 메시지 압축, route 개입, CLI override가 다른 책임 경계를 오염시키지 않아야 한다. |
+| G-7 | 복구 가능한 HITL | 사람 승인이 필요한 ToolCall은 프로세스 재시작/크래시/장기간 대기 이후에도 안전하게 재개할 수 있어야 한다. |
 
 ## 4. 비목표
 
 - 완성형 에이전트 제품 제공
 - 기본 시스템 프롬프트/기본 메모리/기본 도구 자동 활성화
-- 내장 persistence 저장소 제공
+- 특정 persistence backend를 코어에 내장
 - HTTP 서버, queue consumer 같은 transport 호스팅 제공
 - 동적 hot-reload 구성 변경
 
@@ -137,6 +132,26 @@
 | FR-CONFIG-005 | CLI의 `--max-steps`는 선택된 agent의 runtime 설정만 override 한다. |
 | FR-CONFIG-006 | 패키지는 `types`, `core`, `cli`, `base` 책임으로 분리된다. |
 
+### 7.6 HITL
+
+| ID | 요구사항 |
+| --- | --- |
+| FR-HITL-001 | ToolDefinition은 선택적으로 HITL 정책을 선언할 수 있다. |
+| FR-HITL-002 | HITL 정책이 적용된 ToolCall은 tool handler 실행 전에 durable `HitlRequest`를 생성한다. |
+| FR-HITL-003 | HITL request 저장 성공 전에는 해당 tool handler를 호출하지 않는다. |
+| FR-HITL-004 | runtime은 pending HITL request 조회 API를 제공한다. |
+| FR-HITL-005 | runtime은 human result 제출 API를 제공한다. |
+| FR-HITL-006 | approve result는 ToolCall을 재개하고, reject result는 tool handler 호출 없이 거절 결과를 기록한다. |
+| FR-HITL-007 | human result는 approval, text, JSON form payload를 지원한다. |
+| FR-HITL-008 | HITL resume은 프로세스 재시작 이후에도 가능해야 한다. |
+| FR-HITL-009 | HITL resume은 같은 request에 대해 at-most-once tool handler execution을 보장한다. |
+| FR-HITL-010 | HITL lifecycle은 runtime event로 관찰 가능하다. |
+| FR-HITL-011 | HITL로 보류된 Turn은 `waitingForHuman` 상태로 관찰 가능하다. |
+| FR-HITL-012 | conversation event stream 복원 후에도 HITL request와 tool-call/tool-result 메시지 정합성이 유지된다. |
+| FR-HITL-013 | TTL 만료, 자동 reject, reminder 같은 운영 정책은 extension으로 붙일 수 있다. |
+| FR-HITL-014 | CLI는 pending request 조회와 approve/reject/submit 명령을 제공할 수 있다. |
+| FR-HITL-015 | `HitlRequest`는 기본적으로 resume에 필요한 conversation event snapshot을 포함한다. |
+
 ## 8. 비기능 요구사항
 
 | ID | 요구사항 | 검증 방향 |
@@ -146,6 +161,13 @@
 | NFR-003 | 등록 원자성: extension 하나가 실패하면 이전 등록도 남지 않는다. | unit test |
 | NFR-004 | 상관관계: `started` accepted result는 새 turn 이벤트와 같은 `turnId`를 쓰고, `steered` accepted result는 기존 active turn의 `turnId`를 반환한다. | integration test |
 | NFR-005 | 종료 안정성: `runtime.close()`는 진행 중 turn을 abort하고 정리한다. | unit/integration test |
+| NFR-HITL-001 | HITL 내구성: `hitl.requested` 이벤트 전 pending request가 durable store에 저장된다. | crash recovery test |
+| NFR-HITL-002 | HITL 멱등성: 같은 request/result 재시도로 tool handler가 중복 실행되지 않는다. | concurrency test |
+| NFR-HITL-003 | HITL 복구성: runtime 재생성 후 기존 pending request를 조회하고 재개할 수 있다. | integration test |
+| NFR-HITL-004 | HITL 관찰성: 모든 HITL 상태 전이는 `requestId`, `turnId`, `toolCallId`, `conversationId`를 포함한다. | unit test |
+| NFR-HITL-005 | HITL 보안성: human result 제출은 request identity와 agent/conversation scope 검증을 통과해야 한다. | negative test |
+| NFR-HITL-006 | HITL 호환성: HITL 미사용 도구의 실행 루프와 결과 구조는 기존 동작을 유지한다. | regression test |
+| NFR-HITL-007 | HITL retention: 완료/거절/만료된 request는 store별 retention 정책으로 정리 가능해야 한다. | adapter test |
 
 ## 9. 안정성 분류
 
@@ -157,6 +179,8 @@
 | `api.runtime` 스냅샷 의미 | Stable | 확장 작성자가 기대하는 introspection 계약 |
 | CLI 옵션 표면 | Flexible | 사용성에 따라 확장 가능 |
 | base 패키지 기본 제공 extension/tool 목록 | Flexible | 코어 계약과 분리된 편의 계층 |
+| HITL 상태 머신과 store 계약 | Stable | 외부 승인 UI와 durable adapter가 의존 |
+| HITL CLI UX | Candidate | core 계약 검증 뒤 확장 가능 |
 
 ## 10. 상세 스펙 매핑
 
@@ -165,6 +189,7 @@
 | `core/execution-loop.md` | Turn/Step/ToolCall, 스트리밍, abort, core append 정책 |
 | `core/conversation-state.md` | event sourcing, restore, replay, 상태 스코프 |
 | `core/extension-system.md` | Extension 등록, runtime snapshot, 이벤트/도구 표면 |
+| `core/hitl.md` | durable HITL request, human result 제출, crash recovery, ToolCall resume |
 | `ingress/ingress-pipeline.md` | Connector, routing, route middleware, fire-and-forget dispatch |
 | `surface/configuration-api.md` | defineHarness/createHarness/runtime API/CLI/패키지 구조 |
 
@@ -218,10 +243,47 @@
 - When `oh run ... --max-steps 7` 또는 `oh repl --max-steps 7`로 특정 agent를 실행하면
 - Then 선택된 agent runtime에만 `maxSteps=7`이 적용된다.
 
+### AC-07 HITL pending 전환
+
+- Given HITL required tool이 등록되어 있고 LLM이 해당 도구를 호출하면
+- When Step이 ToolCall에 도달하면
+- Then tool handler는 호출되지 않고 pending HITL request가 durable store에 저장되며 Turn은 `waitingForHuman`으로 종료된다.
+
+### AC-08 HITL 재시작 복구
+
+- Given pending HITL request가 durable store에 저장되어 있으면
+- When runtime을 종료하고 새 runtime을 생성한 뒤 pending HITL을 조회하면
+- Then 같은 `requestId`가 조회된다.
+
+### AC-09 HITL 승인 재개
+
+- Given pending HITL request에 approve result를 제출하면
+- When resume worker가 실행되면
+- Then 저장된 ToolCall의 tool handler가 1회 실행되고 tool-result message가 conversation에 기록된다.
+
+### AC-10 HITL 중복 방지
+
+- Given 같은 request에 같은 result가 여러 번 제출되면
+- When 여러 resume worker가 동시에 실행되어도
+- Then tool handler는 최대 1회만 호출되고 모든 호출자는 같은 completion을 관찰한다.
+
+### AC-11 HITL 거절
+
+- Given pending HITL request에 reject result를 제출하면
+- When resume이 실행되면
+- Then tool handler는 호출되지 않고 거절 ToolResult가 conversation에 기록된다.
+
+### AC-12 HITL form 입력
+
+- Given form result가 tool args를 변경하도록 mapping되어 있으면
+- When resume이 실행되면
+- Then 최종 args는 JSON Schema 검증을 다시 통과한 뒤 tool handler에 전달된다.
+
 ## 12. 검증 계획
 
 - core unit test로 실행 루프, abort, stream fallback, route priority, state restore를 검증한다.
 - createHarness 수준 테스트로 runtime snapshot completeness, conversation isolation, ingress turnId correlation, active-turn steering 경계 조건을 검증한다.
+- HITL integration test로 pending 전환, runtime 재생성 후 조회, 승인/거절 resume, concurrent resume race를 검증한다.
 - CLI 테스트로 agent 선택, `.env` 우선순위, `--max-steps` override를 검증한다.
 - `pnpm -r run typecheck`를 기본 정합성 게이트로 사용한다.
 
@@ -231,3 +293,4 @@
 - event listener는 비동기 작업을 기다려주지 않는다. 느리거나 중요한 후처리는 별도 큐/로깅 계층에서 처리해야 한다.
 - connection extension은 ingress 맥락용이며 conversation mutation 책임은 가지지 않는다.
 - system 메시지 선두 보장은 provider별 특례가 아니라 `appendSystem` 이벤트 의미와 conversation 파생 상태 규칙으로 유지한다.
+- durable HITL은 core가 특정 저장소를 내장하지 않고 `HitlStore` 계약을 통해 외부 backend나 adapter가 제공한다.
