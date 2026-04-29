@@ -51,6 +51,7 @@ export interface ToolCallContext extends StepContext {
 export interface ToolCallSummary {
   toolName: string;
   args: JsonObject;
+  invalidReason?: string;
   result?: ToolResult;
   error?: Error;
 }
@@ -109,6 +110,7 @@ export interface StepResult {
     toolCallId: string;
     toolName: string;
     args: JsonObject;
+    invalidReason?: string;
     result?: ToolResult;
   }>;
   usage?: LlmUsage;
@@ -175,7 +177,12 @@ export type RouteMiddleware = (
 
 export interface LlmResponse {
   text?: string;
-  toolCalls?: Array<{ toolCallId: string; toolName: string; args: JsonObject }>;
+  toolCalls?: Array<{
+    toolCallId: string;
+    toolName: string;
+    args: JsonObject;
+    invalidReason?: string;
+  }>;
   finishReason?: LlmFinishReason;
   rawFinishReason?: string;
   usage?: LlmUsage;

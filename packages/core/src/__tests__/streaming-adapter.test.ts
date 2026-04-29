@@ -273,6 +273,98 @@ describe("AI SDK adapter streamChat()", () => {
     });
   });
 
+  it("marks non-object tool call input from streamText as invalid", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        streamText: vi.fn().mockReturnValue({
+          fullStream: createMockFullStream([]),
+          text: Promise.resolve(""),
+          toolCalls: Promise.resolve([
+            {
+              toolCallId: "toolu_bad",
+              toolName: "get_weather",
+              input: JSON.stringify(["NYC"]),
+            },
+          ]),
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+
+    const response = await client.streamChat!(
+      mockMessages,
+      mockTools,
+      abortSignal,
+      {},
+    );
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls![0]).toEqual({
+      toolCallId: "toolu_bad",
+      toolName: "get_weather",
+      args: {},
+      invalidReason: expect.stringContaining("Malformed tool arguments"),
+    });
+    expect(response.toolCalls![0].invalidReason).toContain("Original arguments preview:");
+    expect(response.toolCalls![0].invalidReason).toContain("[\"NYC\"]");
+  });
+
+  it("preserves AI SDK invalid tool call markers from streamText", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        streamText: vi.fn().mockReturnValue({
+          fullStream: createMockFullStream([]),
+          text: Promise.resolve(""),
+          toolCalls: Promise.resolve([
+            {
+              toolCallId: "toolu_invalid",
+              toolName: "get_weather",
+              input: {},
+              invalid: true,
+              error: "invalid dynamic tool call",
+            },
+          ]),
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+
+    const response = await client.streamChat!(
+      mockMessages,
+      mockTools,
+      abortSignal,
+      {},
+    );
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls![0]).toEqual({
+      toolCallId: "toolu_invalid",
+      toolName: "get_weather",
+      args: {},
+      invalidReason: "Invalid tool call: invalid dynamic tool call",
+    });
+  });
+
   it("handles interleaved text and tool call deltas", async () => {
     const streamParts = [
       { type: "text-delta", text: "Let me check " },
