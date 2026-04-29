@@ -4,11 +4,21 @@ import type {
   LlmClient,
   AssistantModelMessage,
   ToolModelMessage,
+  ToolResult,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import { executeToolCall } from "./tool-call.js";
+import { normalizeToolArgsResult } from "../tool-args.js";
+
+function toToolResultOutput(toolResult: ToolResult) {
+  return toolResult.type === "text"
+    ? { type: "text" as const, value: toolResult.text }
+    : toolResult.type === "json"
+      ? { type: "json" as const, value: toolResult.data }
+      : { type: "error-text" as const, value: toolResult.error };
+}
 
 /**
  * Execute a single step in the agentic loop.
@@ -102,8 +112,26 @@ export async function executeStep(
       assistantContent.push({ type: "text", text: llmResponse.text });
     }
 
+    const canonicalToolCalls =
+      llmResponse.toolCalls?.map((tc) => {
+        const normalized = normalizeToolArgsResult(tc.args);
+        const malformedResult: ToolResult | undefined = normalized.ok
+          ? undefined
+          : {
+              type: "error",
+              error: normalized.error,
+            };
+
+        return {
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: normalized.args,
+          malformedResult,
+        };
+      }) ?? [];
+
     if (llmResponse.toolCalls && llmResponse.toolCalls.length > 0) {
-      for (const tc of llmResponse.toolCalls) {
+      for (const tc of canonicalToolCalls) {
         assistantContent.push({
           type: "tool-call",
           toolName: tc.toolName,
@@ -134,19 +162,45 @@ export async function executeStep(
     // e. Execute tool calls if any
     const toolCallResults: StepResult["toolCalls"] = [];
 
-    if (llmResponse.toolCalls && llmResponse.toolCalls.length > 0) {
-      for (const tc of llmResponse.toolCalls) {
+    if (canonicalToolCalls.length > 0) {
+      for (const tc of canonicalToolCalls) {
         const toolCallCtx = {
           ...stepCtx,
           toolName: tc.toolName,
           toolArgs: tc.args,
         };
 
-        const toolResult = await executeToolCall(tc.toolCallId, toolCallCtx, {
-          toolRegistry,
-          middlewareRegistry,
-          eventBus,
-        });
+        const toolResult =
+          tc.malformedResult ??
+          (await executeToolCall(tc.toolCallId, toolCallCtx, {
+            toolRegistry,
+            middlewareRegistry,
+            eventBus,
+          }));
+
+        if (tc.malformedResult) {
+          eventBus.emit("tool.start", {
+            type: "tool.start",
+            turnId,
+            agentName,
+            conversationId,
+            stepNumber,
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            args: tc.args,
+          });
+          eventBus.emit("tool.done", {
+            type: "tool.done",
+            turnId,
+            agentName,
+            conversationId,
+            stepNumber,
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            args: tc.args,
+            result: toolResult,
+          });
+        }
 
         // FR-CORE-007: Record the tool result as a non-system message
         stepCtx.conversation.emit({
@@ -160,12 +214,7 @@ export async function executeStep(
                   type: "tool-result",
                   toolCallId: tc.toolCallId,
                   toolName: tc.toolName,
-                  output:
-                    toolResult.type === "text"
-                      ? { type: "text", value: toolResult.text }
-                      : toolResult.type === "json"
-                        ? { type: "json", value: toolResult.data }
-                        : { type: "error-text", value: toolResult.error },
+                  output: toToolResultOutput(toolResult),
                 },
               ],
             } satisfies ToolModelMessage,

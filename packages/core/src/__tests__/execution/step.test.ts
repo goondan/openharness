@@ -12,6 +12,7 @@ import type {
   ToolDefinition,
   Message,
   MessageEvent,
+  JsonObject,
 } from "@goondan/openharness-types";
 
 // -----------------------------------------------------------------------
@@ -325,6 +326,87 @@ describe("executeStep", () => {
     expect(result.toolCalls[0].result).toEqual({ type: "text", text: "A result" });
     expect(result.toolCalls[1].toolCallId).toBe("call-b");
     expect(result.toolCalls[1].result).toEqual({ type: "text", text: "B result" });
+  });
+
+  it("malformed JSON-string tool args are stored as valid tool calls with error tool results", async () => {
+    const validHandler = vi.fn(async () => ({ type: "text" as const, text: "valid result" }));
+    const invalidHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("valid_tool", validHandler));
+    toolRegistry.register(makeTool("invalid_tool", invalidHandler));
+    const malformedArgs =
+      '{"command": ["grep", "-r", "ThrottlingOverride\\|throttling_overrides\\|throttling_seconds"]}' as unknown as JsonObject;
+
+    const eventBus = new EventBus();
+    const toolDoneListener = vi.fn();
+    eventBus.on("tool.done", toolDoneListener);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-valid", toolName: "valid_tool", args: { value: "ok" } },
+        { toolCallId: "call-malformed", toolName: "invalid_tool", args: malformedArgs },
+      ],
+    });
+
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry, eventBus });
+
+    const result = await executeStep(ctx, deps);
+
+    expect(validHandler).toHaveBeenCalledOnce();
+    expect(invalidHandler).not.toHaveBeenCalled();
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls[0].args).toEqual({ value: "ok" });
+    expect(result.toolCalls[0].result).toEqual({ type: "text", text: "valid result" });
+    expect(result.toolCalls[1].args).toEqual({});
+    expect(result.toolCalls[1].result).toEqual({
+      type: "error",
+      error: expect.stringContaining("Malformed tool arguments"),
+    });
+    expect(result.toolCalls[1].result?.type === "error" ? result.toolCalls[1].result.error : "").toContain(
+      "Original arguments preview:",
+    );
+    expect(result.toolCalls[1].result?.type === "error" ? result.toolCalls[1].result.error : "").toContain(
+      "ThrottlingOverride\\|throttling_overrides\\|throttling_seconds",
+    );
+
+    const assistantMessage = ctx.conversation.messages.find((m: Message) => m.data.role === "assistant");
+    const assistantContent = assistantMessage?.data.content as Array<{
+      type: string;
+      toolCallId?: string;
+      input?: unknown;
+    }>;
+    expect(assistantContent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "tool-call", toolCallId: "call-valid", input: { value: "ok" } }),
+        expect.objectContaining({ type: "tool-call", toolCallId: "call-malformed", input: {} }),
+      ]),
+    );
+
+    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[1].data.content).toEqual([
+      expect.objectContaining({
+        type: "tool-result",
+        toolCallId: "call-malformed",
+        output: expect.objectContaining({
+          type: "error-text",
+          value: expect.stringContaining("Original arguments preview:"),
+        }),
+      }),
+    ]);
+
+    expect(toolDoneListener).toHaveBeenCalledTimes(2);
+    expect(toolDoneListener.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        toolCallId: "call-malformed",
+        args: {},
+        result: expect.objectContaining({
+          type: "error",
+          error: expect.stringContaining("Malformed tool arguments"),
+        }),
+      }),
+    );
   });
 
   // FR-CORE-007: Core appends LLM response to conversation
