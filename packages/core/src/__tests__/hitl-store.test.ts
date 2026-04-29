@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HitlBatchToolResult, HitlRequestRecord, ToolResult } from "@goondan/openharness-types";
+import type { HitlBatchRecord, HitlBatchToolResult, HitlRequestRecord, ToolResult } from "@goondan/openharness-types";
 import { InMemoryHitlStore } from "../hitl/store.js";
 
 function requestRecord(overrides: Partial<HitlRequestRecord> = {}): HitlRequestRecord {
@@ -24,6 +24,63 @@ function requestRecord(overrides: Partial<HitlRequestRecord> = {}): HitlRequestR
 }
 
 describe("InMemoryHitlStore", () => {
+  it("keeps preparing batches as conversation barriers without exposing them as steer queues", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    const batch: HitlBatchRecord = {
+      batchId: "preparing-batch-1",
+      status: "preparing",
+      agentName: "default",
+      conversationId: "preparing-conversation",
+      turnId: "turn-1",
+      stepNumber: 1,
+      toolCalls: [{
+        toolCallId: "tool-call-1",
+        toolCallIndex: 0,
+        toolName: "tool",
+        toolArgs: {},
+        requiresHitl: true,
+        requestId: "request-1",
+      }],
+      toolResults: [],
+      toolExecutions: [],
+      conversationEvents: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await store.createBatch({
+      batch,
+      requests: [requestRecord({
+        requestId: "request-1",
+        batchId: "preparing-batch-1",
+        conversationId: "preparing-conversation",
+      })],
+    });
+
+    expect(await store.getOpenBatchByConversation("default", "preparing-conversation")).toBeNull();
+
+    const duplicate = await store.createBatch({
+      batch: {
+        ...batch,
+        batchId: "preparing-batch-2",
+        toolCalls: [{
+          ...batch.toolCalls[0]!,
+          toolCallId: "tool-call-2",
+          requestId: "request-2",
+        }],
+      },
+      requests: [requestRecord({
+        requestId: "request-2",
+        batchId: "preparing-batch-2",
+        toolCallId: "tool-call-2",
+        conversationId: "preparing-conversation",
+      })],
+    });
+    expect(duplicate.status).toBe("conflict");
+    if (duplicate.status !== "conflict") throw new Error("expected conflict");
+    expect(duplicate.openBatch.batchId).toBe("preparing-batch-1");
+  });
+
   it("lists only pending and resume-recoverable HITL requests", async () => {
     const store = new InMemoryHitlStore();
     const now = new Date().toISOString();

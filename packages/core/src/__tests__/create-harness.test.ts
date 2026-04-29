@@ -186,6 +186,22 @@ class FailingOnceCompleteRequestStore extends InMemoryHitlStore {
   }
 }
 
+class FailingOnceLegacyCompleteStore extends InMemoryHitlStore {
+  private failed = false;
+
+  override async completeRequest(
+    requestId: string,
+    completion: HitlCompletion,
+    guard: HitlLeaseGuard,
+  ): Promise<HitlRequestRecord> {
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("legacy complete request store write failed");
+    }
+    return super.completeRequest(requestId, completion, guard);
+  }
+}
+
 // We need to mock createLlmClient so we don't need real API clients
 vi.mock("../models/index.js", () => ({
   createLlmClient: vi.fn(() => mockLlmClient()),
@@ -657,6 +673,114 @@ describe("createHarness", () => {
 
     await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
     expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("steered before HITL return");
+
+    await runtime.close();
+  });
+
+  it("steers ingress into the active turn while a HITL batch is still preparing", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const firstChatStarted = deferred<void>();
+    const releaseFirstChat = deferred<LlmResponse>();
+    const chat = vi.fn()
+      .mockImplementationOnce(async () => {
+        firstChatStarted.resolve();
+        return releaseFirstChat.promise;
+      })
+      .mockResolvedValue({
+        text: "preparing steer observed",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const normalStarted = deferred<void>();
+    const releaseNormal = deferred<ToolResult>();
+    const connector: Connector = {
+      name: "preparing-steer-connector",
+      normalize: vi.fn(async (ctx) => ({
+        name: "message",
+        content: [{ type: "text", text: String((ctx.payload as { text: string }).text) }],
+        properties: {},
+        conversationId: "preparing-steer-conv",
+        source: {
+          connector: "preparing-steer-connector",
+          connectionName: ctx.connectionName,
+          receivedAt: ctx.receivedAt,
+        },
+      } satisfies InboundEnvelope)),
+    };
+    const normal = vi.fn(async () => {
+      normalStarted.resolve();
+      return releaseNormal.promise;
+    });
+    const hitl = vi.fn(async () => ({ type: "text" as const, text: "approved preparing steer tool" }));
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "preparing_normal_tool",
+              description: "Normal peer that delays preparation",
+              parameters: { type: "object", additionalProperties: false },
+              handler: normal,
+            },
+            {
+              name: "preparing_hitl_tool",
+              description: "Requires approval after preparation",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: hitl,
+            },
+          ],
+        },
+      },
+      connections: {
+        "preparing-steer": {
+          connector,
+          rules: [{ match: { event: "message" }, agent: "default" }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const turnPromise = runtime.processTurn("default", "start preparing steer HITL", {
+      conversationId: "preparing-steer-conv",
+    });
+    await firstChatStarted.promise;
+    releaseFirstChat.resolve({
+      toolCalls: [
+        { toolCallId: "call-preparing-normal", toolName: "preparing_normal_tool", args: {} },
+        { toolCallId: "call-preparing-hitl", toolName: "preparing_hitl_tool", args: {} },
+      ],
+      finishReason: "tool-calls",
+    } satisfies LlmResponse);
+    await normalStarted.promise;
+
+    const steered = await runtime.ingress.receive({
+      connectionName: "preparing-steer",
+      payload: { text: "steered while preparing" },
+    });
+    expect(steered).toHaveLength(1);
+    expect(steered[0].disposition).toBe("steered");
+
+    releaseNormal.resolve({ type: "text", text: "normal done" });
+    const result = await turnPromise;
+    expect(result.status).toBe("waitingForHuman");
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.queuedSteerCount).toBe(1);
+    });
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: result.pendingHitlRequestIds![0]!,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+    await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("steered while preparing");
 
     await runtime.close();
   });
@@ -1211,6 +1335,83 @@ describe("createHarness", () => {
     await waitUntil(async () => {
       const request = await runtime.control.getHitlRequest(result.pendingHitlRequestIds![0]!);
       expect(request?.status).toBe("failed");
+    });
+
+    await runtime.close();
+  });
+
+  it("keeps legacy stored-result completion failures retryable", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-legacy-complete-retry-1", toolName: "legacy_complete_retry_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({
+        text: "legacy completion retry observed",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new FailingOnceLegacyCompleteStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved legacy complete retry tool" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "legacy_complete_retry_tool",
+            description: "Requires approval before legacy completion retry",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "start legacy complete retry HITL", {
+      conversationId: "legacy-complete-retry-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const batchId = result.pendingHitlBatchId!;
+    const requestId = result.pendingHitlRequestIds![0]!;
+    await store.resolveRequest(requestId, { decision: "approve", submittedAt: new Date().toISOString() });
+    const lease = await store.acquireBatchLease(batchId, "legacy-partial-owner", 1000);
+    expect(lease.status).toBe("acquired");
+    if (lease.status !== "acquired") throw new Error("expected lease");
+    await store.startRequestExecution(requestId, lease.guard, new Date().toISOString());
+    await store.recordBatchToolResult(batchId, {
+      batchId,
+      toolCallId: "call-legacy-complete-retry-1",
+      toolCallIndex: 0,
+      toolName: "legacy_complete_retry_tool",
+      result: { type: "text", text: "stored legacy result" },
+      finalArgs: {},
+      recordedAt: new Date().toISOString(),
+    });
+    await store.releaseBatchLease(batchId, lease.guard);
+
+    const firstResume = await runtime.control.resumeHitlBatch(batchId);
+    expect(firstResume.status).toBe("failed");
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(batchId);
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(true);
+    });
+    expect(handler).not.toHaveBeenCalled();
+
+    const secondResume = await runtime.control.resumeHitlBatch(batchId);
+    expect(secondResume.status).toBe("completed");
+    expect(handler).not.toHaveBeenCalled();
+    await waitUntil(async () => {
+      const request = await runtime.control.getHitlRequest(requestId);
+      expect(request?.status).toBe("completed");
     });
 
     await runtime.close();

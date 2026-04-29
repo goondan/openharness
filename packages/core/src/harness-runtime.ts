@@ -906,11 +906,18 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             throw new HitlResumeError(`HITL request not found for "${toolCall.toolCallId}"`, false);
           }
           if (request.status !== "completed") {
-            await this._hitlStore.completeRequest(request.requestId, {
-              toolResult: storedResult.result,
-              finalArgs: storedResult.finalArgs,
-              completedAt: new Date().toISOString(),
-            }, guard);
+            try {
+              await this._hitlStore.completeRequest(request.requestId, {
+                toolResult: storedResult.result,
+                finalArgs: storedResult.finalArgs,
+                completedAt: new Date().toISOString(),
+              }, guard);
+            } catch (err) {
+              const error = err instanceof Error ? err : new Error(String(err));
+              throw error instanceof HitlResumeError
+                ? error
+                : new HitlResumeError(error.message, true);
+            }
             this._runtimeEvents.emit("hitl.completed", {
               type: "hitl.completed",
               batchId: requireHitlRequestBatchId(request),

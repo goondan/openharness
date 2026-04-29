@@ -23,8 +23,16 @@ import type {
 } from "@goondan/openharness-types";
 import { randomBytes } from "node:crypto";
 
-const OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
+const CONVERSATION_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
   "preparing",
+  "waitingForHuman",
+  "ready",
+  "resuming",
+  "continuing",
+  "failed",
+]);
+
+const STEER_QUEUE_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
   "waitingForHuman",
   "ready",
   "resuming",
@@ -93,11 +101,11 @@ export class InMemoryHitlStore implements HitlStore {
       };
     }
 
-    const open = await this.getOpenBatchByConversation(input.batch.agentName, input.batch.conversationId);
+    const open = this.findOpenBatchByConversation(input.batch.agentName, input.batch.conversationId);
     if (open) {
       return {
         status: "conflict",
-        openBatch: open,
+        openBatch: clone(open),
       };
     }
 
@@ -213,6 +221,19 @@ export class InMemoryHitlStore implements HitlStore {
         isSteerQueueOpenBatch(batch)
       ) {
         return clone(batch);
+      }
+    }
+    return null;
+  }
+
+  private findOpenBatchByConversation(agentName: string, conversationId: string): HitlBatchRecord | null {
+    for (const batch of this.batches.values()) {
+      if (
+        batch.agentName === agentName &&
+        batch.conversationId === conversationId &&
+        isConversationOpenBatch(batch)
+      ) {
+        return batch;
       }
     }
     return null;
@@ -754,7 +775,11 @@ function isResumableBatch(batch: HitlBatchRecord): boolean {
 }
 
 function isSteerQueueOpenBatch(batch: HitlBatchRecord): boolean {
-  return OPEN_BATCH_STATUSES.has(batch.status) && !batch.metadata?.["steerQueueClosedAt"];
+  return STEER_QUEUE_OPEN_BATCH_STATUSES.has(batch.status) && !batch.metadata?.["steerQueueClosedAt"];
+}
+
+function isConversationOpenBatch(batch: HitlBatchRecord): boolean {
+  return CONVERSATION_OPEN_BATCH_STATUSES.has(batch.status) && !batch.metadata?.["steerQueueClosedAt"];
 }
 
 function hasPendingRequests(batchId: string, requests: Map<string, HitlRequestRecord>): boolean {

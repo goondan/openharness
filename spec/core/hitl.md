@@ -105,15 +105,16 @@ LLM이 한 step에서 여러 tool call을 반환했을 때, 그중 하나라도 
 4. runtime은 `HitlStore.createBatch()`를 호출해 batch와 request들을 atomic하게 저장한다.
 5. runtime은 non-HITL tool call을 실행하고 결과를 batch record에 저장한다.
 6. 모든 non-HITL result가 저장되면 runtime은 `HitlStore.markWaitingForHuman()`을 호출한다.
-7. batch가 `waitingForHuman`이 된 뒤 `hitl.batch.requested`와 `hitl.requested` 이벤트를 발행한다.
-8. current turn은 `waitingForHuman`으로 settle한다.
+7. 같은 step 실행 중 active turn에 들어온 steered input은 batch의 durable queued steer로 이동한다.
+8. batch가 `waitingForHuman`이 된 뒤 `hitl.batch.requested`와 `hitl.requested` 이벤트를 발행한다.
+9. current turn은 `waitingForHuman`으로 settle한다.
 
 **Failure Handling:**
 
 - `createBatch()` 실패 시 어떤 tool handler도 호출하지 않고 turn은 error로 종료한다.
 - non-HITL handler 시작 전 실패는 turn error 또는 batch failed로 처리할 수 있다.
 - non-HITL handler 시작 후 실패/크래시는 자동 재실행하지 않는다. store에 남은 상태를 기준으로 operator recovery 또는 failed 상태로 남긴다.
-- `preparing` 상태는 pending UI/API에 노출되는 안정 상태가 아니다. startup recovery는 안전하게 완료할 수 없는 `preparing` batch를 `failed` 또는 `blocked`로 수렴시킬 수 있다.
+- `preparing` 상태는 pending UI/API 또는 durable steer queue 대상으로 노출되는 안정 상태가 아니다. startup recovery는 안전하게 완료할 수 없는 `preparing` batch를 `failed`, `blocked`, 또는 `canceled`로 수렴시킬 수 있다.
 
 ### 6.2 Flow: pending HITL query
 
@@ -181,6 +182,7 @@ type SubmitHitlResult =
 3. input을 durable envelope로 만들 수 있으면 `HitlStore.enqueueSteer()`로 저장한다.
 4. 저장 성공 후 `queuedForHitl` 또는 equivalent queued result를 반환한다.
 5. durable envelope를 만들 수 없거나 queue write가 실패하면 input을 accepted로 반환하지 않는다.
+6. `preparing` batch는 queueable batch가 아니다. 같은 conversation에 active turn이 있으면 input은 active turn steering으로 들어가며, 그 turn이 HITL로 settle할 때 durable queued steer로 이동한다.
 
 **Required Paths:**
 
@@ -192,6 +194,7 @@ type SubmitHitlResult =
 
 - pending HITL barrier가 있는 conversation에서 새 LLM step이 몰래 시작되면 안 된다.
 - queue 저장 실패가 normal steer 또는 new turn fallback으로 바뀌면 안 된다.
+- `preparing` batch는 같은 conversation의 중복 batch 생성을 막는 barrier지만, pending user input을 durable queue로 받는 대상은 아니다.
 
 ### 6.5 Flow: HITL batch resume
 
@@ -240,7 +243,7 @@ type SubmitHitlResult =
 3. `ready` batch는 resume task로 schedule한다.
 4. resume 도중 실패했지만 external handler 재실행이 필요 없는 retryable batch는 resume task로 schedule한다.
 5. `blocked` batch는 자동 resume하지 않는다.
-6. `preparing` batch는 안전하게 waiting으로 수렴 가능한 경우에만 복구하고, 아니면 failed/blocked로 수렴시킨다.
+6. `preparing` batch는 안전하게 waiting으로 수렴 가능한 경우에만 복구하고, 아니면 failed/blocked/canceled로 수렴시킨다.
 
 **Guarantee:**
 
@@ -360,14 +363,14 @@ interface HitlStore {
     requests: HitlRequestRecord[];
   }): Promise<CreateHitlBatchResult>;
 
-  markWaitingForHuman(batchId: string): Promise<HitlBatchRecord>;
+  markBatchWaitingForHuman(batchId: string): Promise<HitlBatchRecord>;
 
   getBatch(batchId: string): Promise<HitlBatchRecord | null>;
   getRequest(requestId: string): Promise<HitlRequestRecord | null>;
   listPendingBatches(filter?: HitlBatchFilter): Promise<HitlBatchRecord[]>;
   listPendingRequests(filter?: HitlRequestFilter): Promise<HitlRequestRecord[]>;
   listRecoverableBatches(filter?: HitlBatchFilter): Promise<HitlBatchRecord[]>;
-  getQueueableBatchByConversation(agentName: string, conversationId: string): Promise<HitlBatchRecord | null>;
+  getOpenBatchByConversation(agentName: string, conversationId: string): Promise<HitlBatchRecord | null>;
 
   recordBatchToolResult(batchId: string, result: HitlBatchToolResult): Promise<HitlBatchRecord>;
 
@@ -381,23 +384,31 @@ interface HitlStore {
     batchId: string;
     requestId: string;
     toolResult: HitlBatchToolResult;
-  }): Promise<HitlRequestRecord>;
+    completion: HitlCompletion;
+    guard: HitlLeaseGuard;
+  }): Promise<{ batch: HitlBatchRecord; request: HitlRequestRecord }>;
+  completeRequest(requestId: string, completion: HitlCompletion, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
 
   enqueueSteer(batchId: string, input: HitlQueuedSteerInput): Promise<HitlQueuedSteer>;
+  drainQueuedSteers(batchId: string, guard: HitlLeaseGuard): Promise<HitlQueuedSteer[]>;
   listQueuedSteers(batchId: string): Promise<HitlQueuedSteer[]>;
-  commitResumeAppend(input: HitlResumeAppendCommitInput): Promise<HitlBatchRecord>;
+  commitBatchAppend(batchId: string, appendCommit: HitlBatchAppendCommit, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
 
-  startResume(batchId: string): Promise<HitlBatchRecord>;
-  completeBatch(batchId: string, completion: HitlBatchCompletion): Promise<HitlBatchRecord>;
-  failBatch(batchId: string, failure: HitlFailure): Promise<HitlBatchRecord>;
-  blockBatch(batchId: string, reason: HitlFailure): Promise<HitlBatchRecord>;
+  acquireBatchLease(batchId: string, ownerId: string, ttlMs: number): Promise<HitlBatchLeaseResult>;
+  startBatchToolExecution(batchId: string, marker: HitlBatchToolExecutionMarker): Promise<HitlBatchRecord>;
+  startRequestExecution(requestId: string, guard: HitlLeaseGuard, startedAt: string): Promise<HitlRequestRecord>;
+  completeBatch(batchId: string, completion: HitlBatchCompletion, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  cancelBatch(batchId: string, reason?: string): Promise<HitlBatchRecord>;
+  releaseBatchLease(batchId: string, guard: HitlLeaseGuard): Promise<void>;
 }
 ```
 
 Required store semantics:
 
 - `createBatch()`는 같은 `(agentName, conversationId)`에 open batch가 있으면 `conflict`를 반환해야 한다.
-- `markWaitingForHuman()`은 batch/request와 필요한 non-HITL results가 저장된 경우에만 성공한다.
+- `preparing` batch는 open batch conflict 대상이지만 queueable batch lookup 결과에는 포함하지 않는다.
+- `markBatchWaitingForHuman()`은 batch/request와 필요한 non-HITL results가 저장된 경우에만 성공한다.
 - `submitRequestResult()`는 request result 저장과 batch ready 전환을 같은 atomic operation으로 처리한다.
 - `completeRequestWithToolResult()`는 HITL handler result 저장과 request completion을 같은 atomic operation으로 처리한다.
 - `commitResumeAppend()`는 appended tool-result ids, queued steer ids, continuation turn id를 함께 commit한다.
@@ -488,7 +499,7 @@ interface HitlBatchToolResult {
 }
 
 interface HitlQueuedSteerInput {
-  source: "ingress" | "direct";
+  source: "ingress" | "dispatch";
   envelope: InboundEnvelope;
   receivedAt: string;
   metadata?: Record<string, JsonValue>;
@@ -558,6 +569,7 @@ type SubmitRequestResult =
 - Given the final peer HITL request is submitted, When submit succeeds, Then the request result and batch `ready` transition happen atomically and resume is scheduled.
 - Given the same request submit is retried with the same idempotency key, When submit is called again, Then no duplicate mutation occurs and the existing request state is returned.
 - Given pending HITL exists for a conversation, When ingress targets the same conversation, Then it is stored as queued steer and no new turn starts.
+- Given a HITL batch is still `preparing` and the original turn is active, When ingress targets the same conversation, Then it is steered into the active turn and moved into durable queued steer before the turn settles `waitingForHuman`.
 - Given pending HITL exists for a conversation, When direct `steerTurn()` targets the same conversation, Then it is stored as queued steer or rejected/error; it must not be silently dropped.
 - Given pending HITL exists for a conversation, When direct `processTurn()` targets the same conversation, Then it must not append a new user message or start a new LLM step.
 - Given queued steer exists, When resume appends tool results, Then queued steer is appended after tool results and before continuation step.
@@ -588,6 +600,7 @@ type SubmitRequestResult =
 - first peer submit returns waiting-for-peers behavior
 - final peer submit schedules resume
 - pending HITL ingress returns `queuedForHitl`
+- ingress during `preparing` active turn is not accepted as `queuedForHitl` until it is moved to durable queued steer at HITL settlement
 - pending HITL direct `steerTurn()` queues or rejects without dropping input
 - pending HITL direct `processTurn()` does not start a new turn
 - queued steer drains after tool-result flush and before continuation
