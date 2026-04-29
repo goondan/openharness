@@ -337,6 +337,88 @@ describe("AI SDK adapter chat()", () => {
     });
   });
 
+  it("marks invalid JSON-string tool call input from generateText as invalid", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "",
+          toolCalls: [
+            {
+              toolCallId: "toolu_bad",
+              toolName: "get_weather",
+              input: "{\"location\":",
+            },
+          ],
+          finishReason: "tool-calls",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls![0]).toEqual({
+      toolCallId: "toolu_bad",
+      toolName: "get_weather",
+      args: {},
+      invalidReason: expect.stringContaining("Malformed tool arguments"),
+    });
+    expect(response.toolCalls![0].invalidReason).toContain("Original arguments preview:");
+    expect(response.toolCalls![0].invalidReason).toContain("{\"location\":");
+  });
+
+  it("preserves AI SDK invalid tool call markers from generateText", async () => {
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "",
+          toolCalls: [
+            {
+              toolCallId: "toolu_invalid",
+              toolName: "get_weather",
+              input: {},
+              invalid: true,
+              error: new Error("invalid dynamic tool call"),
+            },
+          ],
+          finishReason: "tool-calls",
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls![0]).toEqual({
+      toolCallId: "toolu_invalid",
+      toolName: "get_weather",
+      args: {},
+      invalidReason: "Invalid tool call: invalid dynamic tool call",
+    });
+  });
+
   it("passes messages as ModelMessage[] to generateText", async () => {
     let capturedArgs: Record<string, unknown> | undefined;
     vi.doMock("ai", async (importOriginal) => {

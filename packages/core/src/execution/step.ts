@@ -115,17 +115,19 @@ export async function executeStep(
     const canonicalToolCalls =
       llmResponse.toolCalls?.map((tc) => {
         const normalized = normalizeToolArgsResult(tc.args);
-        const malformedResult: ToolResult | undefined = normalized.ok
-          ? undefined
-          : {
+        const invalidReason = tc.invalidReason ?? (normalized.ok ? undefined : normalized.error);
+        const malformedResult: ToolResult | undefined = invalidReason
+          ? {
               type: "error",
-              error: normalized.error,
-            };
+              error: invalidReason,
+            }
+          : undefined;
 
         return {
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
           args: normalized.args,
+          invalidReason,
           malformedResult,
         };
       }) ?? [];
@@ -228,6 +230,7 @@ export async function executeStep(
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
           args: tc.args,
+          ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
           result: toolResult,
         });
       }

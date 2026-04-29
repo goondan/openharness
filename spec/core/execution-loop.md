@@ -45,6 +45,7 @@
   5. 스트리밍 중간에 `step.textDelta`, `step.toolCallDelta` 이벤트를 발행한다.
   6. assistant 응답을 `appendMessage`로 기록한다.
   7. tool call이 있으면 순차적으로 ToolCall을 실행한다.
+     - tool call 인자가 invalid JSON이거나 JSON object로 해석되지 않으면 실제 ToolCall 실행은 건너뛰고, provider-safe한 `{}` input의 assistant tool-call과 error tool-result를 기록해 다음 Step에서 모델이 재시도할 수 있게 한다.
   8. 각 tool result를 `appendMessage`로 기록한다.
   9. `step.done`을 발행하고 `StepResult`를 반환한다.
 - Failure:
@@ -136,6 +137,7 @@ interface StepResult {
     toolCallId: string;
     toolName: string;
     args: JsonObject;
+    invalidReason?: string;
     result?: ToolResult;
   }>;
 }

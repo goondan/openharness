@@ -259,6 +259,7 @@ export async function executeTurn(
         toolCalls: lastStepResult.toolCalls.map((tc) => ({
           toolName: tc.toolName,
           args: tc.args,
+          invalidReason: tc.invalidReason,
           result: tc.result,
         })),
         finishReason: lastStepResult.finishReason,

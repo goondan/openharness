@@ -21,7 +21,7 @@ import type {
   ToolDefinition,
 } from "@goondan/openharness-types";
 import { isJsonSchemaWrapper } from "@goondan/openharness-types";
-import { normalizeToolArgs } from "../tool-args.js";
+import { normalizeToolArgsResult } from "../tool-args.js";
 
 type ProviderFactory = {
   languageModel: (modelId: string) => LanguageModel;
@@ -129,6 +129,57 @@ function toLlmUsage(usage: LanguageModelUsage | undefined): LlmUsage | undefined
   };
 }
 
+function formatInvalidToolCallReason(error: unknown): string {
+  if (error instanceof Error) {
+    return `Invalid tool call: ${error.message}`;
+  }
+  if (typeof error === "string" && error.length > 0) {
+    return `Invalid tool call: ${error}`;
+  }
+  if (error !== undefined) {
+    try {
+      return `Invalid tool call: ${JSON.stringify(error)}`;
+    } catch {
+      return `Invalid tool call: ${String(error)}`;
+    }
+  }
+
+  return "Invalid tool call: AI SDK marked the tool call as invalid.";
+}
+
+function toLlmToolCalls(
+  toolCalls:
+    | readonly {
+        toolCallId: string;
+        toolName: string;
+        input?: unknown;
+        invalid?: boolean;
+        error?: unknown;
+      }[]
+    | undefined,
+): LlmResponse["toolCalls"] {
+  if (!toolCalls || toolCalls.length === 0) {
+    return undefined;
+  }
+
+  return toolCalls.map((tc) => {
+    const normalized = normalizeToolArgsResult(
+      tc.input === undefined ? {} : tc.input,
+    );
+
+    return {
+      toolCallId: tc.toolCallId,
+      toolName: tc.toolName,
+      args: normalized.args,
+      ...(tc.invalid === true
+        ? { invalidReason: formatInvalidToolCallReason(tc.error) }
+        : normalized.ok
+          ? {}
+          : { invalidReason: normalized.error }),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Public: createAiSdkClient
 // ---------------------------------------------------------------------------
@@ -173,16 +224,8 @@ export function createAiSdkClient(
           ? result.text
           : undefined;
 
-      // Extract tool calls
       // ai-sdk v6 uses `input` (not `args`) on tool call objects.
-      const toolCalls =
-        result.toolCalls && result.toolCalls.length > 0
-          ? result.toolCalls.map((tc) => ({
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: normalizeToolArgs(tc.input ?? {}),
-            }))
-          : undefined;
+      const toolCalls = toLlmToolCalls(result.toolCalls);
 
       const usage = toLlmUsage(result.usage);
 
@@ -256,14 +299,7 @@ export function createAiSdkClient(
         text: text && text.trim().length > 0 ? text : undefined,
         finishReason: normalizeFinishReason(finishReason),
         rawFinishReason,
-        toolCalls:
-          toolCalls && toolCalls.length > 0
-            ? toolCalls.map((tc) => ({
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                args: normalizeToolArgs(tc.input ?? {}),
-              }))
-            : undefined,
+        toolCalls: toLlmToolCalls(toolCalls),
         ...(usage ? { usage } : {}),
       };
     },

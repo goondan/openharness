@@ -453,6 +453,86 @@ describe("executeStep", () => {
     );
   });
 
+  it("invalid tool calls are not executed and are returned as tool error results", async () => {
+    const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("my_tool", toolHandler));
+    const invalidReason = [
+      "Malformed tool arguments: expected a JSON object.",
+      "The tool was not executed. Retry this tool call with a valid object input.",
+      "Original arguments preview: [\"NYC\"]",
+    ].join("\n");
+
+    const eventBus = new EventBus();
+    const toolStartListener = vi.fn();
+    eventBus.on("tool.start", toolStartListener);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        {
+          toolCallId: "tc-invalid",
+          toolName: "my_tool",
+          args: {},
+          invalidReason,
+        },
+      ],
+    });
+
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry, eventBus });
+
+    const result = await executeStep(ctx, deps);
+
+    expect(toolHandler).not.toHaveBeenCalled();
+    expect(toolStartListener).toHaveBeenCalledOnce();
+    expect(toolStartListener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolCallId: "tc-invalid",
+        toolName: "my_tool",
+        args: {},
+      }),
+    );
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]).toEqual({
+      toolCallId: "tc-invalid",
+      toolName: "my_tool",
+      args: {},
+      invalidReason,
+      result: {
+        type: "error",
+        error: invalidReason,
+      },
+    });
+
+    const assistantMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].data.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-call",
+          toolCallId: "tc-invalid",
+          toolName: "my_tool",
+          input: {},
+        }),
+      ])
+    );
+
+    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].data.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-result",
+          toolCallId: "tc-invalid",
+          output: {
+            type: "error-text",
+            value: invalidReason,
+          },
+        }),
+      ])
+    );
+  });
+
   // FR-CORE-007: LLM response with tool-call content parts appended
   it("FR-CORE-007: LLM response with tool calls includes tool-call content parts", async () => {
     const toolRegistry = new ToolRegistry();
