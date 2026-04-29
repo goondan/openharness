@@ -258,52 +258,61 @@ export async function executeStep(
           throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
         }
 
-        for (const tc of plannedToolCalls) {
-          if (tc.requiresHitl) {
+        let exposedForHuman = false;
+        try {
+          for (const tc of plannedToolCalls) {
+            if (tc.requiresHitl) {
+              toolCallResults.push({
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+              });
+              continue;
+            }
+
+            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
+              toolRegistry,
+              middlewareRegistry,
+              eventBus,
+              hitlStore,
+              batchId,
+            }));
+
+            await hitlStore.recordBatchToolResult(batchId, {
+              batchId,
+              toolCallId: tc.toolCallId,
+              toolCallIndex: tc.toolCallIndex,
+              toolName: tc.toolName,
+              result,
+              recordedAt: new Date().toISOString(),
+            });
+
             toolCallResults.push({
               toolCallId: tc.toolCallId,
               toolName: tc.toolName,
               args: tc.args,
+              result,
             });
-            continue;
           }
 
-          const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
-            toolRegistry,
-            middlewareRegistry,
-            eventBus,
-            hitlStore,
-            batchId,
-          }));
-
-          await hitlStore.recordBatchToolResult(batchId, {
-            batchId,
-            toolCallId: tc.toolCallId,
-            toolCallIndex: tc.toolCallIndex,
-            toolName: tc.toolName,
-            result,
-            recordedAt: new Date().toISOString(),
+          const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
+          exposedForHuman = true;
+          const waitingRequests = await hitlStore.listBatchRequests(batchId);
+          eventBus.emit("hitl.batch.requested", {
+            type: "hitl.batch.requested",
+            batch: toHitlBatchView(waitingBatch, waitingRequests),
           });
-
-          toolCallResults.push({
-            toolCallId: tc.toolCallId,
-            toolName: tc.toolName,
-            args: tc.args,
-            result,
-          });
-        }
-
-        const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
-        const waitingRequests = await hitlStore.listBatchRequests(batchId);
-        eventBus.emit("hitl.batch.requested", {
-          type: "hitl.batch.requested",
-          batch: toHitlBatchView(waitingBatch, waitingRequests),
-        });
-        for (const request of waitingRequests) {
-          eventBus.emit("hitl.requested", {
-            type: "hitl.requested",
-            request: toHitlRequestView(request),
-          });
+          for (const request of waitingRequests) {
+            eventBus.emit("hitl.requested", {
+              type: "hitl.requested",
+              request: toHitlRequestView(request),
+            });
+          }
+        } catch (err) {
+          if (!exposedForHuman) {
+            await hitlStore.cancelBatch(batchId, "HITL batch preparation failed").catch(() => undefined);
+          }
+          throw err;
         }
       } else {
         for (const tc of plannedToolCalls) {

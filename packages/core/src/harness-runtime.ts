@@ -572,6 +572,10 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const batches = await this._hitlStore.listRecoverableBatches();
     let queuedForResume = 0;
     for (const batch of batches) {
+      if (batch.status === "preparing") {
+        await this._hitlStore.cancelBatch(batch.batchId, "Recovered incomplete HITL batch preparation");
+        continue;
+      }
       if (batch.status === "ready" || batch.status === "resuming" || batch.status === "continuing" || (batch.status === "failed" && batch.failure?.retryable)) {
         queuedForResume++;
         this._scheduleHitlBatchResume(batch);
@@ -693,6 +697,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const batchRequests = await this._hitlStore.listBatchRequests(batchId);
     const pendingRequests = batchRequests.filter((request) => request.status === "pending");
     const blockedRequests = batchRequests.filter((request) => request.status === "blocked");
+    const blockedRequestsWithoutStoredResult = blockedRequests.filter(
+      (request) => !initial.toolResults.some((result) => result.toolCallId === request.toolCallId),
+    );
     if (pendingRequests.length > 0 || initial.status === "waitingForHuman" || initial.status === "preparing") {
       return {
         status: "notReady",
@@ -700,11 +707,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         pendingRequestIds: pendingRequests.map((request) => request.requestId),
       };
     }
-    if (blockedRequests.length > 0 && !initial.appendCommit) {
+    if (blockedRequestsWithoutStoredResult.length > 0 && !initial.appendCommit) {
       return {
         status: "notReady",
         batch: await this._toHitlBatchView(initial),
-        pendingRequestIds: blockedRequests.map((request) => request.requestId),
+        pendingRequestIds: blockedRequestsWithoutStoredResult.map((request) => request.requestId),
       };
     }
 
@@ -891,7 +898,30 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     let current = batch;
     const requests = await this._hitlStore.listBatchRequests(batch.batchId);
     for (const toolCall of batch.toolCalls.slice().sort((a, b) => a.toolCallIndex - b.toolCallIndex)) {
-      if (current.toolResults.some((result) => result.toolCallId === toolCall.toolCallId)) {
+      const storedResult = current.toolResults.find((result) => result.toolCallId === toolCall.toolCallId);
+      if (storedResult) {
+        if (toolCall.requiresHitl) {
+          const request = requests.find((item) => item.requestId === toolCall.requestId);
+          if (!request) {
+            throw new HitlResumeError(`HITL request not found for "${toolCall.toolCallId}"`, false);
+          }
+          if (request.status !== "completed") {
+            await this._hitlStore.completeRequest(request.requestId, {
+              toolResult: storedResult.result,
+              finalArgs: storedResult.finalArgs,
+              completedAt: new Date().toISOString(),
+            }, guard);
+            this._runtimeEvents.emit("hitl.completed", {
+              type: "hitl.completed",
+              batchId: requireHitlRequestBatchId(request),
+              requestId: request.requestId,
+              turnId: request.turnId,
+              toolCallId: request.toolCallId,
+              conversationId: request.conversationId,
+              result: storedResult.result,
+            });
+          }
+        }
         continue;
       }
       if (!toolCall.requiresHitl) {
@@ -902,20 +932,29 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         throw new HitlResumeError(`HITL request not found for "${toolCall.toolCallId}"`, false);
       }
       const { result, finalArgs } = await this._executeHitlRequestTool(request, guard, abortSignal);
-      current = await this._hitlStore.recordBatchToolResult(batch.batchId, {
-        batchId: batch.batchId,
-        toolCallId: request.toolCallId,
-        toolCallIndex: requireHitlRequestToolCallIndex(request),
-        toolName: request.toolName,
-        result,
-        finalArgs,
-        recordedAt: new Date().toISOString(),
-      });
-      await this._hitlStore.completeRequest(request.requestId, {
-        toolResult: result,
-        finalArgs,
-        completedAt: new Date().toISOString(),
-      }, guard);
+      let recorded = false;
+      try {
+        current = await this._hitlStore.recordBatchToolResult(batch.batchId, {
+          batchId: batch.batchId,
+          toolCallId: request.toolCallId,
+          toolCallIndex: requireHitlRequestToolCallIndex(request),
+          toolName: request.toolName,
+          result,
+          finalArgs,
+          recordedAt: new Date().toISOString(),
+        });
+        recorded = true;
+        await this._hitlStore.completeRequest(request.requestId, {
+          toolResult: result,
+          finalArgs,
+          completedAt: new Date().toISOString(),
+        }, guard);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        throw error instanceof HitlResumeError
+          ? error
+          : new HitlResumeError(error.message, recorded);
+      }
       this._runtimeEvents.emit("tool.done", {
         type: "tool.done",
         turnId: request.turnId,

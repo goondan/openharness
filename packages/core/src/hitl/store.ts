@@ -382,7 +382,8 @@ export class InMemoryHitlStore implements HitlStore {
       request.status !== "resolved" &&
       request.status !== "rejected" &&
       request.status !== "blocked" &&
-      request.status !== "completed"
+      request.status !== "completed" &&
+      !(request.status === "failed" && request.failure?.retryable === true)
     ) {
       throw new HitlStoreError(`Cannot complete HITL request from ${request.status}`);
     }

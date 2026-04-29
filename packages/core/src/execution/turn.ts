@@ -86,6 +86,26 @@ function appendSteeredInputs(
   return inputs.length;
 }
 
+async function queueSteeredInputsForHitl(
+  hitlStore: HitlStore | undefined,
+  batchId: string | undefined,
+  steering: TurnSteeringController | undefined,
+): Promise<number> {
+  if (!hitlStore || !batchId || !steering) {
+    return 0;
+  }
+
+  const inputs = steering.drain();
+  for (const input of inputs) {
+    await hitlStore.enqueueSteer(batchId, {
+      source: "dispatch",
+      envelope: input,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+  return inputs.length;
+}
+
 function closeSteering(steering: TurnSteeringController | undefined): void {
   steering?.close?.();
 }
@@ -273,6 +293,7 @@ export async function executeTurn(
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
+        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, steering);
         return {
           turnId,
           agentName,
@@ -497,6 +518,7 @@ export async function executeContinuationTurn(
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
+        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, steering);
         result = {
           turnId,
           agentName,
