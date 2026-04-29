@@ -15,7 +15,7 @@ import type { MiddlewareRegistry } from "./middleware-chain.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
-import { executeTurn } from "./execution/turn.js";
+import { executeTurn, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
 
@@ -38,10 +38,50 @@ export interface AgentDeps {
 // ---------------------------------------------------------------------------
 
 interface InFlightTurn {
+  turnId: string;
   agentName: string;
   conversationId: string;
   abortController: AbortController;
   promise: Promise<TurnResult>;
+  steeringInbox: SteeringInbox;
+}
+
+class SteeringInbox implements TurnSteeringController {
+  private _queue: InboundEnvelope[] = [];
+  private _closed = false;
+
+  enqueue(input: InboundEnvelope): boolean {
+    if (this._closed) {
+      return false;
+    }
+    this._queue.push(input);
+    return true;
+  }
+
+  drain(): InboundEnvelope[] {
+    const inputs = this._queue;
+    this._queue = [];
+    return inputs;
+  }
+
+  close(): void {
+    this._closed = true;
+    this._queue = [];
+  }
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +92,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _agents: Map<string, AgentDeps>;
   private readonly _conversations: Map<string, ConversationStateImpl> = new Map();
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
+  private readonly _activeTurnByConversation: Map<string, InFlightTurn> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
   private readonly _runtimeEvents: EventBus;
   private _closed = false;
@@ -95,29 +136,46 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     }
 
     const abortController = new AbortController();
-    const trackingId = randomUUID();
+    const turnId = options?.turnId ?? `turn-${randomUUID()}`;
+    const steeringInbox = new SteeringInbox();
+    const trackedTurn = createDeferred<TurnResult>();
 
-    const turnPromise = executeTurn(agentName, input, options, {
-      llmClient: agentDeps.llmClient,
-      toolRegistry: agentDeps.toolRegistry,
-      middlewareRegistry: agentDeps.middlewareRegistry,
-      eventBus: agentDeps.eventBus,
-      conversationState,
-      maxSteps: agentDeps.maxSteps,
-      abortController,
-    });
-
-    this._inFlightTurns.set(trackingId, {
+    const inFlightTurn: InFlightTurn = {
+      turnId,
       agentName,
       conversationId,
       abortController,
-      promise: turnPromise,
-    });
+      promise: trackedTurn.promise,
+      steeringInbox,
+    };
+
+    this._inFlightTurns.set(turnId, inFlightTurn);
+    this._activeTurnByConversation.set(conversationKey, inFlightTurn);
 
     try {
-      return await turnPromise;
+      const turnPromise = executeTurn(agentName, input, { ...options, conversationId, turnId }, {
+        llmClient: agentDeps.llmClient,
+        toolRegistry: agentDeps.toolRegistry,
+        middlewareRegistry: agentDeps.middlewareRegistry,
+        eventBus: agentDeps.eventBus,
+        conversationState,
+        maxSteps: agentDeps.maxSteps,
+        abortController,
+        steering: steeringInbox,
+      });
+      void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
+    } catch (err) {
+      trackedTurn.reject(err);
+    }
+
+    try {
+      return await trackedTurn.promise;
     } finally {
-      this._inFlightTurns.delete(trackingId);
+      steeringInbox.close();
+      this._inFlightTurns.delete(turnId);
+      if (this._activeTurnByConversation.get(conversationKey)?.turnId === turnId) {
+        this._activeTurnByConversation.delete(conversationKey);
+      }
     }
   }
 
@@ -139,6 +197,28 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     options: { conversationId: string; turnId: string },
   ): Promise<TurnResult> {
     return this._processTurnInternal(agentName, input, options);
+  }
+
+  steerTurn(
+    agentName: string,
+    input: InboundEnvelope,
+    conversationId: string,
+  ): { turnId: string; disposition: "steered" } | null {
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    if (!activeTurn) {
+      return null;
+    }
+
+    const enqueued = activeTurn.steeringInbox.enqueue(input);
+    if (!enqueued) {
+      return null;
+    }
+
+    return {
+      turnId: activeTurn.turnId,
+      disposition: "steered",
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -199,6 +279,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const promises: Promise<unknown>[] = [];
     for (const [, turn] of this._inFlightTurns) {
       turn.abortController.abort("Runtime closed");
+      turn.steeringInbox.close();
       promises.push(turn.promise.catch(() => {}));
     }
 
@@ -210,6 +291,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     // Clean up
     this._inFlightTurns.clear();
+    this._activeTurnByConversation.clear();
     this._conversations.clear();
   }
 }

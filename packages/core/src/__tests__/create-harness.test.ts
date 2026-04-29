@@ -655,6 +655,216 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
+  it("steers a second ingress message into an active turn for the same conversation", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    let releaseFirstResponse!: () => void;
+    let firstChatStarted!: () => void;
+    const firstChatStartedPromise = new Promise<void>((resolve) => {
+      firstChatStarted = resolve;
+    });
+    const firstResponseGate = new Promise<void>((resolve) => {
+      releaseFirstResponse = resolve;
+    });
+    const capturedMessages: Message[][] = [];
+    let callCount = 0;
+
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn(async (messages) => {
+        capturedMessages.push([...(messages as Message[])]);
+        callCount++;
+        if (callCount === 1) {
+          firstChatStarted();
+          await firstResponseGate;
+          return { text: "first answer", toolCalls: [] };
+        }
+        return { text: "answer after steer", toolCalls: [] };
+      }),
+    }));
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key" },
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async (ctx) => ({
+              name: "message",
+              content: [{ type: "text", text: String((ctx.payload as { text: string }).text) }],
+              properties: {},
+              conversationId: "steer-conv",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: ctx.receivedAt,
+              },
+            }),
+          },
+          rules: [{ match: { event: "message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const first = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "first" },
+    });
+    await firstChatStartedPromise;
+
+    const second = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "second" },
+    });
+
+    releaseFirstResponse();
+
+    await new Promise<void>((resolve) => {
+      const unsubscribe = runtime.events.on("turn.done", () => {
+        unsubscribe();
+        resolve();
+      });
+    });
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(first[0].disposition).toBe("started");
+    expect(second[0].disposition).toBe("steered");
+    expect(second[0].turnId).toBe(first[0].turnId);
+    expect(capturedMessages).toHaveLength(2);
+    expect(capturedMessages[1].some((message) =>
+      message.data.role === "user" && message.data.content === "second",
+    )).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("tracks an active turn before turn.start listeners run", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn().mockResolvedValue({ text: "should not run", toolCalls: [] });
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    let runtime: Awaited<ReturnType<typeof createHarness>>;
+    let resolveAbortedTurns!: (value: number) => void;
+    const abortedTurnsPromise = new Promise<number>((resolve) => {
+      resolveAbortedTurns = resolve;
+    });
+
+    runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key" },
+          extensions: [
+            {
+              name: "abort-on-turn-start",
+              register(api) {
+                api.on("turn.start", () => {
+                  void runtime.control.abortConversation({
+                    conversationId: "early-active-conv",
+                    reason: "test abort from turn.start",
+                  }).then((result) => resolveAbortedTurns(result.abortedTurns));
+                });
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await runtime.processTurn("default", "start", {
+      conversationId: "early-active-conv",
+    });
+
+    expect(await abortedTurnsPromise).toBe(1);
+    expect(result.status).toBe("aborted");
+    expect(chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("starts a new turn for ingress received while emitting turn.done", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const capturedMessages: Message[][] = [];
+    const chat = vi.fn(async (messages) => {
+      capturedMessages.push([...(messages as Message[])]);
+      return { text: `answer ${capturedMessages.length}`, toolCalls: [] };
+    });
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "key" },
+        },
+      },
+      connections: {
+        inbound: {
+          connector: {
+            name: "test-connector",
+            normalize: async (ctx) => ({
+              name: "message",
+              content: [{ type: "text", text: String((ctx.payload as { text: string }).text) }],
+              properties: {},
+              conversationId: "done-boundary-conv",
+              source: {
+                connector: "test-connector",
+                connectionName: "inbound",
+                receivedAt: ctx.receivedAt,
+              },
+            }),
+          },
+          rules: [{ match: { event: "message" }, agent: "default" }],
+        },
+      },
+    });
+
+    let secondIngressPromise: Promise<Awaited<ReturnType<typeof runtime.ingress.receive>>> | undefined;
+    let resolveSecondIngressScheduled!: () => void;
+    const secondIngressScheduled = new Promise<void>((resolve) => {
+      resolveSecondIngressScheduled = resolve;
+    });
+    let doneCount = 0;
+    const twoTurnsDone = new Promise<void>((resolve) => {
+      const unsubscribe = runtime.events.on("turn.done", () => {
+        doneCount++;
+        if (doneCount === 1) {
+          secondIngressPromise = runtime.ingress.receive({
+            connectionName: "inbound",
+            payload: { text: "second" },
+          });
+          resolveSecondIngressScheduled();
+        }
+        if (doneCount === 2) {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+
+    const first = await runtime.ingress.receive({
+      connectionName: "inbound",
+      payload: { text: "first" },
+    });
+
+    await secondIngressScheduled;
+    const second = await secondIngressPromise!;
+    await twoTurnsDone;
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(first[0].disposition).toBe("started");
+    expect(second[0].disposition).toBe("started");
+    expect(second[0].turnId).not.toBe(first[0].turnId);
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(capturedMessages[1].some((message) =>
+      message.data.role === "user" && message.data.content === "second",
+    )).toBe(true);
+
+    await runtime.close();
+  });
+
   it("runtime.events receives processTurn lifecycle events", async () => {
     const runtime = await createHarness(minimalConfig());
     const observed: TurnResult[] = [];

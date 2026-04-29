@@ -18,6 +18,11 @@ import { executeStep } from "./step.js";
 
 type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
+export interface TurnSteeringController {
+  drain(): InboundEnvelope[];
+  close?(): void;
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -38,6 +43,50 @@ function extractText(envelope: InboundEnvelope): string {
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
     .join("\n");
+}
+
+function appendEnvelopeAsUserMessage(
+  conversationState: ConversationStateImpl,
+  envelope: InboundEnvelope,
+  metadata?: Record<string, unknown>,
+): void {
+  const text = extractText(envelope);
+  conversationState.emit({
+    type: "appendMessage",
+    message: {
+      id: generateMessageId(),
+      data: {
+        role: "user",
+        content: text,
+      },
+      metadata: {
+        __createdBy: "core",
+        ...metadata,
+      },
+    },
+  });
+}
+
+function appendSteeredInputs(
+  conversationState: ConversationStateImpl,
+  steering: TurnSteeringController | undefined,
+): number {
+  if (!steering) {
+    return 0;
+  }
+
+  const inputs = steering.drain();
+  for (const input of inputs) {
+    appendEnvelopeAsUserMessage(conversationState, input, {
+      __steered: true,
+      __eventName: input.name,
+    });
+  }
+  return inputs.length;
+}
+
+function closeSteering(steering: TurnSteeringController | undefined): void {
+  steering?.close?.();
 }
 
 function addTokenCounts(
@@ -119,9 +168,10 @@ export async function executeTurn(
     conversationState: ConversationStateImpl;
     maxSteps: number;
     abortController?: AbortController;
+    steering?: TurnSteeringController;
   }
 ): Promise<TurnResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps } =
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, steering } =
     deps;
 
   // 1. Generate unique turnId
@@ -178,6 +228,8 @@ export async function executeTurn(
     let totalUsage: LlmUsage | undefined;
 
     for (let stepNumber = 1; stepNumber <= maxSteps; stepNumber++) {
+      appendSteeredInputs(conversationState, steering);
+
       // Check abortSignal before each step
       if (ctx.abortSignal.aborted) {
         return {
@@ -215,9 +267,14 @@ export async function executeTurn(
       };
       steps.push(stepSummary);
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
+      const steeredInputCount = appendSteeredInputs(conversationState, steering);
 
       // If no tool calls → turn is done (text response)
       if (!lastStepResult.toolCalls || lastStepResult.toolCalls.length === 0) {
+        if (steeredInputCount > 0) {
+          continue;
+        }
+
         return {
           turnId,
           agentName,
@@ -258,20 +315,7 @@ export async function executeTurn(
     conversationState._turnActive = true;
 
     // 5. FR-CORE-007: Record inbound message as a non-system conversation event
-    const text = extractText(envelope);
-    conversationState.emit({
-      type: "appendMessage",
-      message: {
-        id: generateMessageId(),
-        data: {
-          role: "user",
-          content: text,
-        },
-        metadata: {
-          __createdBy: "core",
-        },
-      },
-    });
+    appendEnvelopeAsUserMessage(conversationState, envelope);
 
     result = await chain(turnCtx);
   } catch (err) {
@@ -282,6 +326,7 @@ export async function executeTurn(
 
     // Check if this was an abort (AbortError from aborted signal)
     if (turnCtx.abortSignal.aborted || error.name === "AbortError") {
+      closeSteering(steering);
       eventBus.emit("turn.error", {
         type: "turn.error",
         turnId,
@@ -301,6 +346,7 @@ export async function executeTurn(
     }
 
     // Emit turn.error
+    closeSteering(steering);
     eventBus.emit("turn.error", {
       type: "turn.error",
       turnId,
@@ -322,6 +368,8 @@ export async function executeTurn(
 
   // 9. Set conversationState._turnActive = false
   conversationState._turnActive = false;
+
+  closeSteering(steering);
 
   // 10. Emit turn.done
   eventBus.emit("turn.done", {

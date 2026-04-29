@@ -6,6 +6,7 @@ import type {
   Connector,
   ConnectorContext,
   InboundEnvelope,
+  IngressDisposition,
   RoutingRule,
   IngressContext,
   RouteContext,
@@ -57,7 +58,12 @@ interface MakePipelineOptions {
   connectionName?: string;
   connectionMiddleware?: MiddlewareRegistry;
   agentMiddlewareByAgent?: Map<string, MiddlewareRegistry>;
-  dispatchTurn?: (turnId: string, agentName: string, envelope: InboundEnvelope, conversationId: string) => void;
+  dispatchTurn?: (
+    turnId: string,
+    agentName: string,
+    envelope: InboundEnvelope,
+    conversationId: string,
+  ) => { turnId: string; disposition: IngressDisposition };
 }
 
 function makePipeline(opts: MakePipelineOptions = {}) {
@@ -70,7 +76,7 @@ function makePipeline(opts: MakePipelineOptions = {}) {
     agentMiddlewareByAgent = new Map(
       agentNames.map((agentName) => [agentName, new MiddlewareRegistry()]),
     ),
-    dispatchTurn = vi.fn(),
+    dispatchTurn = vi.fn((turnId: string) => ({ turnId, disposition: "started" as const })),
   } = opts;
 
   const eventBus = new EventBus();
@@ -118,6 +124,7 @@ describe("IngressPipeline", () => {
     expect(results[0].agentName).toBe("agent1");
     expect(results[0].conversationId).toBe("conv-1");
     expect(results[0].turnId).toEqual(expect.any(String));
+    expect(results[0].disposition).toBe("started");
     expect(dispatchTurn).toHaveBeenCalledOnce();
     expect(dispatchTurn).toHaveBeenCalledWith(
       expect.any(String), "agent1", expect.any(Object), "conv-1"
@@ -232,9 +239,10 @@ describe("IngressPipeline", () => {
     const turnPromise = new Promise<void>((resolve) => { turnResolve = resolve; });
 
     // dispatchTurn simulates a long-running turn; pipeline must NOT await it
-    const dispatchTurn = vi.fn().mockImplementation(() => {
+    const dispatchTurn = vi.fn().mockImplementation((turnId: string) => {
       // This is synchronous — fires the turn in background
       void turnPromise.then(() => turnCompleted());
+      return { turnId, disposition: "started" as const };
     });
 
     const { pipeline } = makePipeline({ dispatchTurn });
@@ -270,6 +278,7 @@ describe("IngressPipeline", () => {
     expect(result.accepted).toBe(true);
     expect(result.agentName).toBe("agent1");
     expect(result.turnId).toEqual(expect.any(String));
+    expect(result.disposition).toBe("started");
     // verify and normalize should NOT have been called
     expect(connector.verify).not.toHaveBeenCalled();
     expect(connector.normalize).not.toHaveBeenCalled();
@@ -291,12 +300,41 @@ describe("IngressPipeline", () => {
     expect((received[0] as { type: string }).type).toBe("ingress.received");
 
     expect(accepted).toHaveLength(1);
-    const acc = accepted[0] as { type: string; connectionName: string; agentName: string; conversationId: string; turnId: string };
+    const acc = accepted[0] as {
+      type: string;
+      connectionName: string;
+      agentName: string;
+      conversationId: string;
+      turnId: string;
+      disposition: string;
+    };
     expect(acc.type).toBe("ingress.accepted");
     expect(acc.connectionName).toBe("conn1");
     expect(acc.agentName).toBe("agent1");
     expect(acc.conversationId).toBe("conv-1");
     expect(acc.turnId).toEqual(expect.any(String));
+    expect(acc.disposition).toBe("started");
+  });
+
+  it("returns steered disposition and active turnId when dispatch callback steers", async () => {
+    const dispatchTurn = vi.fn((turnId: string) => ({
+      turnId: `active-${turnId}`,
+      disposition: "steered" as const,
+    }));
+    const { pipeline, eventBus } = makePipeline({ dispatchTurn });
+    const accepted: unknown[] = [];
+    eventBus.on("ingress.accepted", (e) => accepted.push(e));
+
+    const results = await pipeline.receive({
+      connectionName: "conn1",
+      payload: { text: "steer me" },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].disposition).toBe("steered");
+    expect(results[0].turnId).toMatch(/^active-turn-/);
+    expect((accepted[0] as { disposition: string }).disposition).toBe("steered");
+    expect((accepted[0] as { turnId: string }).turnId).toBe(results[0].turnId);
   });
 
   it("emits ingress.rejected when route fails (no matching rule)", async () => {

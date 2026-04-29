@@ -50,6 +50,8 @@ export interface RoutingRule {
 }
 
 // IngressAcceptResult
+export type IngressDisposition = "started" | "steered";
+
 export interface IngressAcceptResult {
   accepted: true;
   connectionName: string;
@@ -57,6 +59,7 @@ export interface IngressAcceptResult {
   conversationId: string;
   eventName: string;
   turnId: string;
+  disposition: IngressDisposition;
 }
 
 // ConnectionInfo — also used by extension RuntimeInfo

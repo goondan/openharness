@@ -166,6 +166,60 @@ describe("executeTurn", () => {
     expect(toolHandler).toHaveBeenCalledOnce();
   });
 
+  it("adds steered ingress input to the same turn and continues the step loop", async () => {
+    let releaseFirstResponse!: () => void;
+    let firstChatStarted!: () => void;
+    const firstChatStartedPromise = new Promise<void>((resolve) => {
+      firstChatStarted = resolve;
+    });
+    const firstResponseGate = new Promise<void>((resolve) => {
+      releaseFirstResponse = resolve;
+    });
+    const capturedMessages: Message[][] = [];
+    let callCount = 0;
+
+    const llmClient: LlmClient = {
+      chat: vi.fn(async (messages) => {
+        capturedMessages.push([...(messages as Message[])]);
+        callCount++;
+        if (callCount === 1) {
+          firstChatStarted();
+          await firstResponseGate;
+          return { text: "first answer", finishReason: "stop" as const };
+        }
+        return { text: "answer after steer", finishReason: "stop" as const };
+      }),
+    };
+    const deps = makeDeps({ llmClient });
+    let queuedInputs: InboundEnvelope[] = [];
+    const steering = {
+      drain: () => {
+        const inputs = queuedInputs;
+        queuedInputs = [];
+        return inputs;
+      },
+    };
+
+    const turnPromise = executeTurn("agent-1", "original input", undefined, {
+      ...deps,
+      steering,
+    });
+
+    await firstChatStartedPromise;
+    queuedInputs.push(makeEnvelope("mid-turn input"));
+    releaseFirstResponse();
+
+    const result = await turnPromise;
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("answer after steer");
+    expect(result.steps).toHaveLength(2);
+    expect(llmClient.chat).toHaveBeenCalledTimes(2);
+    expect(capturedMessages[1].some((message) =>
+      messageRole(message) === "user" && messageContent(message) === "mid-turn input",
+    )).toBe(true);
+  });
+
   it("adds step usage to StepSummary and aggregates TurnResult totalUsage", async () => {
     const toolRegistry = new ToolRegistry();
     toolRegistry.register(makeTool("my_tool"));

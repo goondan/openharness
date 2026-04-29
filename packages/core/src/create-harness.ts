@@ -214,6 +214,12 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       if (!runtimeRef) {
         throw new ConfigError("Runtime not yet initialized");
       }
+
+      const steered = runtimeRef.steerTurn(agentName, envelope, conversationId);
+      if (steered) {
+        return steered;
+      }
+
       // Fire-and-forget: start turn asynchronously
       runtimeRef
         .dispatchTurn(agentName, envelope, { conversationId, turnId })
@@ -227,6 +233,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
             error: err instanceof Error ? err : new Error(String(err)),
           });
         });
+      return { turnId, disposition: "started" };
     },
   });
 

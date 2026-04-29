@@ -1,5 +1,6 @@
 import type { TurnResult, StepResult, StepSummary } from "./middleware.js";
 import type { ToolResult, JsonObject } from "./tool.js";
+import type { IngressDisposition } from "./ingress.js";
 
 // -----------------------------------------------------------------------
 // Core execution event payloads
@@ -131,6 +132,7 @@ export interface IngressAcceptedPayload {
   agentName: string;
   conversationId: string;
   turnId: string;
+  disposition: IngressDisposition;
 }
 
 export interface IngressRejectedPayload {

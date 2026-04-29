@@ -8,6 +8,7 @@ import type {
   IngressContext,
   RouteContext,
   RouteResult,
+  IngressDisposition,
 } from "@goondan/openharness-types";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
@@ -41,7 +42,7 @@ export interface IngressPipelineConfig {
     agentName: string,
     envelope: InboundEnvelope,
     conversationId: string,
-  ) => void;
+  ) => { turnId: string; disposition: IngressDisposition };
 }
 
 // -----------------------------------------------------------------------
@@ -274,7 +275,12 @@ export class IngressPipeline implements IngressApi {
     }
 
     // Dispatch: fire turn AFTER route chain completes successfully (INGRESS-CONST-004)
-    dispatchTurn(result.turnId, result.agentName, envelope, result.conversationId);
+    const dispatchOutcome = dispatchTurn(
+      result.turnId,
+      result.agentName,
+      envelope,
+      result.conversationId,
+    );
 
     const acceptResult: IngressAcceptResult = {
       accepted: result.accepted,
@@ -282,7 +288,8 @@ export class IngressPipeline implements IngressApi {
       agentName: result.agentName,
       conversationId: result.conversationId,
       eventName: result.eventName,
-      turnId: result.turnId,
+      turnId: dispatchOutcome.turnId,
+      disposition: dispatchOutcome.disposition,
     };
 
     // Emit ingress.accepted
@@ -292,6 +299,7 @@ export class IngressPipeline implements IngressApi {
       agentName: acceptResult.agentName,
       conversationId: acceptResult.conversationId,
       turnId: acceptResult.turnId,
+      disposition: acceptResult.disposition,
     });
 
     return acceptResult;

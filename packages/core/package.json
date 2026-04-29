@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "prepack": "pnpm build",
+    "prepack": "pnpm clean && pnpm build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"

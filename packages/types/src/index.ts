@@ -45,6 +45,7 @@ export type {
   Connector,
   RoutingMatch,
   RoutingRule,
+  IngressDisposition,
   IngressAcceptResult,
   ConnectionInfo,
   IngressApi,
