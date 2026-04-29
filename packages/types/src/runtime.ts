@@ -2,6 +2,18 @@ import type { TurnResult } from "./middleware.js";
 import type { InboundEnvelope, IngressApi } from "./ingress.js";
 import type { ProcessTurnOptions } from "./config.js";
 import type { EventPayload } from "./events.js";
+import type {
+  CancelHitlInput,
+  CancelHitlBatchInput,
+  CancelHitlResult,
+  HitlBatchFilter,
+  HitlBatchView,
+  HitlRequestFilter,
+  HitlRequestView,
+  ResumeHitlResult,
+  SubmitHitlResult,
+  SubmitHitlResultInput,
+} from "./hitl.js";
 
 // -----------------------------------------------------------------------
 // ControlApi
@@ -19,6 +31,15 @@ export interface ControlApi {
     agentName?: string;
     reason?: string;
   }): Promise<AbortResult>;
+  listPendingHitl(filter?: HitlRequestFilter): Promise<HitlRequestView[]>;
+  listPendingHitlBatches(filter?: HitlBatchFilter): Promise<HitlBatchView[]>;
+  getHitlBatch(batchId: string): Promise<HitlBatchView | null>;
+  getHitlRequest(requestId: string): Promise<HitlRequestView | null>;
+  submitHitlResult(input: SubmitHitlResultInput): Promise<SubmitHitlResult>;
+  resumeHitlBatch(batchId: string): Promise<ResumeHitlResult>;
+  resumeHitl(requestId: string): Promise<ResumeHitlResult>;
+  cancelHitlBatch(input: CancelHitlBatchInput): Promise<CancelHitlResult>;
+  cancelHitl(input: CancelHitlInput): Promise<CancelHitlResult>;
 }
 
 export type RuntimeEventType = EventPayload["type"];

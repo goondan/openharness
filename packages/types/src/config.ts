@@ -1,6 +1,7 @@
 import type { Extension } from "./extension.js";
 import type { ToolDefinition } from "./tool.js";
 import type { Connector, RoutingRule } from "./ingress.js";
+import type { HitlRuntimeConfig } from "./hitl.js";
 
 // -----------------------------------------------------------------------
 // EnvRef — branded type for deferred environment variable resolution
@@ -56,6 +57,7 @@ export interface ConnectionConfig {
 export interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
+  hitl?: HitlRuntimeConfig;
 }
 
 // -----------------------------------------------------------------------

@@ -20,8 +20,8 @@
 - HITL 대상 ToolCall은 deterministic `requestId`를 가진 `HitlRequestRecord`로 `HitlStore`에 저장된다.
 - pending 전환 시 tool handler는 호출되지 않고 Turn은 `waitingForHuman`으로 settle한다.
 - `runtime.control`은 pending 조회, result 제출, resume, cancel API를 제공한다.
-- startup recovery는 pending/resolved/resuming request를 조회하고 stale lease를 재처리한다.
-- resume worker는 lease와 idempotency key를 사용해 tool handler at-most-once completion을 보장한다.
+- startup recovery는 pending/resolved/rejected/resuming/failed(retryable) request를 조회하고 resumable request를 재처리한다.
+- in-runtime resume task는 lease와 idempotency key를 사용해 tool handler at-most-once completion을 보장한다.
 - approve/replace result는 최종 args를 다시 schema 검증한 뒤 tool handler에 전달한다.
 - reject result는 tool handler 없이 rejection ToolResult를 conversation에 append한다.
 
@@ -52,8 +52,6 @@
   - request state transition validator
   - deterministic request id helper
   - lease expiry helper
-- `packages/core/src/hitl/errors.ts` 추가
-  - not found, invalid transition, validation, lease conflict 오류 타입
 - 테스트
   - create/list/get
   - duplicate create idempotency
@@ -68,7 +66,7 @@
   - `HitlStore` 주입
   - control API 구현
   - startup recovery hook 추가
-  - close 시 resume worker 정리
+  - close 시 in-flight resume task abort/wait 정리
 - `createHarness()`
   - HITL store/config를 runtime deps에 연결
 - 테스트
@@ -91,22 +89,24 @@
   - pending HITL이 있는 Step 이후 `waitingForHuman`으로 종료
 - 테스트
   - HITL required tool은 handler 미호출
+  - 한 Step의 HITL pending 이후 뒤쪽 tool call 미실행
   - assistant tool-call message는 남고 tool-result는 아직 없음
   - non-HITL tool은 기존 동작 유지
   - store write 실패는 `turn.error`
 
-### Phase 5 - Resume Worker
+### Phase 5 - Resume Task
 
-- `packages/core/src/hitl/resume.ts` 추가
+- `packages/core/src/harness-runtime.ts`에 in-runtime resume task lifecycle 추가
   - request 조회
   - lease 획득
   - conversation event snapshot restore
   - result mapper 적용
   - final args schema revalidation
+  - 외부 tool handler 실행 전 `HitlStore.startExecution()` durable marker 저장
   - tool handler 실행 또는 rejection result 생성
   - tool-result message append
-  - `HitlStore.complete()` compare-and-set
-  - continuation turn optional 실행
+  - lease guard 기반 `HitlStore.complete()` compare-and-set
+  - close 시 in-flight resume task abort/wait
 - 테스트
   - approve resume handler 1회 실행
   - reject resume handler 미호출
@@ -114,6 +114,7 @@
   - invalid form result는 pending 유지
   - concurrent resume race에서 completion 1개
   - `resuming` 중 crash simulation 후 lease TTL recovery
+  - `blocked` 상태는 startup recovery가 자동 재실행하지 않음
 
 ### Phase 6 - Documentation and Examples
 
@@ -127,7 +128,7 @@
 1. Phase 1 타입 추가를 먼저 완료한다.
 2. Phase 2 store infrastructure와 Phase 3 runtime wiring은 타입 확정 후 병렬 가능하다.
 3. Phase 4 execution integration은 Phase 2/3에 의존한다.
-4. Phase 5 resume worker는 Phase 4와 일부 병렬 가능하지만 final integration은 Phase 4 이후 수행한다.
+4. Phase 5 resume task는 Phase 4와 일부 병렬 가능하지만 final integration은 Phase 4 이후 수행한다.
 5. Phase 6 문서는 behavior가 테스트로 고정된 뒤 업데이트한다.
 
 ## 6. 위험과 완화
@@ -135,7 +136,7 @@
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | `TurnResult.status` union 확장으로 downstream exhaustiveness break | 중간 | migration note와 타입 테스트 추가 |
-| tool-result append와 `HitlStore.complete()` 사이 crash | 높음 | completion transaction 전 message id를 deterministic하게 만들고 duplicate append 방지 |
+| 외부 tool handler side effect 후 `HitlStore.complete()` 전 crash | 높음 | handler 호출 전 `startExecution()`으로 `blocked`를 durable하게 저장하고 자동 재실행 금지 |
 | 외부 side effect exactly-once 착각 | 높음 | core는 at-most-once completion만 보장하고 tool-level idempotency key를 문서화 |
 | conversation snapshot 비용 증가 | 중간 | 우선 full snapshot으로 correctness 확보, 추후 store reference 최적화 |
 | event ordering 혼선 | 중간 | durable-before-observable 규칙을 unit test로 고정 |

@@ -50,7 +50,7 @@ export interface RoutingRule {
 }
 
 // IngressAcceptResult
-export type IngressDisposition = "started" | "steered";
+export type IngressDisposition = "started" | "steered" | "queuedForHitl";
 
 export interface IngressAcceptResult {
   accepted: true;
@@ -58,8 +58,46 @@ export interface IngressAcceptResult {
   agentName: string;
   conversationId: string;
   eventName: string;
-  turnId: string;
+  turnId?: string;
+  batchId?: string;
+  pendingRequestIds?: string[];
   disposition: IngressDisposition;
+}
+
+export interface IngressStartedResult extends IngressAcceptResult {
+  accepted: true;
+  connectionName: string;
+  agentName: string;
+  conversationId: string;
+  eventName: string;
+  turnId: string;
+  batchId?: never;
+  pendingRequestIds?: never;
+  disposition: "started";
+}
+
+export interface IngressSteeredResult extends IngressAcceptResult {
+  accepted: true;
+  connectionName: string;
+  agentName: string;
+  conversationId: string;
+  eventName: string;
+  turnId: string;
+  batchId?: never;
+  pendingRequestIds?: never;
+  disposition: "steered";
+}
+
+export interface IngressQueuedForHitlResult extends IngressAcceptResult {
+  accepted: true;
+  connectionName: string;
+  agentName: string;
+  conversationId: string;
+  eventName: string;
+  turnId?: string;
+  batchId: string;
+  pendingRequestIds: string[];
+  disposition: "queuedForHitl";
 }
 
 // ConnectionInfo — also used by extension RuntimeInfo

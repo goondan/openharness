@@ -7,6 +7,7 @@ import type {
   InboundEnvelope,
   LlmClient,
   LlmUsage,
+  HitlStore,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -167,11 +168,12 @@ export async function executeTurn(
     eventBus: EventBus;
     conversationState: ConversationStateImpl;
     maxSteps: number;
+    hitlStore?: HitlStore;
     abortController?: AbortController;
     steering?: TurnSteeringController;
   }
 ): Promise<TurnResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, steering } =
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, hitlStore, steering } =
     deps;
 
   // 1. Generate unique turnId
@@ -252,6 +254,7 @@ export async function executeTurn(
         toolRegistry,
         middlewareRegistry,
         eventBus,
+        hitlStore,
       });
 
       const stepSummary: StepSummary = {
@@ -268,6 +271,20 @@ export async function executeTurn(
       };
       steps.push(stepSummary);
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
+
+      if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
+        return {
+          turnId,
+          agentName,
+          conversationId,
+          status: "waitingForHuman",
+          steps,
+          ...(lastStepResult.pendingHitlBatchId ? { pendingHitlBatchId: lastStepResult.pendingHitlBatchId } : {}),
+          pendingHitlRequestIds: lastStepResult.pendingHitlRequestIds,
+          ...(totalUsage ? { totalUsage } : {}),
+        };
+      }
+
       const steeredInputCount = appendSteeredInputs(conversationState, steering);
 
       // If no tool calls → turn is done (text response)
@@ -383,4 +400,171 @@ export async function executeTurn(
 
   // 11. Return TurnResult
   return result;
+}
+
+export async function executeContinuationTurn(
+  agentName: string,
+  options: { conversationId: string; turnId: string },
+  deps: {
+    llmClient: LlmClient;
+    toolRegistry: ToolRegistry;
+    middlewareRegistry: MiddlewareRegistry;
+    eventBus: EventBus;
+    conversationState: ConversationStateImpl;
+    maxSteps: number;
+    hitlStore?: HitlStore;
+    abortController?: AbortController;
+    steering?: TurnSteeringController;
+  },
+): Promise<TurnResult> {
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, hitlStore, steering } =
+    deps;
+  const { turnId, conversationId } = options;
+  const abortController = deps.abortController ?? new AbortController();
+
+  const turnCtx: TurnContext = {
+    turnId,
+    agentName,
+    conversationId,
+    conversation: conversationState,
+    abortSignal: abortController.signal,
+    input: {
+      name: "hitl.resume",
+      content: [],
+      properties: {},
+      conversationId,
+      source: {
+        connector: "hitl",
+        connectionName: "hitl",
+        receivedAt: new Date().toISOString(),
+      },
+    },
+    llm: llmClient,
+  };
+
+  eventBus.emit("turn.start", {
+    type: "turn.start",
+    turnId,
+    agentName,
+    conversationId,
+  });
+
+  const steps: StepSummary[] = [];
+  let lastStepResult: StepResult | undefined;
+  let totalUsage: LlmUsage | undefined;
+  let result: TurnResult;
+
+  try {
+    conversationState._turnActive = true;
+
+    for (let stepNumber = 1; stepNumber <= maxSteps; stepNumber++) {
+      appendSteeredInputs(conversationState, steering);
+
+      if (turnCtx.abortSignal.aborted) {
+        result = {
+          turnId,
+          agentName,
+          conversationId,
+          status: "aborted",
+          steps,
+          ...(totalUsage ? { totalUsage } : {}),
+        };
+        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
+        return result;
+      }
+
+      lastStepResult = await executeStep({ ...turnCtx, stepNumber }, {
+        llmClient,
+        toolRegistry,
+        middlewareRegistry,
+        eventBus,
+        hitlStore,
+      });
+
+      const stepSummary: StepSummary = {
+        stepNumber,
+        toolCalls: lastStepResult.toolCalls.map((tc) => ({
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: tc.args,
+          result: tc.result,
+        })),
+        finishReason: lastStepResult.finishReason,
+        rawFinishReason: lastStepResult.rawFinishReason,
+        ...(lastStepResult.usage ? { usage: lastStepResult.usage } : {}),
+      };
+      steps.push(stepSummary);
+      totalUsage = addUsage(totalUsage, lastStepResult.usage);
+
+      if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
+        result = {
+          turnId,
+          agentName,
+          conversationId,
+          status: "waitingForHuman",
+          steps,
+          ...(lastStepResult.pendingHitlBatchId ? { pendingHitlBatchId: lastStepResult.pendingHitlBatchId } : {}),
+          pendingHitlRequestIds: lastStepResult.pendingHitlRequestIds,
+          ...(totalUsage ? { totalUsage } : {}),
+        };
+        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
+        return result;
+      }
+
+      const steeredInputCount = appendSteeredInputs(conversationState, steering);
+      if (!lastStepResult.toolCalls || lastStepResult.toolCalls.length === 0) {
+        if (steeredInputCount > 0) {
+          continue;
+        }
+        result = {
+          turnId,
+          agentName,
+          conversationId,
+          status: "completed",
+          text: lastStepResult.text,
+          finishReason: lastStepResult.finishReason,
+          rawFinishReason: lastStepResult.rawFinishReason,
+          steps,
+          ...(totalUsage ? { totalUsage } : {}),
+        };
+        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
+        return result;
+      }
+    }
+
+    result = {
+      turnId,
+      agentName,
+      conversationId,
+      status: "maxStepsReached",
+      text: lastStepResult?.text,
+      finishReason: lastStepResult?.finishReason,
+      rawFinishReason: lastStepResult?.rawFinishReason,
+      steps,
+      ...(totalUsage ? { totalUsage } : {}),
+    };
+    eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
+    return result;
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    eventBus.emit("turn.error", {
+      type: "turn.error",
+      turnId,
+      agentName,
+      conversationId,
+      status: turnCtx.abortSignal.aborted || error.name === "AbortError" ? "aborted" : "error",
+      error,
+    });
+    return {
+      turnId,
+      agentName,
+      conversationId,
+      status: turnCtx.abortSignal.aborted || error.name === "AbortError" ? "aborted" : "error",
+      steps,
+      error,
+    };
+  } finally {
+    conversationState._turnActive = false;
+    closeSteering(steering);
+  }
 }

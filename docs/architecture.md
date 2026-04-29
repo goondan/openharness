@@ -22,6 +22,25 @@ user input
   -> 최종 텍스트 응답
 ```
 
+HITL 정책이 붙은 ToolCall은 이 흐름을 일시 중지합니다.
+
+```text
+LLM tool call
+  -> HitlStore.create(pending)
+  -> TurnResult.status = waitingForHuman
+  -> submitHitlResult(approve/reject/form)
+  -> in-runtime resume task
+  -> lease 획득
+  -> startExecution 또는 rejection result
+  -> tool-result 기록
+  -> HitlStore.complete
+```
+
+중요한 경계는 두 가지입니다.
+
+- human result 제출은 먼저 durable store에 저장되고, submit 응답은 tool handler 완료를 기다리지 않습니다.
+- 외부 tool handler가 시작되면 request는 `blocked`로 durable 표시되어 startup recovery가 자동으로 중복 실행하지 않습니다.
+
 ## 2. 미들웨어 레벨
 
 OpenHarness는 7개 레벨의 미들웨어를 제공합니다.
@@ -68,6 +87,6 @@ OpenHarness를 쓸 때 가장 중요한 전제입니다.
 - 기본 도구 자동 등록 안 함
 - 기본 메모리 전략 자동 적용 안 함
 - fallback ingress 처리 안 함
+- durable HITL backend 내장 안 함. core는 `HitlStore` 계약과 in-memory test store만 제공합니다
 
 즉, 선언하지 않은 것은 작동하지 않는다고 생각하시면 거의 맞습니다.
-

@@ -8,3 +8,9 @@ export { HarnessError, ConfigError, ToolValidationError, IngressRejectedError } 
 export { env } from "@goondan/openharness-types";
 export { createHarness } from "./create-harness.js";
 export { HarnessRuntimeImpl } from "./harness-runtime.js";
+export {
+  InMemoryHitlStore,
+  HitlStoreError,
+  createHitlRequestId,
+  toHitlRequestView,
+} from "./hitl/store.js";

@@ -1,4 +1,5 @@
 import type { Schema } from "ai";
+import type { HitlPolicy } from "./hitl.js";
 
 // JsonSchema / primitive types
 export type JsonSchema = Record<string, unknown>;
@@ -31,6 +32,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: ToolParameters;
+  hitl?: HitlPolicy;
   handler: (args: JsonObject, context: ToolContext) => Promise<ToolResult>;
 }
 

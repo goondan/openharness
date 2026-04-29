@@ -42,7 +42,13 @@ export interface IngressPipelineConfig {
     agentName: string,
     envelope: InboundEnvelope,
     conversationId: string,
-  ) => { turnId: string; disposition: IngressDisposition };
+  ) =>
+    | { turnId: string; disposition: IngressDisposition }
+    | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" }
+    | Promise<
+        | { turnId: string; disposition: IngressDisposition }
+        | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" }
+      >;
 }
 
 // -----------------------------------------------------------------------
@@ -275,22 +281,46 @@ export class IngressPipeline implements IngressApi {
     }
 
     // Dispatch: fire turn AFTER route chain completes successfully (INGRESS-CONST-004)
-    const dispatchOutcome = dispatchTurn(
-      result.turnId,
-      result.agentName,
-      envelope,
-      result.conversationId,
-    );
+    let dispatchOutcome: Awaited<ReturnType<typeof dispatchTurn>>;
+    try {
+      dispatchOutcome = await dispatchTurn(
+        result.turnId,
+        result.agentName,
+        envelope,
+        result.conversationId,
+      );
+    } catch (err) {
+      const reason =
+        err instanceof Error ? err.message : String(err);
+      eventBus.emit("ingress.rejected", {
+        type: "ingress.rejected",
+        connectionName,
+        reason,
+      });
+      return null;
+    }
 
-    const acceptResult: IngressAcceptResult = {
-      accepted: result.accepted,
-      connectionName: result.connectionName,
-      agentName: result.agentName,
-      conversationId: result.conversationId,
-      eventName: result.eventName,
-      turnId: dispatchOutcome.turnId,
-      disposition: dispatchOutcome.disposition,
-    };
+    const acceptResult: IngressAcceptResult = dispatchOutcome.disposition === "queuedForHitl" && "batchId" in dispatchOutcome
+      ? {
+          accepted: result.accepted,
+          connectionName: result.connectionName,
+          agentName: result.agentName,
+          conversationId: result.conversationId,
+          eventName: result.eventName,
+          turnId: result.turnId,
+          batchId: dispatchOutcome.batchId,
+          pendingRequestIds: dispatchOutcome.pendingRequestIds,
+          disposition: dispatchOutcome.disposition,
+        }
+      : {
+          accepted: result.accepted,
+          connectionName: result.connectionName,
+          agentName: result.agentName,
+          conversationId: result.conversationId,
+          eventName: result.eventName,
+          turnId: dispatchOutcome.turnId,
+          disposition: dispatchOutcome.disposition,
+        };
 
     // Emit ingress.accepted
     eventBus.emit("ingress.accepted", {
@@ -298,7 +328,8 @@ export class IngressPipeline implements IngressApi {
       connectionName,
       agentName: acceptResult.agentName,
       conversationId: acceptResult.conversationId,
-      turnId: acceptResult.turnId,
+      ...("turnId" in acceptResult ? { turnId: acceptResult.turnId } : {}),
+      ...("batchId" in acceptResult ? { batchId: acceptResult.batchId } : {}),
       disposition: acceptResult.disposition,
     });
 

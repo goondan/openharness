@@ -54,6 +54,7 @@ export interface ToolCallSummary {
   invalidReason?: string;
   result?: ToolResult;
   error?: Error;
+  toolCallId?: string;
 }
 
 export interface LlmUsage {
@@ -91,7 +92,7 @@ export interface TurnResult {
   turnId: string;
   agentName: string;
   conversationId: string;
-  status: "completed" | "aborted" | "error" | "maxStepsReached";
+  status: "completed" | "aborted" | "error" | "maxStepsReached" | "waitingForHuman";
   text?: string;
   /** Finish reason from the last LLM step in this turn. */
   finishReason?: LlmFinishReason;
@@ -100,6 +101,8 @@ export interface TurnResult {
   steps: StepSummary[];
   totalUsage?: LlmUsage;
   error?: Error;
+  pendingHitlBatchId?: string;
+  pendingHitlRequestIds?: string[];
 }
 
 export interface StepResult {
@@ -114,6 +117,8 @@ export interface StepResult {
     result?: ToolResult;
   }>;
   usage?: LlmUsage;
+  pendingHitlBatchId?: string;
+  pendingHitlRequestIds?: string[];
 }
 
 // -----------------------------------------------------------------------

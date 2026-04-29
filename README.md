@@ -84,6 +84,7 @@ oh run "요약해줘" --agent assistant --conversation demo-1
 - 코어는 _실행 루프_ 만 제공합니다.
 - 시스템 프롬프트도 기본 제공되지 않습니다. `BasicSystemPrompt` 같은 Extension이 있어야 들어갑니다.
 - 도구도 선언해야만 보입니다. "기본 툴"은 없습니다.
+- 사람이 확인해야 하는 도구는 `ToolDefinition.hitl`과 `hitl.store`를 명시해야 `waitingForHuman`으로 멈췄다가 재개됩니다.
 - 메시지는 `Message { id, data: ModelMessage, metadata }` envelope로 다룹니다.
 - `metadata.__createdBy`는 코어 예약 provenance 키입니다.
 
@@ -97,7 +98,7 @@ README는 _처음 시작하는 데 필요한 최소한_ 만 담습니다.
 - [Getting Started](docs/getting-started.md): 설치, 설정 파일, CLI, programmatic 사용
 - [Migration: alpha → v0.1](docs/migration-alpha-to-v0.1.md): YAML/manifest 기반 alpha에서 code-first v0.1.x로 옮기는 방법
 - [Architecture](docs/architecture.md): Turn/Step/ToolCall, ingress, conversation state
-- [Extensions And Tools](docs/extensions-and-tools.md): 언제 Extension을 쓰고 언제 Tool을 쓰는지
+- [Extensions And Tools](docs/extensions-and-tools.md): 언제 Extension을 쓰고 언제 Tool을 쓰는지, HITL Tool을 어떻게 선언하는지
 - [Message Envelope](docs/message-envelope.md): `ModelMessage`, `metadata.__createdBy`, 이벤트 기반 메시지 조작
 - [CONCEPTS.md](CONCEPTS.md): 왜 이런 구조인지에 대한 긴 설명
 

@@ -128,6 +128,8 @@ await runtime.close();
 - YAML를 로드하는 runtime helper가 사라졌습니다.
 - `processTurn()`은 이제 `agentName`을 명시적으로 받습니다.
 - text input뿐 아니라 `InboundEnvelope`도 직접 넣을 수 있습니다.
+- `TurnResult.status`에 `waitingForHuman`이 추가되었습니다. exhaustive switch를 쓰는 경우 이 상태를 처리해야 합니다.
+- `runtime.control`에는 HITL request 조회, human result 제출, resume, cancel API가 추가되었습니다.
 
 ## 3. Extension / Tool 등록 방식 변경
 
@@ -169,6 +171,37 @@ export default defineHarness({
 - 설정 파일만 봐도 실제 코드 연결이 더 명확함
 - manifest registry 없이도 로컬/서드파티 extension을 바로 꽂을 수 있음
 - TypeScript 타입 도움을 바로 받을 수 있음
+
+### HITL 정책 추가
+
+`ToolDefinition`에는 optional `hitl` 필드가 추가되었습니다. HITL 정책을 사용하는 tool이 있으면 runtime config에 `hitl.store`를 반드시 넣어야 합니다. store가 없으면 runtime 생성 또는 tool 실행 시 명확한 config error가 발생합니다.
+
+```ts
+import { InMemoryHitlStore } from "@goondan/openharness";
+
+export default defineHarness({
+  agents: {
+    assistant: {
+      // ...
+      tools: [
+        {
+          name: "dangerous_action",
+          description: "Requires approval.",
+          parameters: { type: "object", additionalProperties: false },
+          hitl: {
+            mode: "required",
+            response: { type: "approval" },
+          },
+          async handler() {
+            return { type: "text", text: "done" };
+          },
+        },
+      ],
+    },
+  },
+  hitl: { store: new InMemoryHitlStore() },
+});
+```
 
 ## 4. Ingress 설정 변경
 
