@@ -29,7 +29,6 @@ const CONVERSATION_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
   "ready",
   "resuming",
   "continuing",
-  "failed",
 ]);
 
 const STEER_QUEUE_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
@@ -779,7 +778,10 @@ function isSteerQueueOpenBatch(batch: HitlBatchRecord): boolean {
 }
 
 function isConversationOpenBatch(batch: HitlBatchRecord): boolean {
-  return CONVERSATION_OPEN_BATCH_STATUSES.has(batch.status) && !batch.metadata?.["steerQueueClosedAt"];
+  return (
+    CONVERSATION_OPEN_BATCH_STATUSES.has(batch.status) ||
+    (batch.status === "failed" && batch.failure?.retryable === true)
+  ) && !batch.metadata?.["steerQueueClosedAt"];
 }
 
 function hasPendingRequests(batchId: string, requests: Map<string, HitlRequestRecord>): boolean {

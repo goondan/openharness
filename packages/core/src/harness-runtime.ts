@@ -95,6 +95,17 @@ class SteeringInbox implements TurnSteeringController {
     return inputs;
   }
 
+  peek(): readonly InboundEnvelope[] {
+    return this._queue.slice();
+  }
+
+  ack(count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this._queue.splice(0, count);
+  }
+
   close(): void {
     this._closed = true;
     this._queue = [];
@@ -183,11 +194,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : randomUUID());
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
 
-    const queuedForHitl = await this.queueHitlSteer(
-      agentName,
-      createProgrammaticEnvelope(input, conversationId),
-      conversationId,
-    );
+    const envelope = createProgrammaticEnvelope(input, conversationId);
+    const queuedForHitl = await this.queueHitlSteer(agentName, envelope, conversationId);
     if (queuedForHitl) {
       return {
         turnId,
@@ -200,12 +208,16 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       };
     }
 
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    if (activeTurn && activeTurn.steeringInbox.enqueue(envelope)) {
+      return activeTurn.promise;
+    }
+
     const hitlBarrier = await this._getHitlBarrierTurnResult(agentName, conversationId, turnId);
     if (hitlBarrier) {
       return hitlBarrier;
     }
-
-    const conversationKey = this._conversationKey(agentName, conversationId);
 
     let conversationState = this._conversations.get(conversationKey);
     if (!conversationState) {

@@ -81,6 +81,70 @@ describe("InMemoryHitlStore", () => {
     expect(duplicate.openBatch.batchId).toBe("preparing-batch-1");
   });
 
+  it("does not keep non-retryable failed batches open for conversation conflicts", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    const batch: HitlBatchRecord = {
+      batchId: "failed-batch-1",
+      status: "preparing",
+      agentName: "default",
+      conversationId: "failed-conversation",
+      turnId: "turn-1",
+      stepNumber: 1,
+      toolCalls: [{
+        toolCallId: "tool-call-1",
+        toolCallIndex: 0,
+        toolName: "tool",
+        toolArgs: {},
+        requiresHitl: true,
+        requestId: "request-1",
+      }],
+      toolResults: [],
+      toolExecutions: [],
+      conversationEvents: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await store.createBatch({
+      batch,
+      requests: [requestRecord({
+        requestId: "request-1",
+        batchId: "failed-batch-1",
+        conversationId: "failed-conversation",
+      })],
+    });
+    await store.markBatchWaitingForHuman("failed-batch-1");
+    await store.resolveRequest("request-1", { decision: "approve", submittedAt: now });
+    const lease = await store.acquireBatchLease("failed-batch-1", "owner-1", 1000);
+    expect(lease.status).toBe("acquired");
+    if (lease.status !== "acquired") throw new Error("expected lease");
+    await store.failBatch("failed-batch-1", {
+      error: "non retryable",
+      retryable: false,
+      failedAt: now,
+    }, lease.guard);
+
+    const created = await store.createBatch({
+      batch: {
+        ...batch,
+        batchId: "failed-batch-2",
+        toolCalls: [{
+          ...batch.toolCalls[0]!,
+          toolCallId: "tool-call-2",
+          requestId: "request-2",
+        }],
+      },
+      requests: [requestRecord({
+        requestId: "request-2",
+        batchId: "failed-batch-2",
+        toolCallId: "tool-call-2",
+        conversationId: "failed-conversation",
+      })],
+    });
+
+    expect(created.status).toBe("created");
+  });
+
   it("lists only pending and resume-recoverable HITL requests", async () => {
     const store = new InMemoryHitlStore();
     const now = new Date().toISOString();

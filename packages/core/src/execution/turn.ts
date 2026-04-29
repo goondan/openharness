@@ -21,6 +21,8 @@ type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
 export interface TurnSteeringController {
   drain(): InboundEnvelope[];
+  peek?(): readonly InboundEnvelope[];
+  ack?(count: number): void;
   close?(): void;
 }
 
@@ -95,15 +97,46 @@ async function queueSteeredInputsForHitl(
     return 0;
   }
 
-  const inputs = steering.drain();
-  for (const input of inputs) {
-    await hitlStore.enqueueSteer(batchId, {
-      source: "dispatch",
-      envelope: input,
-      receivedAt: new Date().toISOString(),
-    });
+  if (steering.peek && steering.ack) {
+    const inputs = steering.peek();
+    let queued = 0;
+    for (const input of inputs) {
+      await enqueueSteerWithRetry(hitlStore, batchId, input);
+      steering.ack(1);
+      queued++;
+    }
+    return queued;
   }
-  return inputs.length;
+
+  const inputs = steering.drain();
+  let queued = 0;
+  for (const input of inputs) {
+    await enqueueSteerWithRetry(hitlStore, batchId, input);
+    queued++;
+  }
+  return queued;
+}
+
+async function enqueueSteerWithRetry(
+  hitlStore: HitlStore,
+  batchId: string,
+  input: InboundEnvelope,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await hitlStore.enqueueSteer(batchId, {
+        source: "dispatch",
+        envelope: input,
+        receivedAt: new Date().toISOString(),
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function closeSteering(steering: TurnSteeringController | undefined): void {
