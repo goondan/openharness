@@ -300,6 +300,13 @@ export interface HitlStore {
 
   acquireBatchLease(batchId: string, ownerId: string, ttlMs: number): Promise<HitlBatchLeaseResult>;
   startRequestExecution(requestId: string, guard: HitlLeaseGuard, startedAt: string): Promise<HitlRequestRecord>;
+  completeRequestWithToolResult(input: {
+    batchId: string;
+    requestId: string;
+    toolResult: HitlBatchToolResult;
+    completion: HitlCompletion;
+    guard: HitlLeaseGuard;
+  }): Promise<{ batch: HitlBatchRecord; request: HitlRequestRecord }>;
   completeRequest(requestId: string, completion: HitlCompletion, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
   failRequest(requestId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
   commitBatchAppend(batchId: string, appendCommit: HitlBatchAppendCommit, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;

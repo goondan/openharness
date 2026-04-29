@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HitlRequestRecord, ToolResult } from "@goondan/openharness-types";
+import type { HitlBatchToolResult, HitlRequestRecord, ToolResult } from "@goondan/openharness-types";
 import { InMemoryHitlStore } from "../hitl/store.js";
 
 function requestRecord(overrides: Partial<HitlRequestRecord> = {}): HitlRequestRecord {
@@ -149,5 +149,59 @@ describe("InMemoryHitlStore", () => {
         token: firstLease.request.lease!.token,
       }),
     ).rejects.toThrow("HITL lease no longer belongs to this runtime");
+  });
+
+  it("atomically stores HITL tool result and request completion", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    const toolResult: ToolResult = { type: "text", text: "done" };
+    const batchId = "atomic-batch";
+    const requestId = "atomic-request";
+
+    await store.create(requestRecord({
+      requestId,
+      batchId,
+      status: "pending",
+      conversationId: "atomic-conversation",
+    }));
+    await store.resolve(requestId, { decision: "approve", submittedAt: now });
+    const lease = await store.acquireLease(requestId, "atomic-owner", 1000);
+    expect(lease.acquired).toBe(true);
+    if (!lease.acquired) throw new Error("expected lease");
+    const guard = {
+      ownerId: lease.request.lease!.ownerId,
+      token: lease.request.lease!.token,
+    };
+    await store.startExecution(requestId, guard, now);
+
+    const batchToolResult: HitlBatchToolResult = {
+      batchId,
+      toolCallId: "tool-call-1",
+      toolCallIndex: 0,
+      toolName: "tool",
+      result: toolResult,
+      finalArgs: { approved: true },
+      recordedAt: now,
+    };
+
+    const completed = await store.completeRequestWithToolResult({
+      batchId,
+      requestId,
+      toolResult: batchToolResult,
+      completion: {
+        toolResult,
+        finalArgs: { approved: true },
+        completedAt: now,
+      },
+      guard,
+    });
+
+    expect(completed.request.status).toBe("completed");
+    expect(completed.batch.toolResults).toHaveLength(1);
+    expect(completed.batch.toolResults[0]).toMatchObject({
+      batchId,
+      toolCallId: "tool-call-1",
+      result: toolResult,
+    });
   });
 });

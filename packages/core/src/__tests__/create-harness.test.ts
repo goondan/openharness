@@ -19,6 +19,7 @@ import type {
   HitlHumanResult,
   HitlLeaseGuard,
   HitlRequestRecord,
+  HitlStore,
 } from "@goondan/openharness-types";
 import { defineHarness, env } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
@@ -174,16 +175,14 @@ class FailingOnceRecordStore extends InMemoryHitlStore {
 class FailingOnceCompleteRequestStore extends InMemoryHitlStore {
   private failed = false;
 
-  override async completeRequest(
-    requestId: string,
-    completion: HitlCompletion,
-    guard: HitlLeaseGuard,
-  ): Promise<HitlRequestRecord> {
+  override async completeRequestWithToolResult(
+    input: Parameters<HitlStore["completeRequestWithToolResult"]>[0],
+  ): ReturnType<HitlStore["completeRequestWithToolResult"]> {
     if (!this.failed) {
       this.failed = true;
-      throw new Error("complete request store write failed");
+      throw new Error("complete request with tool result store write failed");
     }
-    return super.completeRequest(requestId, completion, guard);
+    return super.completeRequestWithToolResult(input);
   }
 }
 
@@ -1152,7 +1151,7 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
-  it("retries only request completion when a stored HITL tool result already exists", async () => {
+  it("does not leave partial HITL completion state when atomic result completion fails", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const chat = vi.fn()
       .mockResolvedValueOnce({
@@ -1199,19 +1198,19 @@ describe("createHarness", () => {
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
       expect(batch?.status).toBe("failed");
-      expect(batch?.failure?.retryable).toBe(true);
-      expect(batch?.toolResults).toHaveLength(1);
+      expect(batch?.failure?.retryable).toBe(false);
+      expect(batch?.toolResults).toHaveLength(0);
     });
     expect(handler).toHaveBeenCalledOnce();
     expect(chat).toHaveBeenCalledTimes(1);
 
     const resumed = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
-    expect(resumed.status).toBe("completed");
+    expect(resumed.status).toBe("notReady");
     expect(handler).toHaveBeenCalledOnce();
-    expect(chat).toHaveBeenCalledTimes(2);
+    expect(chat).toHaveBeenCalledTimes(1);
     await waitUntil(async () => {
       const request = await runtime.control.getHitlRequest(result.pendingHitlRequestIds![0]!);
-      expect(request?.status).toBe("completed");
+      expect(request?.status).toBe("failed");
     });
 
     await runtime.close();

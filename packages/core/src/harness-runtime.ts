@@ -932,28 +932,32 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         throw new HitlResumeError(`HITL request not found for "${toolCall.toolCallId}"`, false);
       }
       const { result, finalArgs } = await this._executeHitlRequestTool(request, guard, abortSignal);
-      let recorded = false;
       try {
-        current = await this._hitlStore.recordBatchToolResult(batch.batchId, {
+        const completed = await this._hitlStore.completeRequestWithToolResult({
           batchId: batch.batchId,
-          toolCallId: request.toolCallId,
-          toolCallIndex: requireHitlRequestToolCallIndex(request),
-          toolName: request.toolName,
-          result,
-          finalArgs,
-          recordedAt: new Date().toISOString(),
+          requestId: request.requestId,
+          toolResult: {
+            batchId: batch.batchId,
+            toolCallId: request.toolCallId,
+            toolCallIndex: requireHitlRequestToolCallIndex(request),
+            toolName: request.toolName,
+            result,
+            finalArgs,
+            recordedAt: new Date().toISOString(),
+          },
+          completion: {
+            toolResult: result,
+            finalArgs,
+            completedAt: new Date().toISOString(),
+          },
+          guard,
         });
-        recorded = true;
-        await this._hitlStore.completeRequest(request.requestId, {
-          toolResult: result,
-          finalArgs,
-          completedAt: new Date().toISOString(),
-        }, guard);
+        current = completed.batch;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         throw error instanceof HitlResumeError
           ? error
-          : new HitlResumeError(error.message, recorded);
+          : new HitlResumeError(error.message, false);
       }
       this._runtimeEvents.emit("tool.done", {
         type: "tool.done",

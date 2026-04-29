@@ -249,6 +249,55 @@ export class InMemoryHitlStore implements HitlStore {
     return clone(updated);
   }
 
+  async completeRequestWithToolResult(input: {
+    batchId: string;
+    requestId: string;
+    toolResult: HitlBatchToolResult;
+    completion: HitlCompletion;
+    guard: HitlLeaseGuard;
+  }): Promise<{ batch: HitlBatchRecord; request: HitlRequestRecord }> {
+    const request = mustGetRequest(this.requests, input.requestId);
+    const batch = mustGetBatch(this.batches, input.batchId);
+    if (requireRequestBatchId(request) !== input.batchId) {
+      throw new HitlStoreError("HITL request batchId must match batch");
+    }
+    if (input.toolResult.batchId !== input.batchId) {
+      throw new HitlStoreError("HITL tool result batchId must match batch");
+    }
+    if (input.toolResult.toolCallId !== request.toolCallId) {
+      throw new HitlStoreError("HITL tool result toolCallId must match request");
+    }
+    assertBatchLease(batch, input.guard);
+    if (
+      request.status !== "resolved" &&
+      request.status !== "rejected" &&
+      request.status !== "blocked" &&
+      request.status !== "completed" &&
+      !(request.status === "failed" && request.failure?.retryable === true)
+    ) {
+      throw new HitlStoreError(`Cannot complete HITL request from ${request.status}`);
+    }
+
+    const toolResults = batch.toolResults.filter((item) => item.toolCallId !== input.toolResult.toolCallId);
+    toolResults.push(clone(input.toolResult));
+    const updatedBatch = touchBatch({
+      ...batch,
+      toolResults: toolResults.sort((a, b) => a.toolCallIndex - b.toolCallIndex),
+    });
+    const updatedRequest = touchRequest({
+      ...request,
+      status: "completed",
+      finalArgs: input.completion.finalArgs,
+      completion: clone(input.completion),
+    });
+    this.batches.set(input.batchId, updatedBatch);
+    this.requests.set(input.requestId, updatedRequest);
+    return {
+      batch: clone(updatedBatch),
+      request: clone(updatedRequest),
+    };
+  }
+
   async markBatchWaitingForHuman(batchId: string): Promise<HitlBatchRecord> {
     const batch = mustGetBatch(this.batches, batchId);
     if (batch.status !== "preparing") {
