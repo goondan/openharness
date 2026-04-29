@@ -69,6 +69,7 @@
 | Connector | raw payload를 검증하고 `InboundEnvelope`로 정규화하는 어댑터 |
 | Connection | Connector와 routing rule, connection-level extension 묶음 |
 | InboundEnvelope | ingress가 Turn 입력으로 사용하는 표준 이벤트 형식 |
+| Ingress Disposition | ingress accepted 결과가 새 Turn을 시작했는지(`started`) 기존 active Turn에 합류했는지(`steered`) 나타내는 값 |
 | Runtime Snapshot | Extension 등록 시점에 제공되는 선언 기반 읽기 전용 구성 정보 |
 
 ## 7. 기능 요구사항
@@ -84,6 +85,8 @@
 | FR-EXEC-005 | LLM client가 `streamChat()`을 구현하면 우선 사용하고, 없으면 `chat()`으로 폴백한다. |
 | FR-EXEC-006 | `step.textDelta`와 `step.toolCallDelta`는 스트리밍 중간 이벤트로 발행된다. |
 | FR-EXEC-007 | ingress가 발급한 accepted `turnId`는 실제 turn 실행에서도 동일한 ID를 사용한다. |
+| FR-EXEC-008 | runtime은 `turn.start` 발행 전에 해당 `(agentName, conversationId)`의 active turn 추적을 등록한다. |
+| FR-EXEC-009 | active turn은 `turn.done`/`turn.error` 발행 전에 steer 불가 상태가 된다. |
 
 ### 7.2 대화 상태
 
@@ -120,6 +123,8 @@
 | FR-INGRESS-005 | `dispatch()`는 verify/normalize를 건너뛰고 route부터 수행한다. |
 | FR-INGRESS-006 | ingress 접수는 fire-and-forget이며, `receive()/dispatch()`는 Turn 완료를 기다리지 않는다. |
 | FR-INGRESS-007 | connection extension은 ingress 이벤트 버스를 공유해 `ingress.received/accepted/rejected`를 관찰할 수 있다. |
+| FR-INGRESS-008 | route 결과의 `(agentName, conversationId)`에 steer 가능한 active turn이 있으면 새 Turn 대신 해당 Turn의 다음 Step 입력으로 접수한다. |
+| FR-INGRESS-009 | `IngressAcceptResult.disposition`은 새 Turn 시작이면 `started`, 기존 active Turn 합류면 `steered`다. |
 
 ### 7.5 구성 / CLI
 
@@ -139,7 +144,7 @@
 | NFR-001 | 타입 안전성: config와 tool schema 오류는 가능한 한 TypeScript/Ajv 단계에서 잡힌다. | `tsc`, unit test |
 | NFR-002 | 상태 격리: agent가 달라도 같은 `conversationId`를 공유하지 않는다. | unit test |
 | NFR-003 | 등록 원자성: extension 하나가 실패하면 이전 등록도 남지 않는다. | unit test |
-| NFR-004 | 상관관계: ingress accepted result와 실제 turn 이벤트를 같은 `turnId`로 추적할 수 있다. | integration test |
+| NFR-004 | 상관관계: `started` accepted result는 새 turn 이벤트와 같은 `turnId`를 쓰고, `steered` accepted result는 기존 active turn의 `turnId`를 반환한다. | integration test |
 | NFR-005 | 종료 안정성: `runtime.close()`는 진행 중 turn을 abort하고 정리한다. | unit/integration test |
 
 ## 9. 안정성 분류
@@ -187,7 +192,19 @@
 
 - Given connection이 raw payload를 normalize하고 agent로 dispatch한다
 - When `ingress.receive()`가 accepted result를 반환하면
-- Then 반환된 `turnId`와 이후 `turn.start`의 `turnId`가 동일하다.
+- Then `disposition="started"`이면 반환된 `turnId`와 이후 `turn.start`의 `turnId`가 동일하다.
+
+### AC-04b ingress active-turn steering
+
+- Given 같은 `(agentName, conversationId)`의 Turn이 실행 중이다
+- When 같은 route 결과를 가진 ingress가 새로 accepted 된다
+- Then 새 Turn을 시작하지 않고 기존 Turn의 다음 Step 입력으로 반영되며 `disposition="steered"`와 기존 `turnId`가 반환된다.
+
+### AC-04c ingress terminal boundary
+
+- Given Turn이 `turn.done` 또는 `turn.error`를 발행하는 중이다
+- When 같은 `(agentName, conversationId)`로 ingress가 들어온다
+- Then 이미 종료 경계에 들어간 Turn에는 steer되지 않고 새 Turn으로 accepted 된다.
 
 ### AC-05 conversation isolation
 
@@ -204,7 +221,7 @@
 ## 12. 검증 계획
 
 - core unit test로 실행 루프, abort, stream fallback, route priority, state restore를 검증한다.
-- createHarness 수준 테스트로 runtime snapshot completeness, conversation isolation, ingress turnId correlation을 검증한다.
+- createHarness 수준 테스트로 runtime snapshot completeness, conversation isolation, ingress turnId correlation, active-turn steering 경계 조건을 검증한다.
 - CLI 테스트로 agent 선택, `.env` 우선순위, `--max-steps` override를 검증한다.
 - `pnpm -r run typecheck`를 기본 정합성 게이트로 사용한다.
 

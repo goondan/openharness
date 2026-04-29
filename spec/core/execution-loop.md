@@ -7,8 +7,8 @@
 ## 2. 상위 스펙 연결
 
 - Related Goals: `G-1`, `G-2`, `G-5`
-- Related Requirements: `FR-EXEC-001` ~ `FR-EXEC-007`
-- Related AC: `AC-01`, `AC-04`
+- Related Requirements: `FR-EXEC-001` ~ `FR-EXEC-009`
+- Related AC: `AC-01`, `AC-04`, `AC-04b`, `AC-04c`
 
 ## 3. Behavior Specification
 
@@ -22,13 +22,15 @@
      - 직접 실행이면 코어가 생성
      - ingress 실행이면 accepted handle의 `turnId`를 재사용
   2. `conversationId`를 결정하고 해당 conversation state를 준비한다.
-  3. input을 `InboundEnvelope`로 정규화한다.
-  4. `turn.start` 이벤트를 발행한다.
-  5. `_turnActive = true`로 전환하고 사용자 메시지를 `appendMessage`로 기록한다.
-  6. turn middleware 체인을 실행한다.
-  7. 내부 core handler가 Step loop를 수행한다.
-  8. 성공 시 `turn.done`, 실패 시 `turn.error`를 발행한다.
-  9. `_turnActive = false`로 되돌리고 `TurnResult`를 반환한다.
+  3. runtime은 `(agentName, conversationId)` active turn 추적을 등록한다.
+  4. input을 `InboundEnvelope`로 정규화한다.
+  5. `turn.start` 이벤트를 발행한다.
+  6. `_turnActive = true`로 전환하고 사용자 메시지를 `appendMessage`로 기록한다.
+  7. turn middleware 체인을 실행한다.
+  8. 내부 core handler가 Step loop를 수행한다.
+  9. 종료 결과가 결정되면 terminal event 전에 steering 접수를 닫는다.
+  10. 성공 시 `turn.done`, 실패 시 `turn.error`를 발행한다.
+  11. `_turnActive = false`로 되돌리고 active turn 추적을 해제한 뒤 `TurnResult`를 반환한다.
 
 ### 3.2 Flow: Step 실행
 
@@ -65,7 +67,10 @@
 
 **ID:** `EXEC-TURN-LOOP-01`
 
+- 각 Step 진입 전 active Turn의 steering inbox를 drain해 steered ingress input을 사용자 메시지로 기록한다.
+- 각 Step 완료 후에도 steering inbox를 drain한다.
 - tool call이 없으면 Turn은 `completed`로 종료한다.
+- 단, tool call 없이 완료된 Step 직후 steered input이 drain되면 Turn은 종료하지 않고 다음 Step으로 계속한다.
 - tool call이 계속 나오면 다음 Step으로 진행한다.
 - `maxSteps`에 도달하면 `maxStepsReached`로 종료한다.
 - abort signal이 이미 중단 상태면 다음 Step 진입 전에 `aborted`로 종료한다.
@@ -94,12 +99,23 @@
 
 ### EXEC-CONST-005 - ingress correlation 유지
 
-- ingress가 accepted handle에서 발급한 `turnId`는 이후 `turn.start`, `turn.done`, `turn.error`에서도 동일해야 한다.
+- `disposition="started"`인 ingress accepted handle의 `turnId`는 이후 `turn.start`, `turn.done`, `turn.error`에서도 동일해야 한다.
+- `disposition="steered"`인 ingress accepted handle의 `turnId`는 기존 active Turn의 식별자이며, 해당 ingress 때문에 새 `turn.start`가 발생하지 않는다.
 
 ### EXEC-CONST-006 - LLM 입력은 conversation 불변식을 그대로 따른다
 
 - 실행 루프는 `ctx.conversation.messages` 순서를 그대로 provider adapter에 전달한다.
 - system 메시지가 선두라는 보장은 execution 단계가 아니라 `appendSystem` 이벤트와 conversation 상태 불변식에서 온다.
+
+### EXEC-CONST-007 - active turn 등록은 turn.start보다 앞선다
+
+- runtime은 `executeTurn()`이 `turn.start`를 발행하기 전에 in-flight/active turn 추적을 등록해야 한다.
+- 따라서 `turn.start` listener에서 `abortConversation()`이나 ingress steering을 수행해도 현재 Turn이 active 대상으로 잡혀야 한다.
+
+### EXEC-CONST-008 - terminal event 중에는 steer하지 않는다
+
+- Turn은 `turn.done`/`turn.error` 발행 전에 steering inbox를 닫는다.
+- terminal event listener 안에서 들어온 같은 `(agentName, conversationId)` ingress는 종료 중인 Turn에 합류하지 않고 새 Turn으로 시작되어야 한다.
 
 ## 5. Interface Specification
 
@@ -134,7 +150,8 @@ interface LlmClient {
 
 - Turn 성공: `turn.start` -> `step.*` / `tool.*` -> `turn.done`
 - Step 스트리밍 성공: `step.start` -> zero or more delta events -> `step.done`
-- ingress dispatch 경유 Turn: `ingress.accepted`와 `turn.start`는 같은 `turnId`를 사용한다.
+- ingress dispatch 경유 새 Turn: `disposition="started"`인 `ingress.accepted`와 `turn.start`는 같은 `turnId`를 사용한다.
+- ingress steering: `disposition="steered"`인 `ingress.accepted`는 기존 active Turn의 `turnId`를 사용하며 새 `turn.start`를 만들지 않는다.
 
 ## 6. Realization Specification
 
@@ -157,5 +174,8 @@ interface LlmClient {
 - Given LLM이 tool call을 반환하면, When Step을 실행하면, Then tool 검증/실행 후 tool result가 conversation에 `appendMessage`로 기록되고 다음 Step으로 진행한다.
 - Given `streamChat()`이 구현된 client, When Step을 실행하면, Then `chat()` 대신 `streamChat()`을 사용하고 delta 이벤트를 발행한다.
 - Given abortConversation이 실행 중인 Turn에 호출되면, When 다음 abort 체크 시점에 도달하면, Then Turn은 `aborted`로 종료된다.
-- Given ingress `receive()` 결과가 `turnId=X`를 반환하면, When 해당 Turn의 `turn.start`가 발행되면, Then `turn.start.turnId === X`다.
+- Given `turn.start` listener가 현재 conversation에 `abortConversation()`을 호출하면, When Turn이 다음 abort 체크에 도달하면, Then 현재 Turn은 `aborted`로 종료된다.
+- Given ingress `receive()` 결과가 `disposition="started", turnId=X`를 반환하면, When 해당 Turn의 `turn.start`가 발행되면, Then `turn.start.turnId === X`다.
+- Given active Turn 실행 중 같은 `(agentName, conversationId)` ingress가 `disposition="steered"`로 accepted 되면, When 다음 Step이 LLM을 호출하면, Then steered input이 사용자 메시지로 포함된다.
+- Given `turn.done` listener에서 같은 `(agentName, conversationId)` ingress를 호출하면, When route가 유효하면, Then 해당 ingress는 새 Turn으로 `disposition="started"` 처리된다.
 - Given turn middleware가 `appendSystem`으로 system 메시지를 추가하면, When Step이 LLM을 호출하면, Then 전달되는 첫 메시지는 system 메시지다.

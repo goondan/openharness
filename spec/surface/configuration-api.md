@@ -121,6 +121,18 @@ interface HarnessRuntime {
   };
   close(): Promise<void>;
 }
+
+type IngressDisposition = "started" | "steered";
+
+interface IngressAcceptResult {
+  accepted: true;
+  connectionName: string;
+  agentName: string;
+  conversationId: string;
+  eventName: string;
+  turnId: string;
+  disposition: IngressDisposition;
+}
 ```
 
 ### 5.1 Model factory 표면
