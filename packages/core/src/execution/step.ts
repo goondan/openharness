@@ -5,12 +5,37 @@ import type {
   AssistantModelMessage,
   ToolModelMessage,
   ToolResult,
+  HitlStore,
+  HitlRequestRecord,
+  HitlResponseSchema,
+  HitlLeaseGuard,
+  JsonObject,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import { executeToolCall } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
+import { createHitlBatchId, createHitlRequestId, toHitlBatchView, toHitlRequestView } from "../hitl/store.js";
+import { ChainedChildPrepFailureError } from "../hitl/errors.js";
+
+interface CanonicalToolCall {
+  toolCallId: string;
+  toolCallIndex: number;
+  toolName: string;
+  args: JsonObject;
+  invalidReason?: string;
+  malformedResult?: ToolResult;
+}
+
+interface PlannedToolCall extends CanonicalToolCall {
+  requiresHitl: boolean;
+  requestId?: string;
+  prompt?: string;
+  responseSchema?: HitlResponseSchema;
+  expiresAt?: string;
+  onTimeout?: "reject" | "expire";
+}
 
 function toToolResultOutput(toolResult: ToolResult) {
   return toolResult.type === "text"
@@ -44,9 +69,14 @@ export async function executeStep(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    hitlStore?: HitlStore;
+    parentHitlBatch?: {
+      batchId: string;
+      guard: HitlLeaseGuard;
+    };
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus } = deps;
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, hitlStore, parentHitlBatch } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -113,7 +143,7 @@ export async function executeStep(
     }
 
     const canonicalToolCalls =
-      llmResponse.toolCalls?.map((tc) => {
+      llmResponse.toolCalls?.map((tc, index) => {
         const normalized = normalizeToolArgsResult(tc.args);
         const invalidReason = tc.invalidReason ?? (normalized.ok ? undefined : normalized.error);
         const malformedResult: ToolResult | undefined = invalidReason
@@ -125,6 +155,7 @@ export async function executeStep(
 
         return {
           toolCallId: tc.toolCallId,
+          toolCallIndex: index,
           toolName: tc.toolName,
           args: normalized.args,
           invalidReason,
@@ -163,76 +194,257 @@ export async function executeStep(
 
     // e. Execute tool calls if any
     const toolCallResults: StepResult["toolCalls"] = [];
+    let pendingHitlBatchId: string | undefined;
+    const pendingHitlRequestIds: string[] = [];
 
     if (canonicalToolCalls.length > 0) {
-      for (const tc of canonicalToolCalls) {
-        const toolCallCtx = {
-          ...stepCtx,
-          toolName: tc.toolName,
-          toolArgs: tc.args,
+      const plannedToolCalls = await planToolCallsForHitl(canonicalToolCalls, stepCtx, {
+        toolRegistry,
+      });
+      const hasHitl = plannedToolCalls.some((tc) => tc.requiresHitl);
+
+      if (hasHitl) {
+        if (!hitlStore) {
+          throw new Error("HITL tool call requires a configured HitlStore");
+        }
+
+        const now = new Date().toISOString();
+        const batchId = createHitlBatchId();
+        pendingHitlBatchId = batchId;
+
+        const requests: HitlRequestRecord[] = plannedToolCalls
+          .filter((tc) => tc.requiresHitl)
+          .map((tc) => {
+            const requestId = tc.requestId ?? createHitlRequestId();
+            pendingHitlRequestIds.push(requestId);
+            return {
+              requestId,
+              batchId,
+              status: "pending",
+              agentName,
+              conversationId,
+              turnId,
+              stepNumber,
+              toolCallId: tc.toolCallId,
+              toolCallIndex: tc.toolCallIndex,
+              toolName: tc.toolName,
+              originalArgs: tc.args,
+              ...(tc.prompt ? { prompt: tc.prompt } : {}),
+              responseSchema: tc.responseSchema ?? { type: "approval" },
+              createdAt: now,
+              updatedAt: now,
+              ...(tc.expiresAt ? { expiresAt: tc.expiresAt } : {}),
+              ...(tc.onTimeout ? { onTimeout: tc.onTimeout } : {}),
+            };
+          });
+
+        const childBatch = {
+          batchId,
+          status: "preparing" as const,
+          agentName,
+          conversationId,
+          turnId,
+          stepNumber,
+          toolCalls: plannedToolCalls.map((tc) => ({
+            toolCallId: tc.toolCallId,
+            toolCallIndex: tc.toolCallIndex,
+            toolName: tc.toolName,
+            toolArgs: tc.args,
+            requiresHitl: tc.requiresHitl,
+            ...(tc.requestId ? { requestId: tc.requestId } : {}),
+          })),
+          toolResults: [],
+          toolExecutions: [],
+          conversationEvents: [...stepCtx.conversation.events],
+          createdAt: now,
+          updatedAt: now,
+          ...(parentHitlBatch ? { parentBatchId: parentHitlBatch.batchId } : {}),
         };
 
-        const toolResult =
-          tc.malformedResult ??
-          (await executeToolCall(tc.toolCallId, toolCallCtx, {
-            toolRegistry,
-            middlewareRegistry,
-            eventBus,
-          }));
-
-        if (tc.malformedResult) {
-          eventBus.emit("tool.start", {
-            type: "tool.start",
-            turnId,
-            agentName,
-            conversationId,
-            stepNumber,
-            toolCallId: tc.toolCallId,
-            toolName: tc.toolName,
-            args: tc.args,
+        if (parentHitlBatch) {
+          await hitlStore.spawnChildBatch({
+            parentBatchId: parentHitlBatch.batchId,
+            parentCompletion: {
+              completedAt: now,
+              continuationTurnId: turnId,
+              outcome: "spawnedChild",
+              childBatchId: batchId,
+            },
+            childBatch,
+            childRequests: requests,
+            guard: parentHitlBatch.guard,
           });
-          eventBus.emit("tool.done", {
-            type: "tool.done",
-            turnId,
-            agentName,
-            conversationId,
-            stepNumber,
+        } else {
+          const created = await hitlStore.createBatch({
+            batch: childBatch,
+            requests,
+          });
+          if (created.status === "conflict") {
+            throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
+          }
+        }
+
+        // §8.1 step 6~8 / §8.5 step 12.1: child is now `preparing` (atomic spawn or createBatch).
+        // Run non-HITL peer execution and `markBatchWaitingForHuman()` outside the spawn transaction.
+        const spawnedFromParent = Boolean(parentHitlBatch);
+        let exposedForHuman = false;
+        try {
+          for (const tc of plannedToolCalls) {
+            if (tc.requiresHitl) {
+              toolCallResults.push({
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+              });
+              continue;
+            }
+
+            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
+              toolRegistry,
+              middlewareRegistry,
+              eventBus,
+              hitlStore,
+              batchId,
+            }));
+
+            if (tc.malformedResult) {
+              eventBus.emit("tool.start", {
+                type: "tool.start",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+              });
+              eventBus.emit("tool.done", {
+                type: "tool.done",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+                result: tc.malformedResult,
+              });
+            }
+
+            await hitlStore.recordBatchToolResult(batchId, {
+              batchId,
+              toolCallId: tc.toolCallId,
+              toolCallIndex: tc.toolCallIndex,
+              toolName: tc.toolName,
+              result,
+              recordedAt: new Date().toISOString(),
+            });
+
+            toolCallResults.push({
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+              result,
+            });
+          }
+
+          const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
+          exposedForHuman = true;
+          const waitingRequests = await hitlStore.listBatchRequests(batchId);
+          eventBus.emit("hitl.batch.requested", {
+            type: "hitl.batch.requested",
+            batch: toHitlBatchView(waitingBatch, waitingRequests),
+          });
+          for (const request of waitingRequests) {
+            eventBus.emit("hitl.requested", {
+              type: "hitl.requested",
+              request: toHitlRequestView(request),
+            });
+          }
+        } catch (err) {
+          if (!exposedForHuman) {
+            await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
+          }
+          // Per spec §8.5 step 12.1, after a successful `spawnChildBatch()` the parent is
+          // atomically `completed(spawnedChild)` (lease released) and child peer execution runs
+          // *outside* the spawn transaction. If peer execution fails *before* the child is
+          // exposed, the child has been closed terminally above; the outer resume layer must
+          // observe this and not attempt to re-fail the already-completed parent. We rely on
+          // `_recordHitlBatchFailure()` re-reading the parent's state and short-circuiting on
+          // post-spawn terminal completion. We wrap the failure in a typed
+          // `ChainedChildPrepFailureError` ONLY when it happened during child preparation
+          // (peer execution / atomic exposure) — post-exposure listener exceptions must
+          // surface unchanged so listener bugs are not silently swallowed.
+          if (spawnedFromParent && !exposedForHuman) {
+            const cause = err instanceof Error ? err : new Error(String(err));
+            throw new ChainedChildPrepFailureError(cause);
+          }
+          throw err;
+        }
+      } else {
+        for (const tc of plannedToolCalls) {
+          const toolResult =
+            tc.malformedResult ??
+            (await executeNonHitlToolCall(tc, stepCtx, {
+              toolRegistry,
+              middlewareRegistry,
+              eventBus,
+              hitlStore,
+            }));
+
+          if (tc.malformedResult) {
+            eventBus.emit("tool.start", {
+              type: "tool.start",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+            });
+            eventBus.emit("tool.done", {
+              type: "tool.done",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+              result: tc.malformedResult,
+            });
+          }
+
+          stepCtx.conversation.emit({
+            type: "appendMessage",
+            message: {
+              id: `tool-result-${tc.toolCallId}`,
+              data: {
+                role: "tool",
+                content: [
+                  {
+                    type: "tool-result",
+                    toolCallId: tc.toolCallId,
+                    toolName: tc.toolName,
+                    output: toToolResultOutput(toolResult),
+                  },
+                ],
+              } satisfies ToolModelMessage,
+              metadata: {
+                __createdBy: "core",
+              },
+            },
+          });
+
+          toolCallResults.push({
             toolCallId: tc.toolCallId,
             toolName: tc.toolName,
             args: tc.args,
+            ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
             result: toolResult,
           });
         }
-
-        // FR-CORE-007: Record the tool result as a non-system message
-        stepCtx.conversation.emit({
-          type: "appendMessage",
-          message: {
-            id: `tool-result-${tc.toolCallId}`,
-            data: {
-              role: "tool",
-              content: [
-                {
-                  type: "tool-result",
-                  toolCallId: tc.toolCallId,
-                  toolName: tc.toolName,
-                  output: toToolResultOutput(toolResult),
-                },
-              ],
-            } satisfies ToolModelMessage,
-            metadata: {
-              __createdBy: "core",
-            },
-          },
-        });
-
-        toolCallResults.push({
-          toolCallId: tc.toolCallId,
-          toolName: tc.toolName,
-          args: tc.args,
-          ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
-          result: toolResult,
-        });
       }
     }
 
@@ -243,6 +455,8 @@ export async function executeStep(
       rawFinishReason: llmResponse.rawFinishReason,
       toolCalls: toolCallResults,
       ...(llmResponse.usage ? { usage: llmResponse.usage } : {}),
+      ...(pendingHitlBatchId ? { pendingHitlBatchId } : {}),
+      ...(pendingHitlRequestIds.length > 0 ? { pendingHitlRequestIds } : {}),
     };
   };
 
@@ -279,4 +493,156 @@ export async function executeStep(
 
     throw error;
   }
+}
+
+async function planToolCallsForHitl(
+  toolCalls: CanonicalToolCall[],
+  stepCtx: StepContext,
+  deps: { toolRegistry: ToolRegistry },
+): Promise<PlannedToolCall[]> {
+  const planned: PlannedToolCall[] = [];
+
+  for (const tc of toolCalls) {
+    const base: PlannedToolCall = {
+      ...tc,
+      requiresHitl: false,
+    };
+
+    if (tc.malformedResult) {
+      planned.push(base);
+      continue;
+    }
+
+    const tool = deps.toolRegistry.get(tc.toolName);
+    if (!tool || !tool.hitl || tool.hitl.mode === "never") {
+      planned.push(base);
+      continue;
+    }
+
+    const validation = deps.toolRegistry.validate(tc.toolName, tc.args);
+    if (!validation.valid) {
+      planned.push(base);
+      continue;
+    }
+
+    const toolCallCtx = {
+      ...stepCtx,
+      toolName: tc.toolName,
+      toolArgs: tc.args,
+    };
+    const requiresHitl =
+      tool.hitl.mode === "required" ||
+      (tool.hitl.mode === "conditional" &&
+        (tool.hitl.when ? await tool.hitl.when(toolCallCtx) : true));
+
+    if (!requiresHitl) {
+      planned.push(base);
+      continue;
+    }
+
+    const prompt =
+      typeof tool.hitl.prompt === "function"
+        ? tool.hitl.prompt(toolCallCtx)
+        : tool.hitl.prompt;
+
+    planned.push({
+      ...base,
+      requiresHitl: true,
+      requestId: createHitlRequestId(),
+      ...(prompt ? { prompt } : {}),
+      responseSchema: tool.hitl.response,
+      ...(tool.hitl.ttlMs
+        ? {
+            expiresAt: new Date(Date.now() + tool.hitl.ttlMs).toISOString(),
+            onTimeout: tool.hitl.onTimeout ?? "expire",
+          }
+        : {}),
+    });
+  }
+
+  return planned;
+}
+
+async function executeNonHitlToolCall(
+  tc: CanonicalToolCall,
+  stepCtx: StepContext,
+  deps: {
+    toolRegistry: ToolRegistry;
+    middlewareRegistry: MiddlewareRegistry;
+    eventBus: EventBus;
+    hitlStore?: HitlStore;
+    batchId?: string;
+  },
+): Promise<ToolResult> {
+  if (deps.batchId && deps.hitlStore) {
+    await deps.hitlStore.startBatchToolExecution(deps.batchId, {
+      batchId: deps.batchId,
+      phase: "pre-resume",
+      toolCallId: tc.toolCallId,
+      toolCallIndex: tc.toolCallIndex,
+      toolName: tc.toolName,
+      startedAt: new Date().toISOString(),
+    });
+  }
+
+  const result = await executeToolCall(
+    tc.toolCallId,
+    {
+      ...stepCtx,
+      toolName: tc.toolName,
+      toolArgs: tc.args,
+    },
+    {
+      toolRegistry: deps.toolRegistry,
+      middlewareRegistry: deps.middlewareRegistry,
+      eventBus: deps.eventBus,
+      hitlStore: deps.hitlStore,
+      skipHitl: true,
+    },
+  );
+
+  if (result.type === "pendingHitl") {
+    return {
+      type: "error",
+      error: `Tool "${tc.toolName}" unexpectedly returned pending HITL outside batch planning`,
+    };
+  }
+
+  return result;
+}
+
+async function closeUnexposedHitlBatchAfterPreparationFailure(
+  hitlStore: HitlStore,
+  batchId: string,
+  cause: unknown,
+): Promise<void> {
+  const batch = await hitlStore.getBatch(batchId).catch(() => null);
+  if (!batch) {
+    return;
+  }
+
+  const missingNonHitlResults = batch.toolCalls.filter(
+    (toolCall) =>
+      !toolCall.requiresHitl &&
+      !batch.toolResults.some((result) => result.toolCallId === toolCall.toolCallId),
+  );
+  if (missingNonHitlResults.length === 0) {
+    await hitlStore.markBatchWaitingForHuman(batchId).catch(() => undefined);
+    return;
+  }
+
+  if (batch.toolExecutions.length > 0) {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    await hitlStore.failBatch(batchId, {
+      error: `HITL batch preparation failed after peer tool execution started: ${error}`,
+      retryable: false,
+      failedAt: new Date().toISOString(),
+    }).catch(() => undefined);
+    return;
+  }
+
+  await hitlStore.cancelBatch({
+    batchId,
+    reason: "HITL batch preparation failed before peer execution",
+  }).catch(() => undefined);
 }

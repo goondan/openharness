@@ -31,6 +31,23 @@ const DEFAULT_MAX_STEPS = 25;
 // ---------------------------------------------------------------------------
 
 export async function createHarness(config: HarnessConfig): Promise<HarnessRuntime> {
+  if (config.hitl && !config.hitl.store) {
+    throw new ConfigError("hitl.store is required when hitl config is provided");
+  }
+
+  if (!config.hitl) {
+    for (const [agentName, agentConfig] of Object.entries(config.agents)) {
+      const hitlTool = (agentConfig.tools ?? []).find(
+        (tool) => tool.hitl && tool.hitl.mode !== "never",
+      );
+      if (hitlTool) {
+        throw new ConfigError(
+          `Tool "${hitlTool.name}" on agent "${agentName}" requires HITL but no hitl.store is configured`,
+        );
+      }
+    }
+  }
+
   const agentDepsMap = new Map<string, AgentDeps>();
   const runtimeEventBus = new EventBus();
   const agentInfoMap: Record<string, AgentInfo> = {};
@@ -210,14 +227,27 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     ),
     registeredAgents,
     eventBus: ingressEventBus,
-    dispatchTurn: (turnId, agentName, envelope, conversationId) => {
+    dispatchTurn: async (turnId, agentName, envelope, conversationId) => {
       if (!runtimeRef) {
         throw new ConfigError("Runtime not yet initialized");
+      }
+
+      const queuedForHitl = await runtimeRef.queueHitlSteer(agentName, envelope, conversationId);
+      if (queuedForHitl) {
+        return queuedForHitl;
+      }
+
+      if (await runtimeRef.hasPreSteerHitlBarrier(agentName, conversationId)) {
+        throw new ConfigError(`Conversation "${conversationId}" has an active HITL barrier`);
       }
 
       const steered = runtimeRef.steerTurn(agentName, envelope, conversationId);
       if (steered) {
         return steered;
+      }
+
+      if (await runtimeRef.hasHitlBarrier(agentName, conversationId)) {
+        throw new ConfigError(`Conversation "${conversationId}" has an active HITL barrier`);
       }
 
       // Fire-and-forget: start turn asynchronously
@@ -237,7 +267,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     },
   });
 
-  const runtime = new HarnessRuntimeImpl(agentDepsMap, ingressPipeline, runtimeEventBus);
+  const runtime = new HarnessRuntimeImpl(agentDepsMap, ingressPipeline, runtimeEventBus, config.hitl);
   runtimeRef = runtime;
 
   return runtime;

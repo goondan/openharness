@@ -1,282 +1,374 @@
-# hitl - Human-in-the-loop durable tool approval
+# hitl - Human-in-the-loop durable tool barrier
 
-## 1. 한 줄 요약
+## 1. Outcome Statement
 
-OpenHarness는 HITL이 필요한 ToolCall을 durable pending 상태로 전환하고, 프로세스 재시작/크래시/장기간 대기 이후에도 human result를 제출하면 동일한 도구 실행을 재개할 수 있게 한다.
+OpenHarness는 사람이 승인하거나 값을 보완해야 하는 tool call을 durable conversation barrier로 멈추고, human result와 barrier 중 들어온 input을 잃지 않은 채 재시작/크래시/장기 대기 이후에도 같은 batch를 기준으로 안전하게 이어간다.
 
-## 2. 상위 스펙 연결
+## 2. Design Premises
 
-- Related Goals: `G-1`, `G-4`, `G-5`, `G-6`, `G-7`
-- Related Requirements: `FR-HITL-001` ~ `FR-HITL-015`, `NFR-HITL-001` ~ `NFR-HITL-007`
-- Related AC: `AC-07` ~ `AC-12`
+이 스펙은 원하는 최종 계약을 정의한다. 구현이 이 계약을 따라야 하며, 현재 구현이 spec과 어긋나는 지점은 구현 측 수정 대상이지 spec 측 양보 대상이 아니다. `HitlStore`와 runtime은 아래 전제를 동시에 만족해야 한다.
+
+1. **Store is the durability boundary.** Runtime 선행 체크가 맞게 호출해주기를 기대하면 안 된다. `HitlStore` 메서드 하나하나가 atomic하고, idempotency와 conflict guard를 스스로 강제해야 한다.
+2. **Batch is one LLM step barrier.** 한 step에서 HITL tool call이 하나라도 있으면 그 step의 tool call 전체가 하나의 `HitlBatch`에 속한다.
+3. **HITL only stops HITL handlers.** 같은 step의 non-HITL peer tool call은 실행되고, 그 result는 batch에 durable하게 기록되어야 한다.
+4. **Human submit is immediately durable.** submit 성공 응답 전에 human result는 store에 저장되어 있어야 한다. 마지막 peer submit이면 batch `ready` 전환도 같은 atomic operation에 포함된다.
+5. **Accepted input under a HITL barrier must be durable.** HITL barrier 중 같은 conversation input을 accepted/started/steered로 반환하려면 durable queue에 저장되어 있어야 한다.
+6. **Side effects are not replayed automatically.** tool handler 또는 continuation side effect boundary를 지난 뒤에는 startup recovery나 explicit resume이 해당 side effect를 자동 재실행하지 않는다.
+7. **Lifecycle status and derived capabilities are separate.** `queueable`, `conversationBarrier`, `pendingVisible`, `autoResumable`, `recoverable`은 같은 조건으로 계산하면 안 된다.
 
 ## 3. Desired State
 
-OpenHarness는 사람이 승인하거나 값을 보완해야 하는 ToolCall을 durable HITL request로 보류한다. 보류된 request는 runtime process 수명과 독립적으로 저장되고, human result가 제출되면 같은 ToolCall snapshot을 기준으로 승인/거절/args 변경을 적용해 안전하게 재개된다.
+LLM이 한 step에서 여러 tool call을 반환했을 때, 그중 하나라도 HITL이 필요하면 runtime은 다음 상태로 수렴한다.
 
-### 3.1 Core Properties
+- HITL 대상 tool call은 handler 실행 전에 `HitlRequest`로 저장되고 `pending`으로 노출된다.
+- HITL이 필요하지 않은 peer tool call은 실행되고, tool result는 `HitlBatch.toolResults`에 저장된다.
+- 모든 non-HITL peer result가 저장된 뒤에만 batch는 `waitingForHuman`으로 노출된다.
+- 같은 batch의 모든 HITL request가 submit되기 전에는 다음 LLM step이 실행되지 않는다.
+- `waitingForHuman`, `ready`, 아직 queue가 닫히지 않은 `resuming` batch는 같은 conversation input을 durable queued steer로 받을 수 있다.
+- queueable하지 않지만 conversation barrier인 상태에서는 같은 conversation input을 memory-only active turn steering이나 새 turn으로 받아들이지 않는다.
+- 모든 request가 submit되면 batch는 `ready`가 되고, resume은 저장된 peer results, human results, queued steer를 사용해 continuation을 실행한다.
+- continuation은 일반 turn과 같은 middleware/policy/tracing 의미를 가져야 한다. 단, resume 자체를 새 사용자 입력으로 append하지 않는다.
 
-- HITL이 필요한 ToolCall은 tool handler 실행 전에 pending request로 durable 저장된다.
-- pending request는 `requestId`, ToolCall snapshot, response schema, conversation event snapshot, 상태 전이 정보를 포함한다.
-- runtime은 pending request 조회, human result 제출, resume/cancel control API를 제공한다.
-- human result는 approval, rejection, free text, JSON form payload를 표현할 수 있다.
-- resume은 lease와 idempotency key를 사용해 같은 request의 중복 실행을 방지한다.
-- runtime startup은 pending/resolved/resuming request를 복구하고 필요한 resume 작업을 재예약한다.
+## 4. Scope Boundary
 
-### 3.2 Success Criteria
+### 4.1 Committed Guarantees
 
-- HITL이 필요한 ToolCall은 tool handler 실행 전에 반드시 pending 상태로 durable 저장된다.
-- runtime이 종료되거나 크래시된 뒤 새 runtime이 생성되어도 pending HITL request를 조회하고 resolve/reject 할 수 있다.
-- 승인 결과가 `Y/N`, 자유 텍스트, JSON form 중 어떤 형태여도 정책에 따라 도구 실행 여부와 최종 args를 결정할 수 있다.
-- 재개된 ToolCall은 중복 실행되지 않으며, 모든 lifecycle은 이벤트로 관찰 가능해야 한다.
+- `batchId`, `requestId`, `queuedInputId`는 opaque generated ID다. `turnId`, `stepNumber`, `toolCallId`에서 파생하지 않는다. 권장 형식은 UUIDv4 또는 그에 준하는 충돌 가능성이 무시할 수 있는 식별자다.
+- `waitingForHuman`으로 관찰되는 batch는 batch, request, non-HITL peer result가 durable store에 저장된 상태다.
+- 같은 request에 대한 duplicate submit은 batch status와 무관하게 기존 request state를 반환하거나 conflict로 거절하며, 중복 mutation을 만들지 않는다.
+- 같은 `(agentName, conversationId)`에 conversation barrier batch가 있으면 새 batch 생성은 store level에서 conflict가 되어야 한다.
+- queueable 여부는 steer queue 수용만 결정한다. queue가 닫혔다고 conversation barrier가 사라지면 안 된다.
+- direct `processTurn()`과 ingress dispatch 모두 HITL barrier를 같은 규칙으로 처리한다.
+- runtime 재시작 후 `waitingForHuman`, `ready`, side-effect boundary 이전의 retryable resume 상태는 조회 또는 재개 가능해야 한다.
+- `preparing` recovery는 durable records만 보고 수렴해야 하며 tool handler를 호출하면 안 된다.
+- `commitBatchAppend()` 이후 continuation이 시작됐거나 시작될 수 있으면 automatic resume retry 대상에서 제외된다.
 
-## 4. Spec Stability Classification
+### 4.2 Explicit Non-goals
 
-| 영역 | 분류 | 이유 |
-| --- | --- | --- |
-| HITL 상태 머신 | Stable | 복구와 중복 실행 방지의 핵심 계약 |
-| `HitlStore` 인터페이스 | Stable | 외부 persistence adapter가 의존하는 계약 |
-| runtime control API | Stable | UI/transport/CLI가 사용하는 공개 표면 |
-| form schema 표현 | Flexible | 사용성에 따라 UI metadata가 확장될 수 있음 |
-| 내장 store 구현체 | Planned | 코어는 계약만 소유하고 저장소 구현은 adapter로 분리 |
-| CLI UX | Candidate | core 계약 검증 뒤 별도 표면으로 확장 |
+- OpenHarness core는 외부 tool handler side effect의 exactly-once 실행을 보장하지 않는다.
+- handler가 시작된 뒤 프로세스가 죽은 경우 core는 해당 handler를 자동 재실행하지 않는다.
+- continuation turn이 시작된 뒤 프로세스가 죽은 경우 core는 해당 continuation을 자동 재실행하지 않는다.
+- `HitlStore` 메서드 내부 partial write를 runtime이 복구하지 않는다. store adapter는 각 메서드를 atomic하게 구현해야 한다.
+- in-memory `HitlStore`는 프로세스 크래시 후 durability를 보장하지 않는다.
+- 여러 runtime/process가 같은 durable store를 공유하는 환경의 완전한 분산 fencing은 durable adapter 책임이다. Core 계약은 adapter가 제공해야 할 atomic/lease semantics를 정의한다.
+- TTL, reminder, escalation, approval UI, CLI UX는 core durable HITL 계약 밖의 확장 영역이다.
 
 ## 5. Glossary
 
-| 용어 | 정의 |
+| Term | Definition |
 | --- | --- |
-| HITL | Human In The Loop. 도구 실행 전 사람의 판단 또는 입력을 요구하는 흐름 |
-| HITL Request | 특정 ToolCall 실행을 보류하고 사람에게 결정을 요청하는 durable record |
-| HITL Result | 사람이 제출한 승인/거절/텍스트/form 데이터 |
-| Pending ToolCall | 아직 실제 tool handler를 호출하지 않았고 HITL 결과를 기다리는 ToolCall |
-| Resume | durable HITL result를 사용해 보류된 ToolCall을 계속 실행하는 행위 |
-| Lease | 여러 프로세스가 같은 pending request를 동시에 처리하지 못하게 잡는 시간 제한 lock |
-| Idempotency Key | 같은 ToolCall/Result 재시도에서 중복 side effect를 막기 위한 안정적 키 |
+| HITL | Human In The Loop. 도구 실행 전 사람의 승인, 거절, 텍스트, form 입력을 요구하는 흐름 |
+| HitlBatch | 한 LLM step의 tool call 전체를 묶는 durable barrier |
+| HitlRequest | batch 안의 HITL 대상 tool call 하나에 대한 approval/input record |
+| Human Result | 사람이 제출한 approve/reject/text/form payload |
+| Queued Steer | queueable HITL barrier 중 같은 conversation으로 들어와 **durable HITL queue**에 저장된 입력. 아래 Active-turn Steer와 별개 개념 |
+| Active-turn Steer | 진행 중인 turn의 in-flight context로 input을 흘려 넣는 메커니즘. durable HITL queue 밖에 존재하며, `continuing` batch에 active continuation turn이 살아 있을 때만 §8.4 step 8 예외로 허용된다 |
+| Resume | `ready` batch, pre-side-effect-boundary `resuming` batch, 또는 `failed(retryable)` batch를 복원해 tool results와 queued steer를 append하고 continuation을 실행하는 행위 |
+| Conversation Barrier | 같은 `(agentName, conversationId)`에서 **새 turn** 또는 **새 HITL batch** 생성을 막는 batch. 기존 active turn으로의 active-turn steering은 차단하지 않는다 |
+| Queueable | 같은 conversation input을 durable queued steer로 받을 수 있는 상태 |
+| Atomic Store Method | 성공하면 관련 상태가 모두 반영되고, 실패하면 호출 전 상태로 남는 `HitlStore` 메서드 |
+| Side-effect Boundary | tool handler 또는 continuation처럼 automatic replay가 안전하지 않은 외부 효과가 시작되는 경계 |
+| `failed(retryable)` / `failed(nonRetryable)` | derived 표기. 실제 enum 값은 단일 `failed`이며, 분기는 `HitlFailure.retryable: boolean` 별도 필드로 표현한다 (§9.4 참조) |
+| Chained HITL | 한 batch의 continuation step이 새 HITL barrier를 trigger하는 tool call을 만들었을 때, 이전 batch를 `completed(spawnedChild)`로 닫고 같은 atomic transaction에서 새 child batch를 생성하는 흐름. parent와 child는 `parentBatchId`/`childBatchId`로 링크된다 (§7.2 chained spawn 예외, §8.5 step 12.1, §9.4 `spawnChildBatch()` 참조) |
+| Continuation Outcome Marker | `recordContinuationOutcome()`이 batch에 박는 atomic 사실 — `completed`/`maxStepsReached`/`aborted`/`errored` 중 하나(외부 진입). `spawnedChild`는 `spawnChildBatch()` transaction 내부에서만 박힌다. runtime은 §8.5 step 13/14의 close 호출 *전에* 먼저 marker를 기록하고, close 호출이 실패해 `continuing` batch가 stuck됐을 때 startup recovery는 marker를 보고 같은 분류로 close 시도를 재수행한다 (§8.6 step 9.1) |
 
 ## 6. Requirements
 
 ### 6.1 Functional Requirements
 
-| ID | Level | 요구사항 |
+| ID | Level | Requirement |
 | --- | --- | --- |
-| FR-HITL-001 | Committed | ToolDefinition은 선택적으로 HITL 정책을 선언할 수 있어야 한다. |
-| FR-HITL-002 | Committed | HITL 정책이 적용된 ToolCall은 tool handler 실행 전에 `HitlRequest`를 생성하고 `HitlStore`에 저장해야 한다. |
-| FR-HITL-003 | Committed | HITL request 저장이 성공하기 전에는 해당 tool handler를 호출하면 안 된다. |
-| FR-HITL-004 | Committed | runtime은 pending HITL request를 조회하는 공개 API를 제공해야 한다. |
-| FR-HITL-005 | Committed | runtime은 human result를 제출하는 공개 API를 제공해야 한다. |
-| FR-HITL-006 | Committed | human result가 approve이면 저장된 ToolCall을 재개하고, reject이면 tool handler를 호출하지 않고 거절 결과를 conversation에 기록해야 한다. |
-| FR-HITL-007 | Committed | human result는 `boolean`, `text`, `json` form payload를 지원해야 한다. |
-| FR-HITL-008 | Committed | HITL resume은 프로세스 재시작 이후에도 가능해야 한다. |
-| FR-HITL-009 | Committed | HITL resume은 같은 request에 대해 at-most-once tool handler execution을 보장해야 한다. |
-| FR-HITL-010 | Committed | HITL request/result/resume lifecycle은 runtime event로 발행되어야 한다. |
-| FR-HITL-011 | Committed | HITL로 보류된 Turn은 `waitingForHuman` 상태로 관찰 가능해야 한다. |
-| FR-HITL-012 | Committed | conversation event stream 복원 후에도 HITL request와 연결된 assistant tool-call 및 tool-result 메시지 정합성이 유지되어야 한다. |
-| FR-HITL-013 | Planned | TTL 만료, 자동 reject, reminder 같은 운영 정책을 extension으로 붙일 수 있어야 한다. |
-| FR-HITL-014 | Candidate | CLI는 pending request 목록 조회와 approve/reject/submit 명령을 제공할 수 있다. |
-| FR-HITL-015 | Committed | `HitlRequest`는 기본적으로 resume에 필요한 conversation event snapshot을 포함해야 한다. |
+| FR-HITL-001 | Committed | `ToolDefinition`은 선택적으로 HITL policy를 선언할 수 있어야 한다. |
+| FR-HITL-002 | Committed | HITL 대상 tool call은 handler 실행 전에 `HitlRequest`로 durable 저장되어야 한다. |
+| FR-HITL-003 | Committed | 한 step의 여러 HITL tool call은 하나의 batch 안에 여러 request로 저장되어야 한다. |
+| FR-HITL-004 | Committed | 같은 step의 non-HITL peer tool call은 실행되고 그 결과가 batch record에 저장되어야 한다. |
+| FR-HITL-005 | Committed | batch의 모든 HITL request가 submit되기 전에는 continuation이 실행되면 안 된다. |
+| FR-HITL-006 | Committed | pending batch/request 조회 API를 제공해야 한다. |
+| FR-HITL-007 | Committed | human result submit API를 제공해야 한다. |
+| FR-HITL-008 | Committed | approve/text/form result는 handler 실행에 필요한 final args를 만들 수 있어야 한다. 기본 매핑은 result payload를 final args에 반영하고, `HitlPolicy.mapResult`가 정의되면 그 결과로 override된다. |
+| FR-HITL-009 | Committed | reject result는 handler 호출 없이 rejection tool result로 완료되어야 한다. |
+| FR-HITL-010 | Committed | queueable HITL barrier 중 ingress/direct input은 durable queue에 저장되어야 한다. |
+| FR-HITL-011 | Committed | resume은 tool-result messages를 append한 뒤 queued steer를 append하고 그 다음 continuation을 실행해야 한다. |
+| FR-HITL-012 | Committed | runtime 재시작 후 pending/ready/retryable pre-side-effect batch를 조회 또는 재개할 수 있어야 한다. |
+| FR-HITL-013 | Committed | HITL lifecycle은 runtime event로 관찰 가능해야 한다. |
+| FR-HITL-014 | Committed | queueable하지 않은 conversation barrier에서는 같은 conversation input을 accepted/started로 반환하거나 durable HITL queued steer로 받아들이면 안 된다. (`continuing` batch에 active continuation turn이 살아 있는 동안의 active-turn steering은 §8.4 step 8 예외로 허용된다.) |
+| FR-HITL-015 | Committed | side-effect boundary 이후 실패/크래시는 automatic retry가 아니라 blocked 또는 terminal failure로 수렴해야 한다. |
+| FR-HITL-016 | Committed | continuation은 일반 turn과 동일한 turn/step middleware 의미를 가져야 한다. |
+| FR-HITL-017 | Committed | continuation step이 새 HITL barrier를 trigger하면, 이전 batch는 `completed(spawnedChild)`로 닫히고 같은 atomic transaction에서 새 child batch가 생성되어야 한다 (chained HITL spawn). parent와 child는 `parentBatchId`/`childBatchId`로 링크된다. |
+| FR-HITL-018 | Committed | `continuing` batch의 close 호출(`completeBatch`/`failBatch`)이 실패해도 continuation outcome은 atomic marker로 잃지 않고 보존되어야 하며, startup recovery는 같은 분류로 close 시도를 재수행할 수 있어야 한다. |
+| FR-HITL-019 | Committed | 운영자 cancel은 `continuing` batch의 active continuation turn에 abort 신호를 보낼 수 있어야 하며, cancel과 `completeBatch()`가 경합하면 먼저 commit된 호출이 이긴다. cancel API는 idempotent해야 한다. |
+| FR-HITL-020 | Planned | TTL, reminder, cancel policy는 extension으로 추가 가능해야 한다. |
 
 ### 6.2 Non-functional Requirements
 
-| ID | Level | 요구사항 | 검증 방향 |
-| --- | --- | --- | --- |
-| NFR-HITL-001 | Committed | Durability: `hitl.requested` 이벤트 발행 전 `HitlStore.create()`가 성공해야 한다. | crash recovery test |
-| NFR-HITL-002 | Committed | Idempotency: 동일 `requestId`에 result를 반복 제출해도 tool handler는 최대 1회만 실행된다. | concurrency test |
-| NFR-HITL-003 | Committed | Recoverability: runtime 재생성 후 `listPendingHitl()`로 기존 pending request가 보여야 한다. | integration test |
-| NFR-HITL-004 | Committed | Observability: 모든 상태 전이는 event payload에 `requestId`, `turnId`, `toolCallId`, `conversationId`를 포함한다. | unit test |
-| NFR-HITL-005 | Committed | Security: HITL result 제출은 request identity와 agent/conversation scope 검증을 통과해야 한다. | negative test |
-| NFR-HITL-006 | Committed | Compatibility: HITL 미사용 도구의 실행 루프와 결과 구조는 기존 동작을 유지한다. | regression test |
-| NFR-HITL-007 | Planned | Retention: 완료/거절/만료된 request는 store별 retention 정책으로 정리 가능해야 한다. | adapter test |
+| ID | Level | Requirement |
+| --- | --- | --- |
+| NFR-HITL-001 | Committed | Durable-before-observable: pending event와 waiting result는 durable store write 이후에만 발행된다. |
+| NFR-HITL-002 | Committed | Submit idempotency: duplicate submit은 중복 mutation을 만들지 않고 기존 request state로 수렴한다. |
+| NFR-HITL-003 | Committed | Open-batch uniqueness: conversation barrier uniqueness는 store adapter가 atomic하게 보장한다. |
+| NFR-HITL-004 | Committed | Predicate separation: `queueable`, `conversationBarrier`, `autoResumable`은 독립 predicate로 정의되고 테스트된다. |
+| NFR-HITL-005 | Committed | Ordering: batch tool results와 queued steer는 deterministic order로 continuation에 반영된다. |
+| NFR-HITL-006 | Committed | Compatibility: HITL 미사용 tool flow는 기존 동작을 유지한다. |
+| NFR-HITL-007 | Committed | Scope safety: submit은 request identity와 optional `agentName`/`conversationId` guard를 검증한다. |
+| NFR-HITL-008 | Committed | No automatic side-effect replay: handler/continuation side effect가 시작된 뒤에는 startup recovery나 explicit resume이 자동 재실행하지 않는다. |
 
-## 7. Behavior Specification
+## 7. State And Capability Model
 
-### 7.1 Flow: HITL request 생성
+### 7.1 HitlBatch Lifecycle
 
-**ID:** `HITL-REQUEST-01`
+`failed(retryable)` / `failed(nonRetryable)`는 derived 표기다. 실제 `HitlBatchStatus` enum 값은 단일 `failed`이며, retryable 분기는 `HitlFailure.retryable: boolean` 필드로 결정된다.
 
-- Actor: Core execution loop
-- Trigger: `executeToolCall()`이 HITL 정책이 적용된 ToolCall을 만나거나 `toolCall` middleware가 `ctx.hitl.request()`를 호출한다.
-- Preconditions:
-  - ToolCall은 `turnId`, `agentName`, `conversationId`, `stepNumber`, `toolCallId`, `toolName`, `toolArgs`를 가진다.
-  - runtime에 `HitlStore`가 구성되어 있다.
-  - 해당 `requestId`가 아직 active/pending 상태로 존재하지 않는다.
-- Main Flow:
-  1. core는 deterministic `requestId`를 계산한다.
-  2. core는 ToolCall snapshot, request prompt, expected response schema, current conversation event snapshot을 포함한 `HitlRequest`를 만든다.
-  3. core는 `HitlStore.create(request)`를 호출한다.
-  4. 저장 성공 후 `hitl.requested` 이벤트를 발행한다.
-  5. 현재 Turn은 `waitingForHuman` 상태로 settle한다.
-- Outputs:
-  - `TurnResult.status = "waitingForHuman"`
-  - `pendingHitlRequestIds`에 생성된 request id 포함
-- Side Effects:
-  - tool handler는 호출되지 않는다.
-  - assistant tool-call 메시지는 conversation에 남아야 한다.
-  - tool-result 메시지는 아직 append하지 않는다.
-- Failure Modes:
-  - store write 실패: `tool.error`와 `turn.error`를 발행하고 Turn은 `error`로 종료한다.
-  - 동일 request가 이미 pending: 기존 request를 재사용하고 중복 create를 하지 않는다.
+```text
+preparing
+  -> waitingForHuman
+  -> ready
+  -> resuming
+  -> continuing
+  -> completed
 
-### 7.2 Flow: pending HITL 조회
+preparing -> canceled | failed(nonRetryable) | blocked
+waitingForHuman -> canceled | expired
+ready -> failed(retryable) | canceled
+resuming -> failed(retryable) | failed(nonRetryable) | blocked
+continuing -> completed | blocked | failed(nonRetryable) | canceled
+failed(retryable) -> resuming | blocked | canceled
+blocked -> canceled
+```
+
+| Status | Meaning |
+| --- | --- |
+| `preparing` | batch/request는 생성됐지만 pending으로 노출할 안정 지점은 아직 아님 |
+| `waitingForHuman` | pending request가 UI/API에 노출되고 submit 가능함 |
+| `ready` | 모든 request가 submit되어 resume 가능함 |
+| `resuming` | final tool result set 생성, queued steer drain, append commit이 진행 중임 |
+| `continuing` | append commit이 완료되어 continuation side-effect boundary를 넘었거나 넘을 수 있음 |
+| `completed` | continuation이 successful terminal state로 settle됨 |
+| `failed(retryable)` | side-effect boundary 이전 transient failure로 automatic resume 가능함 |
+| `failed(nonRetryable)` | safe-closed failure. 자동 재시도하지 않으며 conversation barrier가 아님 |
+| `blocked` | side-effect boundary 이후 또는 conversation을 안전하게 이어갈 수 없는 상태. operator action 전까지 barrier임 |
+| `canceled`/`expired` | 운영 정책으로 닫힌 terminal 상태 |
+
+### 7.2 Derived Capability Matrix
+
+이 표가 상태 해석의 canonical contract다. 구현 helper는 이 표를 그대로 반영해야 한다.
+
+| Batch state | Conversation barrier | Queueable steer | Pending visible | Auto resumable | Startup recovery behavior |
+| --- | --- | --- | --- | --- | --- |
+| `preparing` | Yes | No | No | No | durable peer records만 보고 `waitingForHuman`, `canceled`, `failed(nonRetryable)`, `blocked` 중 하나로 수렴 |
+| `waitingForHuman` | Yes | Yes | Yes | No | pending으로 노출하고 submit/queue를 받음 |
+| `ready` | Yes | Yes | No | Yes | resume schedule 가능. queue close는 `resuming` 진입 시점에 일어난다 |
+| `resuming` before queue close | Yes | Yes | No | Lease 만료 후 Yes | 같은 resume를 재시도 가능 |
+| `resuming` after queue close | Yes | No | No | Lease 만료 후 Yes, if before side-effect boundary | queued/draining steer를 보존하고 같은 drain set으로 재시도 |
+| `failed(retryable)` | Yes | No | No | Yes | side-effect boundary 이전 실패로 간주하고 resume 가능 |
+| `continuing` | Yes (chained spawn 예외 허용) | No | No | No | 자동 resume하지 않음. active continuation turn이 살아있으면 일반 active-turn steering만 허용(durable HITL queued steer 아님). active turn이 없으면 input은 rejected/error. `continuationOutcome` marker가 있으면 같은 분류로 close 시도 재수행(§8.6 step 9.1) |
+| `blocked` | Yes | No | No | No | operator recovery/cancel 대상 |
+| `failed(nonRetryable)` | No | No | No | No | terminal failure로 조회 가능하지만 새 turn/batch를 막지 않음 |
+| `completed`/`canceled`/`expired` | No | No | No | No | terminal |
+
+Rules:
+
+- `steerQueueClosedAt` 또는 equivalent metadata는 **queueable**만 닫는다. conversation barrier 여부를 바꾸면 안 된다.
+- `getOpenBatchByConversation()`처럼 steer queue lookup에 쓰는 API는 queueable batch만 반환할 수 있다.
+- `createBatch()` conflict guard는 queueable lookup이 아니라 conversation barrier predicate를 사용해야 한다.
+- `listPending*()`은 `waitingForHuman`과 `pending` request만 반환한다.
+- `listRecoverable*()` 또는 recovery scan은 pending-visible 상태뿐 아니라 `preparing`, `ready`, `resuming`, `failed(retryable)`, `continuing`, `blocked`을 관찰할 수 있어야 한다. 단, 관찰과 automatic resume은 다르다.
+- side-effect boundary 이후 자동 재실행이 안전하지 않은 실패는 `failed(retryable)`로 남으면 안 된다. `blocked` 또는 `failed(nonRetryable)`로 수렴해야 한다. conversation을 안전하게 이어갈 수 없으면 `blocked`를 사용한다.
+- `continuing` cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* (§9.4 `cancelBatch()` semantics). 운영자 cancel은 `abortContinuation: true`로 active continuation turn에 abort 신호를 보낼 수 있고, 이미 `completeBatch()`가 commit돼 batch가 terminal이면 cancel은 `alreadyTerminal`로 idempotent 수렴한다. `abortContinuation` 없이 `continuing` batch에 호출된 cancel은 race가 아니라 *cancel 부적용*이며 `notCancelable`로 거절된다.
+- Conversation barrier는 **새 turn 생성**과 **새 HITL batch 생성**을 차단한다. 기존 active turn에 대한 active-turn steering은 conversation barrier와 별개 메커니즘이며, §8.4 step 8 예외 외에는 사용되지 않는다.
+- **Chained HITL 예외:** `continuing` batch의 active continuation turn이 같은 conversation에서 새 HITL barrier를 trigger하는 tool call을 만들었을 때, runtime은 이전 batch를 `completed(spawnedChild)`로 닫은 *직후* 같은 atomic operation으로 새 child batch를 생성할 수 있다. 이 spawn 경로 외에는 conversation barrier가 그대로 적용된다. 두 batch는 `parentBatchId`/`childBatchId`로 링크되며, child batch는 parent의 `appendCommit` 이후 step 13의 successful terminal로 settle하기 *전* 시점에서만 spawn될 수 있다 (§8.5 step 12.1 참조).
+
+### 7.3 HitlRequest Lifecycle
+
+`failed(retryable)` / `failed(nonRetryable)` 표기 규약은 §7.1과 동일하다. enum 값은 단일 `failed`, 분기는 `HitlFailure.retryable`.
+
+```text
+pending -> resolved -> completed
+pending -> rejected -> completed
+pending -> canceled | expired
+resolved/rejected -> failed(retryable) | failed(nonRetryable) | blocked | canceled
+```
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | human result 대기 |
+| `resolved` | approve/text/form result 저장됨 |
+| `rejected` | reject result 저장됨 |
+| `completed` | batch resume에서 final tool result가 반영됨 |
+| `failed(retryable)` | side-effect boundary 전 request completion retry 가능 |
+| `failed(nonRetryable)` | 자동 재시도하지 않는 request failure |
+| `blocked` | handler side effect 이후 자동 재시도 불가 |
+
+Request result mutation rules:
+
+- `pending` request만 새 human result를 받을 수 있다.
+- 이미 `resolved`, `rejected`, `completed`, `failed`, `blocked`, `canceled`, `expired`인 request에 같은 submit이 재시도되면 store는 batch status보다 먼저 duplicate 여부를 판단한다.
+- 같은 idempotency key가 같은 request에 이미 적용된 경우 기존 request를 반환한다.
+- 같은 request에 이미 human result가 있고 payload가 동일하면 기존 request를 반환한다.
+- 같은 request에 서로 다른 human result를 제출하면 conflict/invalid/error로 거절하고 기존 result를 바꾸지 않는다.
+- 같은 idempotency key가 다른 request에 사용되면 conflict/invalid/error로 거절한다.
+
+## 8. Behavior Specification
+
+### 8.1 Flow: HITL batch creation
+
+**ID:** `HITL-BATCH-01`
+
+**Trigger:** LLM step response가 하나 이상의 tool call을 포함한다.
+
+**Main Flow:**
+
+1. Runtime은 step의 모든 tool call에 대해 HITL policy를 평가한다.
+2. HITL 대상 tool call이 없으면 기존 tool execution flow를 그대로 사용한다.
+3. HITL 대상 tool call이 하나 이상 있으면 runtime은 opaque `batchId`와 request별 opaque `requestId`를 생성한다.
+4. Runtime은 `HitlStore.createBatch()`로 batch와 request들을 atomic하게 저장한다.
+5. `createBatch()`는 같은 conversation에 conversation barrier batch가 있으면 `conflict`를 반환한다.
+6. Runtime은 같은 step의 non-HITL peer tool call을 실행하고 result를 `recordBatchToolResult()`로 저장한다.
+7. 모든 non-HITL peer result가 저장되면 runtime은 `markBatchWaitingForHuman()`으로 batch를 `waitingForHuman`에 수렴시킨다.
+8. Durable store가 `waitingForHuman`을 반환한 뒤에만 `hitl.batch.requested`, `hitl.requested`, turn `waitingForHuman` 결과를 관찰 가능하게 한다.
+
+**Failure Handling:**
+
+- `createBatch()` 실패 시 어떤 peer tool handler도 호출하지 않는다.
+- non-HITL peer handler 시작 전 실패는 batch를 safe-closed failure로 닫을 수 있다.
+- non-HITL peer handler 시작 후 result 저장 전 실패/크래시는 자동 handler 재실행 대상이 아니다.
+- `preparing` recovery는 execution marker와 recorded result만 보고 수렴한다.
+- `preparing`은 conversation barrier이지만 queueable이 아니므로 같은 conversation input을 accepted/steered/started로 반환하지 않는다.
+
+### 8.2 Flow: pending HITL query
 
 **ID:** `HITL-LIST-01`
 
-- Actor: Host application, UI, connector, CLI
-- Trigger: `runtime.control.listPendingHitl(filter?)`
-- Main Flow:
-  1. runtime은 filter를 검증한다.
-  2. runtime은 `HitlStore.listPending(filter)`를 호출한다.
-  3. runtime은 request snapshot 배열을 반환한다.
-- Outputs:
-  - pending `HitlRequestView[]`
-- Failure Modes:
-  - store unavailable: typed error를 던지고 runtime lifecycle은 유지한다.
+**Trigger:** host/UI/connector가 pending HITL을 조회한다.
 
-### 7.3 Flow: human result 제출
+**Main Flow:**
+
+1. Runtime은 filter를 검증한다.
+2. Runtime은 `waitingForHuman` batch와 `pending` request를 store에서 조회한다.
+3. Runtime은 request별 prompt, response schema, current status, batch identity를 반환한다.
+
+**Guarantee:**
+
+- `preparing`, `ready`, `resuming`, `continuing`, `blocked`, `failed` batch는 pending approval list에 섞이지 않는다.
+- operator/debug API는 별도로 non-pending batch를 조회할 수 있지만, pending submit UI는 `waitingForHuman`만 submit 대상으로 취급한다.
+
+### 8.3 Flow: human result submit
 
 **ID:** `HITL-SUBMIT-01`
 
-- Actor: Host application, UI, connector, CLI
-- Trigger: `runtime.control.submitHitlResult(input)`
-- Preconditions:
-  - `requestId`가 존재한다.
-  - request 상태가 `pending` 또는 retry 가능한 `resuming`이다.
-- Main Flow:
-  1. runtime은 request를 조회한다.
-  2. scope guard가 `agentName`, `conversationId`, optional secret/token을 검증한다.
-  3. runtime은 result payload를 request의 expected response schema로 검증한다.
-  4. runtime은 `HitlStore.resolve(requestId, result, idempotencyKey)`를 호출한다.
-  5. 저장 성공 후 `hitl.resolved` 이벤트를 발행한다.
-  6. runtime은 resume worker를 schedule하거나 즉시 resume을 시도한다.
-- Alternative Flow:
-  - reject result이면 `HitlStore.reject()`를 호출하고 `hitl.rejected` 이벤트를 발행한다.
-  - 이미 resolved/rejected이면 기존 final state를 반환하고 새로운 side effect를 만들지 않는다.
-- Outputs:
-  - `SubmitHitlResult` with `status: "accepted" | "duplicate" | "notFound" | "invalid"`.
-- Failure Modes:
-  - schema 검증 실패: request 상태를 바꾸지 않고 `invalid` 반환 또는 예외.
-  - lease 획득 실패: result 저장은 유지하고 resume은 다른 worker가 처리한다.
+**Trigger:** `submitHitlResult(input)`
 
-### 7.4 Flow: ToolCall resume 실행
+**Main Flow:**
+
+1. Runtime은 request를 조회하고 optional `agentName`/`conversationId` guard를 검증한다.
+2. Runtime은 새 `pending` request에 대해서만 result payload를 response schema에 맞게 검증한다.
+3. Runtime은 result 종류에 따라 `HitlStore.resolveRequest()` 또는 `HitlStore.rejectRequest()`를 호출한다.
+4. Store는 duplicate submit을 batch status check보다 먼저 처리한다.
+5. Store는 request result 저장, duplicate/idempotency key 기록, 남은 pending peer 계산, 마지막 peer인 경우 batch `ready` 전환을 하나의 atomic operation으로 처리한다.
+6. Runtime은 저장 결과에 따라 `hitl.resolved`, `hitl.rejected`, `hitl.batch.ready` 이벤트를 발행한다.
+7. Batch가 `ready`이면 runtime은 resume task를 schedule할 수 있다.
+
+**Failure Handling:**
+
+- validation/scope 실패는 durable state를 바꾸지 않는다.
+- store write 실패는 durable state를 바꾸지 않은 것으로 간주한다.
+- `request resolved/rejected but batch not ready` 같은 partial state는 정상 runtime contract가 아니라 `HitlStore` atomicity 위반이다.
+- 마지막 peer submit 이후 batch가 `ready`, `resuming`, `continuing`, `completed`, `blocked`, `failed`가 되었더라도 같은 submit retry는 기존 request state로 수렴해야 한다.
+
+### 8.4 Flow: pending HITL 중 steer/ingress
+
+**ID:** `HITL-STEER-01`
+
+**Trigger:** HITL conversation barrier가 있는 conversation으로 input이 들어온다.
+
+**Main Flow:**
+
+1. Runtime/ingress는 먼저 해당 conversation의 queueable batch를 조회한다.
+2. Queueable batch가 있으면 새 turn을 시작하지 않고 `enqueueSteer()`로 input을 durable queue에 저장한다.
+3. 저장 성공 후에만 `queuedForHitl` 또는 equivalent queued result를 반환한다.
+4. Queueable batch가 없지만 conversation barrier가 있으면 input을 rejected/error로 반환한다.
+5. Barrier가 없으면 기존 dispatch 또는 active-turn steering 규칙을 사용한다.
+6. Active turn으로 steering된 input이 같은 step에서 새 HITL batch 때문에 아직 append되지 못한 경우, turn이 `waitingForHuman`으로 settle하기 전에 해당 input은 batch queued steer로 durable flush되어야 한다.
+7. Flush가 실패하면 해당 input을 accepted/steered로 성공 처리하면 안 된다.
+8. `continuing` batch에 active continuation turn이 살아 있으면 runtime은 기존 active-turn steering을 사용할 수 있다. 이것은 durable HITL queued steer가 아니다.
+9. `continuing` batch에 active continuation turn이 없으면 input을 rejected/error로 반환한다.
+
+**Guarantee:**
+
+- HITL barrier가 있는 conversation에서 새 LLM step이 몰래 시작되면 안 된다.
+- Queue 저장 실패가 normal steer 또는 new turn fallback으로 바뀌면 안 된다.
+- `preparing`, `blocked`, `failed(retryable)`, queue-closed `resuming`은 conversation barrier이지만 queueable은 아니다.
+- `steerQueueClosedAt`은 queueable을 닫을 뿐 open-batch conflict를 풀지 않는다.
+
+### 8.5 Flow: HITL batch resume
 
 **ID:** `HITL-RESUME-01`
 
-- Actor: Runtime resume worker
-- Trigger:
-  - `submitHitlResult()` 직후
-  - runtime startup recovery
-  - background retry tick
-- Preconditions:
-  - request 상태가 `resolved`이고 tool execution이 아직 완료되지 않았다.
-  - worker가 lease를 획득했다.
-- Main Flow:
-  1. runtime은 request의 `agentName`과 `conversationId`에 맞는 conversation state를 준비한다.
-  2. 저장된 conversation events를 복원하거나 현재 state가 같은 cursor를 포함하는지 검증한다.
-  3. HITL result를 policy mapper에 적용해 최종 action을 계산한다.
-     - approve: 원래 args 또는 수정된 args로 tool handler 실행
-     - reject: tool handler 생략
-     - replace: form/text 값으로 args 갱신 후 tool handler 실행
-  4. approve/replace이면 core는 tool 존재 여부와 JSON Schema를 다시 검증한다.
-  5. core는 `hitl.resuming` 이벤트를 발행한다.
-  6. core는 tool handler를 실행하고 결과를 얻는다.
-  7. core는 tool-result message를 conversation에 append한다.
-  8. core는 `HitlStore.complete(requestId, toolResult)`를 호출한다.
-  9. core는 `hitl.completed`와 `tool.done` 이벤트를 발행한다.
-  10. runtime은 이어지는 Step loop를 새 continuation turn으로 실행해 최종 assistant 응답을 만들 수 있다.
-- Alternative Flow:
-  - reject이면 `ToolResult { type: "error", error: "Human rejected tool call" }` 또는 정책이 지정한 result를 append하고 `hitl.completed`로 종료한다.
-  - continuation이 disabled이면 tool result append까지만 수행하고 resume result를 반환한다.
-- Failure Modes:
-  - tool handler 실패: `HitlStore.fail(requestId, error, retryable)` 저장 후 `hitl.failed`와 `tool.error` 발행.
-  - process crash during handler: lease 만료 후 recovery가 request 상태를 보고 재시도한다. 단, 외부 side effect 도구는 idempotency key를 사용해야 한다.
-  - conversation restore 실패: request를 `failed(nonRetryable)`로 전환하지 않고 `blocked`로 표시해 운영자가 복구할 수 있게 한다.
+**Trigger:** 마지막 submit 직후 schedule, explicit `resumeHitlBatch(batchId)`, 또는 startup recovery.
 
-### 7.5 Flow: runtime startup recovery
+**Preconditions:**
+
+- batch status가 `ready`, pre-side-effect `resuming`, 또는 `failed(retryable)`이다.
+- 모든 HITL request가 `resolved` 또는 `rejected`다.
+- non-HITL peer tool result가 batch record에 저장되어 있다.
+- batch lease를 획득했다.
+
+**Main Flow:**
+
+1. Runtime/store는 batch를 `resuming`으로 전환하고 lease guard를 획득한다.
+2. Runtime은 `toolCallIndex` 순서로 final tool result set을 만든다.
+3. Non-HITL peer tool call은 저장된 result를 사용한다.
+4. Rejected HITL request는 handler를 호출하지 않고 rejection tool result를 만든다.
+5. Approved/text/form HITL request는 final args를 만든 뒤 handler를 실행한다.
+6. Handler 실행 전에 `startRequestExecution()` 또는 equivalent side-effect marker를 durable하게 기록한다.
+7. Handler 결과 저장과 request completion은 `completeRequestWithToolResult()` 하나로 atomic하게 처리한다.
+8. 모든 result가 준비되면 runtime은 queued steer drain set을 확정한다. 이 시점이 §7.2의 'queue close' 시점이며, 이후 들어오는 input은 더 이상 같은 batch의 queued steer로 받아들여지지 않는다.
+9. Runtime은 tool-result messages를 append하고, queued steer messages를 그 뒤에 append한다.
+10. Runtime은 `commitBatchAppend()`로 appended result IDs, queued steer IDs, continuation turn ID를 atomic commit한다.
+11. `commitBatchAppend()` 성공 직후 batch는 `continuing`으로 전환되고 automatic resume retry 대상에서 제외된다.
+12. Runtime은 continuation을 실행한다. Continuation은 일반 turn middleware 의미를 유지하되 resume 자체를 새 user input으로 append하지 않는다.
+12.1. **Chained HITL spawn:** continuation step이 새 HITL barrier를 trigger하는 tool call을 만들면, runtime은 `spawnChildBatch()`(§9.4)를 호출한다. 이 호출 *내부에서* 세 효과가 *하나의 atomic transaction*으로 처리된다 — (a) parent batch에 `recordContinuationOutcome()`로 `outcome: "spawnedChild"`(+ `childBatchId`) 기록, (b) parent batch를 `completeBatch()`로 `outcome: "spawnedChild"`로 close, (c) child batch와 child requests를 `createBatch()` 의미로 생성하면서 `parentBatchId`/`childBatchId`를 양쪽에 박는다. runtime은 (a)(b)(c)를 직접 분리해 호출하지 않는다 — `spawnChildBatch()`가 chained spawn의 *유일한 정식 경로*다. 이 spawn 경로에서만 §7.2의 conversation barrier 룰이 chained spawn을 허용한다 (parent close와 child create가 같은 transaction이므로 barrier predicate는 그 시점 어느 한쪽이든 통과시켜야 한다). transaction이 실패하면 parent와 child는 모두 spawn 이전 상태로 남고 — `recordContinuationOutcome("spawnedChild")` marker도 commit되지 않으며 partial close (parent만 닫힌 흔적)는 발생하지 않는다 — 이후 step 14의 일반 stuck-recovery 경로로 이어진다 (이 경우 outcome은 `errored`로 분류된다). spawn transaction이 성공한 직후 child batch는 `preparing` 상태로 노출되며, runtime은 §8.1 step 6~8을 그대로 따라 child의 non-HITL peer result 실행과 `markBatchWaitingForHuman()`을 진행한다. child의 peer 실행은 spawn transaction *바깥*이며 parent의 lease/fencing 줄을 잇지 않는다.
+13. Continuation이 successful terminal state로 settle되면 runtime은 두 단계를 *순서대로* 수행한다 — (a) `recordContinuationOutcome()`으로 `completed` 또는 `maxStepsReached` outcome을 durable하게 기록한다, (b) marker 기록 성공 후 `completeBatch()`를 같은 outcome으로 호출해 batch를 `completed`로 닫는다. (a)가 실패하면 close 시도 자체가 막히고 step 14의 stuck 경로로 이어진다. (a)는 성공했으나 (b)가 실패하면 marker가 이미 박혀 있어 §8.6 step 9.1이 같은 분류로 close를 재시도한다.
+14. Continuation이 error/abort로 settle되면 runtime은 같은 두 단계 순서를 따른다 — (a) `recordContinuationOutcome()`으로 `aborted`(continuation 자체가 abort signal 또는 host cancellation을 관찰해 자체 중단) 또는 `errored`(continuation 자체 실패 또는 spawn transaction 실패) outcome을 durable하게 기록한 뒤, (b) `failBatch()`로 batch를 `blocked` 또는 `failed(nonRetryable)`로 수렴시킨다. continuation은 자동 재실행하지 않는다. *batch가 이미 `cancelBatch(abortContinuation: true)`로 `canceled` terminal 상태가 되어 있다면*, (a)/(b) 호출은 store의 idempotent 규칙에 따라 현재 canceled record를 반환하고 mutation은 일어나지 않는다 — cancel이 먼저 commit된 race에서 continuation의 self-converge 호출은 *no-op*이다 (§9.4 cancelBatch semantics). (a) 또는 (b) 호출 자체가 실패하면 batch는 일시적으로 `continuing` 상태로 stuck될 수 있다. 이 경우 startup recovery는 `continuing` batch를 자동 resume하지 않지만, durable하게 박혀 있는 continuation outcome marker(`completed` / `maxStepsReached` / `aborted` / `errored`)를 보고 같은 분류로 close 시도를 재수행할 수 있다 (§8.6 step 9.1 참조). `spawnedChild` marker는 `spawnChildBatch()` transaction이 atomic하게 처리하므로, parent가 stuck `continuing` 상태로 `spawnedChild` marker만 가진 케이스는 발생하지 않는다.
+
+**Failure Handling:**
+
+- rejected request처럼 handler side effect가 시작되지 않은 경로의 transient persistence failure는 automatic retry 가능하다.
+- validation/config/mapResult 실패가 handler 시작 전이면 safe-closed non-retryable failure로 닫을 수 있다.
+- handler side effect marker가 기록된 뒤에는 handler를 automatic retry로 다시 호출하지 않는다.
+- handler가 result를 반환했지만 `completeRequestWithToolResult()`가 실패한 경우도 handler side effect가 시작된 것으로 간주한다. 자동 handler 재실행 대상이 아니다.
+- `commitBatchAppend()` 실패 시 accepted queued steer는 삭제되거나 drained로 숨겨지면 안 된다. retry 시 같은 queued/draining steer set을 다시 반영할 수 있어야 한다.
+- `commitBatchAppend()` 이후 실패는 continuation side-effect boundary 이후 실패로 취급한다.
+
+### 8.6 Flow: startup recovery
 
 **ID:** `HITL-RECOVER-01`
 
-- Actor: Runtime startup
-- Trigger: `createHarness()`가 durable HITL이 활성화된 runtime을 생성한다.
-- Main Flow:
-  1. runtime은 configured `HitlStore`에서 `pending`, `resolved`, `resuming` 상태 request를 조회한다.
-  2. stale lease가 있는 request는 store의 lease policy에 따라 release 가능 여부를 판단한다.
-  3. `pending` request는 그대로 노출한다.
-  4. `resolved` request는 resume queue에 넣는다.
-  5. `resuming` request 중 lease가 만료된 것은 resume queue에 다시 넣는다.
-- Outputs:
-  - recovery summary event `hitl.recovery` 발행
-- Failure Modes:
-  - store unavailable: runtime 생성은 config 정책에 따라 실패하거나 degraded mode로 시작한다.
+**Trigger:** durable HITL store가 configured된 runtime 생성.
 
-## 8. State Model
+**Main Flow:**
 
-### 8.1 HitlRequest 상태
+1. Runtime은 recoverable/observable batch를 조회한다.
+2. `waitingForHuman` batch는 pending query와 queueable steer 대상으로 노출한다.
+3. `ready` batch는 resume task로 schedule할 수 있다.
+4. `resuming` 또는 `failed(retryable)` batch는 side-effect boundary 이전이라는 durable evidence가 있을 때만 resume task로 schedule할 수 있다.
+5. `preparing` batch는 어떤 tool handler도 자동 실행하지 않고 durable records만으로 수렴시킨다.
+6. `preparing` batch에 필요한 non-HITL peer results가 모두 있으면 `waitingForHuman`으로 수렴시킬 수 있다.
+7. `preparing` batch에 execution marker가 있지만 result가 없으면 `blocked` 또는 safe-closed non-retryable failure로 수렴한다.
+8. `preparing` batch에 execution marker/result가 없으면 unexposed incomplete batch로 cancel할 수 있다.
+9. `continuing` batch는 자동 resume하지 않는다.
+9.1. `continuing` batch에 `continuationOutcome` marker가 기록되어 있으면, recovery는 같은 분류로 close 시도를 재수행한다 — `completed`/`maxStepsReached`는 `completeBatch()` 재시도로, `aborted`/`errored`는 `failBatch()` 재시도(retryable=false, 즉 `blocked` 또는 `failed(nonRetryable)`)로 수렴시킨다. marker가 없으면 `continuing`은 그대로 남기고 operator action 대상이 된다 — handler/continuation을 자동 재실행해서는 안 된다. `spawnedChild` marker는 `spawnChildBatch()` transaction이 parent close + child create + marker 기록을 atomic하게 처리하므로 (§8.5 step 12.1), parent가 stuck `continuing` 상태로 `spawnedChild` marker만 가진 케이스는 발생하지 않는다 — 이런 record가 발견되면 store atomicity 위반으로 분류한다.
+10. `blocked` batch는 자동 resume하지 않고 conversation barrier로 남긴다.
 
-`requested`는 `HitlStore.create()` 호출 전 transient 상태이며 persistent `HitlRequestStatus` 값이 아니다.
+**Guarantee:**
 
-```text
-requested -> pending -> resolved -> resuming -> completed
-                    |          |          |
-                    |          |          -> failed(retryable) -> resolved
-                    |          |          -> failed(nonRetryable)
-                    -> rejected -> completed
-                    -> expired -> completed
-                    -> canceled -> completed
-```
+- startup recovery는 pending human result와 queued/draining steer를 잃지 않는다.
+- startup recovery는 external handler 또는 continuation을 자동 재실행하지 않는다.
+- startup recovery는 recorded non-HITL peer result를 버리고 같은 side effect를 다시 유도하면 안 된다.
+- queue-closed retryable batch도 conversation barrier로 남아야 한다.
 
-### 8.2 상태 전이 규칙
+## 9. Interface Specification
 
-| From | To | Trigger | 조건 |
-| --- | --- | --- | --- |
-| `requested` | `pending` | `HitlStore.create()` success | request durable 저장 완료 |
-| `pending` | `resolved` | `submitHitlResult(approve/text/json)` | schema/scope 검증 통과 |
-| `pending` | `rejected` | `submitHitlResult(reject)` | scope 검증 통과 |
-| `resolved` | `resuming` | resume worker lease acquired | execution not completed |
-| `resuming` | `completed` | tool result append + store complete | atomic completion 성공 |
-| `resuming` | `failed(retryable)` | retryable tool/runtime failure | retry policy 허용 |
-| `resuming` | `failed(nonRetryable)` | validation/config fatal failure | 재시도 불가 |
-| `pending` | `expired` | TTL policy | result 미제출 |
-| `pending` | `canceled` | abort/cancel API | 운영자 또는 host 요청 |
-
-## 9. Constraint Specification
-
-### HITL-CONST-001 - durable-before-observable
-
-- `hitl.requested` 이벤트는 `HitlStore.create()` 성공 후에만 발행한다.
-- 이벤트를 본 외부 UI가 request를 조회할 수 없는 상태를 만들면 안 된다.
-
-### HITL-CONST-002 - handler-before-human 금지
-
-- HITL 대상 ToolCall은 approve/replace result 없이 tool handler를 호출할 수 없다.
-- middleware가 임의로 우회하려면 tool의 HITL 정책이 `optional`이어야 한다.
-
-### HITL-CONST-003 - at-most-once completion
-
-- `HitlStore.complete()`는 compare-and-set 또는 transaction으로 구현되어야 한다.
-- 같은 request가 동시에 resume되어도 conversation에는 tool-result message가 최대 1개만 append되어야 한다.
-
-### HITL-CONST-004 - deterministic request identity
-
-- 기본 `requestId`는 `turnId + stepNumber + toolCallId`로 안정적으로 계산한다.
-- host가 custom `requestId`를 제공하면 같은 ToolCall 재시도에서 같은 값을 재사용해야 한다.
-
-### HITL-CONST-005 - tool args mutation은 명시적이다
-
-- HITL result가 args를 바꾸려면 policy mapper가 최종 args를 반환해야 한다.
-- 최종 args는 tool JSON Schema 검증을 다시 통과해야 한다.
-
-### HITL-CONST-006 - core는 저장소 구현을 내장하지 않는다
-
-- core는 `HitlStore` 인터페이스와 in-memory test implementation만 제공할 수 있다.
-- 파일/SQLite/Postgres/Redis 등 durable backend는 adapter 또는 host application 책임이다.
-
-### HITL-CONST-007 - processTurn promise 장기 보존 금지
-
-- 장기간 HITL 대기에서 `processTurn()` Promise를 무기한 유지하는 것을 기본 동작으로 삼지 않는다.
-- ToolCall이 pending으로 전환되면 Turn은 `waitingForHuman`으로 settle하고, resume은 별도 control API가 수행한다.
-
-## 10. Interface Specification
-
-### 10.1 ToolDefinition 확장
+### 9.1 ToolDefinition extension
 
 ```ts
 interface ToolDefinition {
@@ -286,221 +378,564 @@ interface ToolDefinition {
   hitl?: HitlPolicy;
   handler: (args: JsonObject, context: ToolContext) => Promise<ToolResult>;
 }
-
-type HitlPolicy =
-  | { mode: "never" }
-  | {
-      mode: "required" | "conditional";
-      when?: HitlCondition;
-      prompt?: string | ((ctx: ToolCallContext) => string);
-      response:
-        | { type: "approval" }
-        | { type: "text"; schema?: JsonSchema }
-        | { type: "form"; schema: JsonSchema };
-      mapResult?: HitlResultMapper;
-      ttlMs?: number;
-      onTimeout?: "reject" | "expire";
-    };
 ```
 
-### 10.2 Runtime control API
+### 9.2 Runtime control API
 
 ```ts
 interface ControlApi {
-  abortConversation(input: AbortConversationInput): Promise<AbortResult>;
   listPendingHitl(filter?: HitlRequestFilter): Promise<HitlRequestView[]>;
+  listPendingHitlBatches(filter?: HitlBatchFilter): Promise<HitlBatchView[]>;
+  getHitlBatch(batchId: string): Promise<HitlBatchView | null>;
   getHitlRequest(requestId: string): Promise<HitlRequestView | null>;
   submitHitlResult(input: SubmitHitlResultInput): Promise<SubmitHitlResult>;
+  resumeHitlBatch(batchId: string): Promise<ResumeHitlResult>;
   resumeHitl(requestId: string): Promise<ResumeHitlResult>;
+  cancelHitlBatch(input: CancelHitlBatchInput): Promise<CancelHitlResult>;
   cancelHitl(input: CancelHitlInput): Promise<CancelHitlResult>;
 }
 ```
 
-### 10.3 HitlStore contract
+`resumeHitlBatch(batchId)`가 canonical resume API다. 이 API는 idempotent해야 한다. 다른 owner가 batch lease를 보유 중이거나 batch가 이미 `continuing`/`completed`/`canceled`/`expired`/`failed(nonRetryable)`/`blocked` 같은 terminal 또는 post-side-effect 상태이면, 호출은 mutation 없이 현재 상태를 `ResumeHitlResult`로 반환한다 — `completed`는 `alreadyCompleted`, `canceled`/`failed(nonRetryable)`/`expired`는 `alreadyTerminal`, `blocked`는 `blocked`로 분류된다 (§9.4.1). `resumeHitl(requestId)`는 request의 owning batch를 찾는 helper다. owning batch가 resume 가능한 상태가 아니면 `resumeHitlBatch`와 동일한 idempotent semantics를 따른다.
+
+`cancelHitlBatch(input)`도 idempotent해야 한다. 이미 `canceled`/`completed`/`failed(nonRetryable)`/`expired` terminal 상태이면 mutation 없이 control API가 `alreadyTerminal`(이미 다른 terminal로 수렴됨) 또는 `canceled`(같은 reason 재호출)로 분류해 노출한다. `blocked` batch는 §7.1 전이에 따라 `cancel`로 정식 close가 가능한 상태다 — operator가 풀어주기 전까지 barrier로 남는 post-side-effect failure 상태라서 cancel은 mutation으로 처리되어 `canceled`로 수렴한다 (§7.2 `blocked`는 operator recovery/cancel 대상). `continuing` batch에 대해서는 `input.abortContinuation`이 active continuation turn에 abort 신호를 보낼지를 결정한다 — `false`/생략이면 cancel은 `notCancelable`로 거절되고, `true`이면 store는 batch를 `canceled`로 닫고 runtime은 active continuation turn에 abort 신호를 보낸다 (§9.4 `cancelBatch()` semantics 참조). cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* — cancel이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `completed`/`failed`/`expired`), completion이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `canceled`) 분류해 노출한다. 이 status 명칭은 store가 반환한 `HitlBatchRecord`를 보고 control surface가 분류해 노출하는 결과다 — store 자체는 별도 status enum을 두지 않는다 (§9.4 마지막 단락).
+
+abort signal 전달의 보장 수준: `abortContinuation: true` cancel이 store에 commit되면 batch는 durable하게 `canceled`이고 *terminal*이다 — 이후 continuation이 settle해도 추가 store close는 발생하지 않는다. active continuation turn에 abort 신호가 *전달*되는 것은 in-process best-effort 효과이며, store transaction의 atomic 보장 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 *추가 store mutation 없이* 중단한다 — batch는 이미 `canceled`이므로 `recordContinuationOutcome()` 또는 `failBatch()`/`completeBatch()` 후속 호출이 발생하더라도 store는 idempotent 규칙에 따라 현재 canceled record를 반환할 뿐이다 (§9.4). §8.5 step 14의 `aborted` outcome 경로는 *cancel 없이* continuation이 자체적으로 abort/error로 settle한 경우의 close 분류이지, cancel 후 self-converge 경로가 아니다. cancel commit 후 process가 죽거나 in-process 신호 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다 (§7.2 `canceled`는 terminal). 외부 side effect의 cancellation propagation은 host 책임이다.
+
+### 9.3 Human result
+
+```ts
+interface SubmitHitlResultInput {
+  requestId: string;
+  result: HitlHumanResult;
+  idempotencyKey?: string;
+  agentName?: string;
+  conversationId?: string;
+}
+
+type HitlHumanResult =
+  | { kind: "approve"; value?: boolean | string | JsonObject; submittedBy?: string; submittedAt?: string; comment?: string }
+  | { kind: "reject"; reason?: string; submittedBy?: string; submittedAt?: string; comment?: string }
+  | { kind: "text"; value: string; submittedBy?: string; submittedAt?: string; comment?: string }
+  | { kind: "form"; value: JsonObject; submittedBy?: string; submittedAt?: string; comment?: string };
+
+type HitlResponseSchema =
+  | { type: "approval" }
+  | { type: "text"; schema?: JsonSchema; minLength?: number; maxLength?: number }
+  | { type: "form"; schema: JsonSchema };
+```
+
+> **Backward-compat input shape.** 정식 input shape는 위의 `kind` 형태 (`{ kind: "approve" | "reject" | "text" | "form", ... }`) 다. 구현체는 backward-compat을 위해 `{ decision: "approve" | "reject", value? | reason?, ... }` legacy shape를 동일 의미로 받아들일 수 있다 (runtime이 내부에서 `kind` 형태로 정규화한다). 새 host/connector/UI는 `kind` 형태만 사용해야 하며, 두 shape를 동시에 보내거나 섞어 쓰면 안 된다.
+
+### 9.4 HitlStore contract
+
+`HitlStore`는 runtime이 의존하는 durability boundary다. 아래 메서드 하나하나는 atomic해야 한다.
 
 ```ts
 interface HitlStore {
-  create(request: HitlRequestRecord): Promise<CreateHitlRequestResult>;
-  get(requestId: string): Promise<HitlRequestRecord | null>;
-  listPending(filter?: HitlRequestFilter): Promise<HitlRequestRecord[]>;
-  resolve(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;
-  reject(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;
-  acquireLease(requestId: string, ownerId: string, ttlMs: number): Promise<HitlLeaseResult>;
-  complete(requestId: string, completion: HitlCompletion): Promise<HitlRequestRecord>;
-  fail(requestId: string, failure: HitlFailure): Promise<HitlRequestRecord>;
-  releaseLease(requestId: string, ownerId: string): Promise<void>;
+  createBatch(input: {
+    batch: HitlBatchRecord;
+    requests: HitlRequestRecord[];
+  }): Promise<CreateHitlBatchResult>;
+
+  getBatch(batchId: string): Promise<HitlBatchRecord | null>;
+  getRequest(requestId: string): Promise<HitlRequestRecord | null>;
+  listPendingBatches(filter?: HitlBatchFilter): Promise<HitlBatchRecord[]>;
+  listPendingRequests(filter?: HitlRequestFilter): Promise<HitlRequestRecord[]>;
+  listBatchRequests(batchId: string): Promise<HitlRequestRecord[]>;
+  listBatchToolResults(batchId: string): Promise<HitlBatchToolResult[]>;
+  listRecoverableBatches(filter?: HitlBatchFilter): Promise<HitlBatchRecord[]>;
+  getOpenBatchByConversation(agentName: string, conversationId: string): Promise<HitlBatchRecord | null>;
+
+  startBatchToolExecution(batchId: string, marker: HitlBatchToolExecutionMarker): Promise<HitlBatchRecord>;
+  recordBatchToolResult(batchId: string, result: HitlBatchToolResult): Promise<HitlBatchRecord>;
+  markBatchWaitingForHuman(batchId: string): Promise<HitlBatchRecord>;
+
+  resolveRequest(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;
+  rejectRequest(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;
+
+  enqueueSteer(batchId: string, input: HitlQueuedSteerInput): Promise<HitlQueuedSteer>;
+  drainQueuedSteers(batchId: string, guard: HitlLeaseGuard): Promise<HitlQueuedSteer[]>;
+  listQueuedSteers(batchId: string): Promise<HitlQueuedSteer[]>;
+
+  acquireBatchLease(batchId: string, ownerId: string, ttlMs: number): Promise<HitlBatchLeaseResult>;
+  startRequestExecution(requestId: string, guard: HitlLeaseGuard, startedAt: string): Promise<HitlRequestRecord>;
+  completeRequestWithToolResult(input: {
+    batchId: string;
+    requestId: string;
+    toolResult: HitlBatchToolResult;
+    completion: HitlCompletion;
+    guard: HitlLeaseGuard;
+  }): Promise<{ batch: HitlBatchRecord; request: HitlRequestRecord }>;
+  completeRequest(requestId: string, completion: HitlCompletion, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
+  failRequest(requestId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
+  commitBatchAppend(batchId: string, appendCommit: HitlBatchAppendCommit, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  recordContinuationOutcome(
+    batchId: string,
+    outcome: HitlContinuationOutcome,
+    guard: HitlLeaseGuard,
+  ): Promise<HitlBatchRecord>;
+  completeBatch(batchId: string, completion: HitlBatchCompletion, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  spawnChildBatch(input: {
+    parentBatchId: string;
+    parentCompletion: HitlBatchCompletion;     // outcome === "spawnedChild", childBatchId === childBatch.batchId
+    childBatch: HitlBatchRecord;                // childBatch.parentBatchId === parentBatchId
+    childRequests: HitlRequestRecord[];
+    guard: HitlLeaseGuard;                      // parent batch lease guard
+  }): Promise<{
+    parent: HitlBatchRecord;                    // closed as completed(spawnedChild) with continuationOutcome marker
+    child: HitlBatchRecord;                     // newly created in preparing state
+  }>;
+  // store derives parent의 HitlContinuationOutcome ({ outcome:"spawnedChild", continuationTurnId, childBatchId })
+  // from parentCompletion 그대로 박는다. 외부에서 별도로 recordContinuationOutcome("spawnedChild")를 호출할 수 없다.
+  failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  cancelBatch(input: {
+    batchId: string;
+    reason?: string;
+    abortContinuation?: boolean;                // true if cancel must signal an active continuation turn to abort
+  }): Promise<HitlBatchRecord>;
+  releaseBatchLease(batchId: string, guard: HitlLeaseGuard): Promise<void>;
 }
 ```
 
-### 10.4 Core data types
+Required store semantics:
+
+- `createBatch()`는 같은 `(agentName, conversationId)`에 conversation barrier batch가 있으면 `conflict`를 반환해야 한다.
+- `getOpenBatchByConversation()`은 queueable steer 대상만 반환한다. 이름이 open이어도 create conflict predicate와 같으면 안 된다.
+- `preparing` batch는 create conflict 대상이지만 queueable lookup 결과에는 포함하지 않는다.
+- queue-closed `resuming` 또는 `failed(retryable)` batch는 queueable이 아니어도 create conflict 대상이다.
+- `markBatchWaitingForHuman()`은 batch/request와 필요한 non-HITL peer results가 저장된 경우에만 성공한다.
+- `resolveRequest()`/`rejectRequest()`는 duplicate submit 처리, request result 저장, batch ready 전환을 같은 atomic operation으로 처리한다.
+- `resolveRequest()`/`rejectRequest()`는 request가 이미 submitted/completed/failed/blocked인 경우 batch status보다 먼저 idempotency/duplicate 여부를 판단한다.
+- `completeRequestWithToolResult()`는 HITL handler result 저장과 request completion을 같은 atomic operation으로 처리한다.
+- `commitBatchAppend()`는 appended tool-result IDs, queued steer IDs, continuation turn ID를 함께 commit한다.
+- `commitBatchAppend()` 실패 전까지 queued/draining steer는 retry 가능한 상태로 남아야 한다.
+- `commitBatchAppend()` 성공 후 batch는 automatic resume retry 대상이 아니다.
+- `completeBatch()`는 continuation이 `completion.outcome` 값(`completed` / `maxStepsReached` / `spawnedChild`)에 해당하는 terminal state일 때만 허용한다. `completeBatch()`는 같은 batch에 대해 idempotent해야 한다 — 같은 `(batchId, outcome)`으로 두 번째 호출이 와도 mutation 없이 현재 record를 반환한다 (§8.5 step 14 stuck recovery용).
+- 외부 호출자가 `completeBatch()`를 직접 `outcome: "spawnedChild"`로 호출하는 것은 spec 위반이다 — `spawnedChild` close는 `spawnChildBatch()` 내부에서만 수행된다. store는 외부 진입의 `spawnedChild` close를 거절해야 한다.
+- `recordContinuationOutcome()`은 `commitBatchAppend()`가 성공한 batch에 대해서만 허용된다. 같은 batch에 다른 outcome으로 두 번째 호출이 오면 conflict로 거절한다 (continuation outcome은 idempotent 단일 사실이다). 같은 outcome 재호출은 mutation 없이 성공으로 수렴한다. 이 메서드는 §8.5 step 13~14의 close 호출이 실패해도 outcome을 잃지 않게 만드는 핵심 저장점이며, runtime은 close 호출 *전에* 먼저 marker를 박는다.
+- 외부 호출자가 `recordContinuationOutcome()`을 직접 `outcome: "spawnedChild"`로 호출하는 것도 spec 위반이다 — `spawnedChild` outcome은 `spawnChildBatch()` transaction 내부에서만 박힌다. store는 외부 진입의 `spawnedChild` marker를 거절해야 한다. 외부 호출자는 `completed` / `maxStepsReached` / `aborted` / `errored` 중 하나만 사용한다.
+- `spawnChildBatch()`는 chained HITL spawn의 *유일한 정식 진입점*이다. 호출은 (a) parent의 `recordContinuationOutcome("spawnedChild", { childBatchId })`, (b) parent의 `completeBatch({ outcome: "spawnedChild", childBatchId })`, (c) child의 `createBatch` 의미를 모두 *같은 atomic transaction*으로 처리한다. parent의 conversation barrier가 풀리는 시점과 child의 barrier가 잡히는 시점 사이에 다른 turn/batch가 끼어들면 안 된다. transaction이 실패하면 parent와 child 모두 spawn 이전 상태로 남으며, partial close (parent만 닫힌 흔적) 또는 partial marker (`spawnedChild` marker만 commit된 흔적)는 발생하지 않는다.
+- `cancelBatch()`는 두 효과를 분리해 정의한다 — **durable boundary**와 **abort signal**. durable boundary는 store atomic이다: `continuing` batch에 `abortContinuation: true`로 호출되면 store는 batch를 `canceled`로 닫고 cancel 사실을 durable하게 commit한다. 이 commit이 끝난 시점에서 batch는 *terminal*이며, 이후 continuation이 settle해도 추가 store close는 발생하지 않는다. 이 commit은 startup recovery가 동일하게 관찰한다. abort signal 전달 — runtime이 active continuation turn에 abort 신호를 보내는 in-process 효과 — 은 *best-effort*이며 `cancelBatch()`의 atomic guarantee 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 *추가 store mutation 없이* 중단한다. continuation이 abort 신호를 늦게 관찰해 `recordContinuationOutcome()` 또는 `failBatch()`/`completeBatch()`를 호출하더라도, batch가 이미 `canceled`이므로 store는 idempotent 규칙에 따라 현재 canceled record를 반환할 뿐이다 — 추가 close나 outcome marker overwrite는 발생하지 않는다. §8.5 step 14의 `aborted` outcome 경로는 *cancel 없이* continuation이 자체적으로 abort/error로 settle한 경우의 close 분류이지, cancel 후 self-converge 경로가 아니다. cancel commit 후 process가 죽거나 abort signal 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다.
+- cancel과 `completeBatch()`가 경합하면 *먼저 commit된 store 호출이 이긴다* — 늦게 도착한 쪽은 mutation 없이 현재 record를 반환한다. control API(§9.2)는 그 record를 보고 분류한다 — cancel이 늦으면 batch는 이미 `completed`/`failed`/`expired`이라 `alreadyTerminal`로, completion이 늦으면 batch는 이미 `canceled`이라 마찬가지로 `alreadyTerminal`로 노출한다. (`notCancelable`은 race가 아니라 *cancel이 적용 불가능한 상태*에서 사용된다 — 예: `continuing` batch에 `abortContinuation` 없이 cancel을 시도한 경우.)
+- `cancelBatch()`는 같은 `batchId`에 대해 idempotent해야 한다. 이미 terminal 상태(`canceled`/`completed`/`failed(nonRetryable)`/`expired`)면 mutation 없이 현재 record를 반환한다 — 같은 record를 받은 control API가 `alreadyTerminal`(또는 같은 reason 재호출이면 `canceled`)로 분류해 노출한다. `blocked` batch는 §7.1 전이에 따라 cancel mutation 대상이다 — store는 `blocked → canceled` 전이를 commit하고 control API는 `canceled`로 노출한다. `continuing` batch에 `abortContinuation: false`/생략으로 호출된 cancel은 mutation 없이 현재 record를 반환하고 control API는 `notCancelable`로 노출한다.
+
+> **Store return 표면.** `HitlStore`의 모든 메서드는 batch/request `*Record`를 반환한다 (또는 result envelope의 record 필드). `notCancelable` / `alreadyTerminal` / `leaseConflict` / `notReady` 같은 status 명칭은 control API(§9.2)가 같은 record를 보고 분류해 노출하는 *control-surface*다. store는 자체 status enum을 두지 않으며, idempotent 결과를 status 문자열로 반환하지 않는다.
+
+#### 9.4.1 Supporting types
+
+이 절은 §2 Design Premises를 따른다 — 스펙이 원하는 최종 계약을 정의하고, 구현은 이 형태를 따라야 한다. 현재 구현이 아래 형태와 어긋나는 지점은 구현 측 수정 대상이지 spec 측 양보 대상이 아니다.
+
+**Lease & guard**
 
 ```ts
+interface HitlLease {
+  batchId: string;
+  ownerId: string;
+  fencingToken: string;            // monotonic per batchId
+  acquiredAt: string;
+  expiresAt: string;
+}
+
+interface HitlLeaseGuard {
+  batchId: string;                 // guard는 발급된 batch에 대해서만 유효해야 한다
+  ownerId: string;
+  fencingToken: string;
+}
+
+type HitlBatchLeaseResult =
+  | { status: "acquired"; lease: HitlLease; guard: HitlLeaseGuard; batch: HitlBatchRecord }
+  | { status: "busy"; currentLease?: HitlLease; batch: HitlBatchRecord }   // currentLease는 store가 안전하게 노출 가능한 경우에만 채운다
+  | { status: "batchTerminal"; batch: HitlBatchRecord }
+  | { status: "notFound"; batchId: string };
+```
+
+`fencingToken`은 `acquireBatchLease()`가 batch 단위로 monotonic하게 발급한다. store의 *lease-protected mutation* 메서드 — `startRequestExecution`, `completeRequestWithToolResult`, `completeRequest`, `failRequest`, `commitBatchAppend`, `recordContinuationOutcome`, `spawnChildBatch`, `completeBatch`, `releaseBatchLease`, 그리고 `failBatch`가 lease guard를 가진 호출인 경우 — 는 전달된 guard의 `(batchId, ownerId, fencingToken)` 삼중을 검증해야 한다. `createBatch`, `startBatchToolExecution`, `recordBatchToolResult`, `markBatchWaitingForHuman`, `resolveRequest`, `rejectRequest`, `enqueueSteer`, `cancelBatch`는 lease 도입 전 단계이거나 외부 control API 호출이라 lease guard 없이 동작하며, conflict/idempotency는 batch status와 idempotency key로 관리한다. `startBatchToolExecution`은 marker의 `phase`에 따라 두 가지 의미를 동시에 만족해야 한다 — `pre-resume` marker는 lease/fencing 검증 없이 받아들이고, `resume` marker는 marker의 `(batchId, ownerId, fencingToken)`이 batch의 active lease와 일치할 때만 허용한다 (즉 호출 자체는 lease-free이지만 marker payload를 통해 fence 검증한다). `batchId`를 guard에 포함시키는 이유는 한 owner가 여러 batch를 lease 받을 때 다른 batch의 guard를 잘못 적용하는 사고를 store level에서 차단하기 위함이다.
+
+**Tool call/result records**
+
+```ts
+interface HitlBatchToolCallSnapshot {
+  toolCallId: string;
+  toolCallIndex: number;
+  toolName: string;
+  args: JsonObject;
+  hitlRequired: boolean;
+  requestId?: string;              // present iff hitlRequired
+}
+
+interface HitlBatchToolExecutionMarker {
+  batchId: string;
+  toolCallId: string;
+  toolCallIndex: number;
+  requestId?: string;              // present iff this marker belongs to a HITL request
+  phase: "pre-resume" | "resume";  // pre-resume: §8.1 non-HITL peer 실행 (lease 도입 전), resume: §8.5 step 6 handler 실행
+  startedAt: string;
+  ownerId: string;                 // owner that started the side-effect
+  fencingToken?: string;           // resume-phase marker는 active lease guard의 fencingToken을 박는다. pre-resume marker는 batch lease 도입 전이라 비워둔다.
+}
+
+interface HitlBatchToolResult {
+  batchId: string;
+  toolCallId: string;
+  toolCallIndex: number;
+  toolResult: ToolResult;
+  finalArgs?: JsonObject;
+  recordedAt: string;
+  source: "non-hitl-peer" | "hitl-handler" | "hitl-rejection";
+  requestId?: string;              // present iff source !== "non-hitl-peer"
+}
+```
+
+`HitlBatchToolResult.source`는 §8.6 startup recovery에서 `preparing` 수렴 분기를 결정한다 (peer result vs hitl handler result vs rejection 구분). `HitlBatchToolExecutionMarker.ownerId`/`fencingToken`은 fence-aware recovery에 필요하다 — recovery가 stale owner의 marker를 식별해 같은 fencing 줄을 따르도록 강제한다. `phase`는 두 종류의 marker를 구분한다 — `pre-resume`은 §8.1 step 6에서 batch lease 없이 non-HITL peer 실행을 시작할 때 박는 marker로 `fencingToken`을 비워둔다 (이 단계는 lease 도입 전이므로 fence 충돌 검증 대상이 아니다 — `ownerId`만으로 "어떤 runtime이 시작했는지" 흔적을 남긴다). `resume`은 §8.5 step 6에서 active batch lease guard 아래 HITL handler 실행을 시작할 때 박는 marker로 `fencingToken`이 필수다 — recovery는 이 marker만 fence 충돌 검증 대상으로 삼는다.
+
+**Append commit & completion**
+
+```ts
+interface HitlBatchAppendCommit {
+  appendedToolResultIds: string[];   // tool-result message ID들 (deterministic order)
+  appendedQueuedSteerIds: string[];  // queued steer로부터 append된 message ID들
+  continuationTurnId: string;
+  committedAt: string;
+}
+
+interface HitlCompletion {
+  toolResult: ToolResult;
+  finalArgs?: JsonObject;
+  completedAt: string;
+}
+
+interface HitlBatchCompletion {
+  continuationTurnId: string;
+  // 외부 호출자(runtime → completeBatch())가 사용 가능한 outcome은 `completed` / `maxStepsReached` 둘이다.
+  // `spawnedChild`는 spawnChildBatch() transaction 내부에서만 사용된다 — 외부 completeBatch() 호출에 사용하면 §9.4 store semantics가 거절한다.
+  outcome: "completed" | "maxStepsReached" | "spawnedChild"; // §8.5 step 13의 successful terminal + §8.5 step 12.1의 spawn-internal close
+  completedAt: string;
+  childBatchId?: string;             // outcome === "spawnedChild"일 때만 채워진다 (spawnChildBatch internal). parent record에 박힌다.
+}
+
+type HitlContinuationOutcome =
+  | { outcome: "completed"; recordedAt: string; continuationTurnId: string }
+  | { outcome: "maxStepsReached"; recordedAt: string; continuationTurnId: string }
+  | { outcome: "spawnedChild"; recordedAt: string; continuationTurnId: string; childBatchId: string }
+  | { outcome: "aborted"; recordedAt: string; continuationTurnId: string; reason?: string }
+  | { outcome: "errored"; recordedAt: string; continuationTurnId: string; error: HitlSerializedCause };
+```
+
+`HitlBatchCompletion.outcome`은 `completeBatch()`가 호출 가능한 close-eligible terminal state로 한정한다. `completed`/`maxStepsReached`는 successful terminal, `spawnedChild`는 chained HITL spawn에서 parent를 닫는 분류다. continuation 안에서 새 HITL barrier가 생긴 경우(chained HITL)는 별도 completion이 아니라 *spawn transaction* (§8.5 step 12.1, §9.4 `spawnChildBatch()`) 으로 처리되며, parent는 `outcome: "spawnedChild"`로 닫히고 새 child batch가 같은 transaction에서 생성된다.
+
+`HitlContinuationOutcome`은 `recordContinuationOutcome()`이 batch에 박는 atomic marker다. `completeBatch()`/`failBatch()` 호출이 실패해 `continuing` batch가 일시적으로 stuck됐을 때, startup recovery가 같은 분류로 close 시도를 재수행할 근거가 된다 (§8.6 step 9.1). 외부 호출자가 사용 가능한 outcome은 `completed` / `maxStepsReached` / `aborted` / `errored` 넷이다. `aborted`는 continuation이 abort signal(cancel-driven 또는 host cancellation)을 관찰해 자체적으로 settle한 경우의 close 분류이며 `failBatch()`로 `blocked` 또는 `failed(nonRetryable)`에 수렴된다 — 단, `cancelBatch(abortContinuation: true)`가 이미 batch를 `canceled`로 닫아 둔 상태에서 continuation이 늦게 신호를 관찰해 `recordContinuationOutcome("aborted")`/`failBatch()`를 호출하면 store는 idempotent 규칙에 따라 현재 canceled record를 반환하고 mutation은 일어나지 않는다 (§9.4 cancelBatch semantics; `aborted` 경로는 *cancel 없이* continuation이 자체 settle한 경우에만 실제 close mutation을 만든다). `errored`는 continuation 자체 실패 또는 spawn transaction 실패의 분류이며 마찬가지로 `failBatch()`로 수렴된다. `spawnedChild`는 `spawnChildBatch()` transaction *내부에서만* atomic하게 박히는 marker이며, 외부 호출자가 `recordContinuationOutcome("spawnedChild")` 또는 `completeBatch(outcome:"spawnedChild")`를 직접 호출하는 것은 spec 위반이다 (§9.4 store semantics에서 거절). spawn transaction은 marker 기록 + parent close + child create를 한 atomic operation으로 처리하므로, parent가 stuck `continuing` 상태로 `spawnedChild` marker만 갖는 케이스는 *발생할 수 없으며* — 그런 record가 발견되면 store atomicity 위반으로 분류한다 (§8.6 step 9.1). 일반 recovery는 `spawnedChild` marker를 close 재시도 대상으로 다루지 않는다.
+
+**Failure**
+
+```ts
+interface HitlSerializedCause {
+  name?: string;                   // Error.name 또는 분류 키
+  message?: string;                // human-readable 요약
+  stack?: string;                  // 가능하면 stack trace
+  details?: JsonValue;             // store-safe 추가 컨텍스트 (provider error code, http status 등)
+}
+
+interface HitlFailure {
+  error: string;                   // 분류 키 (machine-readable)
+  retryable: boolean;              // §7.1의 failed(retryable)/failed(nonRetryable) 분기를 결정
+  failedAt: string;
+  cause?: HitlSerializedCause;     // 디버깅·로그 용 raw cause (선택, store-safe 직렬화 형태)
+}
+```
+
+`HitlSerializedCause`는 *store-safe 직렬화 형태*다. 원본 Error 객체나 provider exception은 `JsonValue`로 떨어지지 않을 때가 많으므로, runtime은 store에 기록하기 전에 이 형태로 정규화해야 한다. `details`만 임의의 `JsonValue`를 허용하며, `name`/`message`/`stack`은 string으로만 저장한다.
+
+**Queued steer**
+
+```ts
+type HitlQueuedSteerInput =
+  | {
+      source: "ingress";
+      envelope: InboundEnvelope;             // connector ingress payload
+      receivedAt: string;
+      metadata?: Record<string, JsonValue>;
+    }
+  | {
+      source: "direct";
+      input: HitlDirectProcessTurnInput;     // direct processTurn() raw payload
+      receivedAt: string;
+      metadata?: Record<string, JsonValue>;
+    };
+
+interface HitlDirectProcessTurnInput {
+  agentName: string;
+  conversationId: string;
+  content: MessageEvent[] | string;          // raw user content (text 또는 message events)
+  options?: JsonObject;                      // processTurn() options snapshot (직렬화 가능 부분만)
+}
+
+type HitlQueuedSteer = HitlQueuedSteerInput & {
+  queuedInputId: string;
+  batchId: string;
+  status: "queued" | "draining" | "drained" | "canceled";
+};
+```
+
+`source`는 입력 origin을 구분하는 discriminator다. `"ingress"` 케이스는 connector envelope을 그대로 갖고, `"direct"` 케이스는 direct `processTurn()` 호출의 raw payload snapshot을 갖는다. drain 시 두 케이스는 같은 message append 경로를 거치되 source 메타데이터로 추적 가능해야 한다. `"direct"`는 §10 Runtime Responsibility의 "direct `processTurn()` barrier handling" 표현과 일치시키기 위한 정식 명명이다. envelope 형태로 강제하지 않는 이유는 direct 호출이 connector envelope을 갖지 않을 수 있고, 가짜 envelope을 합성하면 store-side 검증이 connector ingress와 섞여 디버깅이 어려워지기 때문이다.
+
+**Filters & views**
+
+```ts
+interface HitlBatchFilter {
+  agentName?: string;
+  conversationId?: string;
+  status?: HitlBatchStatus | HitlBatchStatus[];
+}
+
+interface HitlRequestFilter {
+  agentName?: string;
+  conversationId?: string;
+  batchId?: string;
+  status?: HitlRequestStatus | HitlRequestStatus[];
+}
+
+type HitlRequestView = HitlRequestRecord & {
+  hasConversationSnapshot?: boolean;
+};
+
+interface HitlBatchView extends HitlBatchRecord {
+  requests: HitlRequestView[];
+  queuedSteerCount: number;
+}
+```
+
+**Result envelopes for control API**
+
+```ts
+type CreateHitlBatchResult =
+  | { status: "created"; batch: HitlBatchRecord; requests: HitlRequestRecord[] }
+  | { status: "conflict"; openBatch: HitlBatchRecord };
+
+type HitlSubmitResume =
+  | { status: "waitingForPeers"; batchId: string; pendingRequestIds: string[] }
+  | { status: "scheduled"; batchId: string; requestIds: string[] }
+  | { status: "error"; batchId?: string; requestId: string; error: string };
+
+type SubmitHitlResult =
+  | { status: "accepted"; request: HitlRequestView; resume: HitlSubmitResume }
+  | { status: "duplicate"; request: HitlRequestView; resume?: HitlSubmitResume }
+  | { status: "notFound"; requestId: string }
+  | { status: "invalid"; requestId: string; error: string }
+  | { status: "error"; requestId: string; request?: HitlRequestView; error: string };
+
+type ResumeHitlResult =
+  | { status: "completed"; batch: HitlBatchView; result?: ToolResult }
+  | { status: "scheduled"; batchId: string }
+  | { status: "alreadyCompleted"; batch: HitlBatchView }      // batch.status === "completed"
+  | { status: "alreadyTerminal"; batch: HitlBatchView }       // batch.status ∈ { canceled, failed(nonRetryable), expired } — lifecycle terminal, resume 불가
+  | { status: "blocked"; batch: HitlBatchView }               // batch.status === "blocked" — operator cancel/recovery 전까지 barrier (§7.2)
+  | { status: "notReady"; batch: HitlBatchView; pendingRequestIds: string[] }
+  | { status: "notFound"; batchId?: string; requestId?: string }
+  | { status: "leaseConflict"; batch: HitlBatchView | null }
+  | { status: "failed"; batch: HitlBatchView; error: string }
+  | { status: "error"; batchId?: string; requestId?: string; batch?: HitlBatchView; error: string };
+
+interface CancelHitlBatchInput {
+  batchId: string;
+  reason?: string;
+  abortContinuation?: boolean;     // continuing batch에 한해 active continuation turn에 abort 신호를 보낸다 (§9.2)
+}
+interface CancelHitlInput {
+  requestId: string;
+  reason?: string;
+  abortContinuation?: boolean;     // owning batch가 continuing이면 동일 의미
+}
+
+type CancelHitlResult =
+  | { status: "canceled"; batch: HitlBatchView }              // mutation으로 canceled에 도달했거나 같은 reason 재호출로 idempotent 수렴
+  | { status: "alreadyTerminal"; batch: HitlBatchView }       // race에서 졌거나 cancel 호출 시 batch가 이미 다른 terminal(`completed`/`failed(nonRetryable)`/`expired`/`canceled` with different reason)
+  | { status: "notCancelable"; batch: HitlBatchView }         // cancel이 적용 불가능한 상태 — `continuing` batch에 `abortContinuation` 없이 호출된 경우
+  | { status: "notFound"; batchId?: string; requestId?: string }
+  | { status: "error"; batchId?: string; requestId?: string; batch?: HitlBatchView; error: string };
+```
+
+`ResumeHitlResult.leaseConflict`/`alreadyCompleted`/`alreadyTerminal`/`blocked`가 §9.2의 idempotent contract를 받쳐주는 정식 status다. 두 번째 resume 호출은 mutation 없이 이 넷 중 하나(또는 `notReady`)로 수렴한다 — `alreadyCompleted`는 batch가 `completed`로 settle된 경우, `alreadyTerminal`은 batch가 lifecycle terminal(`canceled`/`failed(nonRetryable)`/`expired`)로 닫힌 경우, `blocked`는 batch가 `blocked` barrier 상태인 경우 (§7.2 — `blocked`는 lifecycle terminal이 아니라 operator cancel/recovery 대상이라 별도 status로 분리한다). `CancelHitlResult.alreadyTerminal`은 cancel race에서 졌거나 호출 시점에 batch가 이미 다른 terminal에 있는 경우의 control surface다 — store는 record만 반환하고 control API가 분류한다 (§9.4 마지막 단락).
+
+### 9.5 Core data types
+
+```ts
+type HitlBatchStatus =
+  | "preparing"
+  | "waitingForHuman"
+  | "ready"
+  | "resuming"
+  | "continuing"
+  | "completed"
+  | "failed"
+  | "blocked"
+  | "expired"
+  | "canceled";
+
 type HitlRequestStatus =
   | "pending"
   | "resolved"
   | "rejected"
-  | "resuming"
   | "completed"
   | "failed"
+  | "blocked"
   | "expired"
-  | "canceled"
-  | "blocked";
+  | "canceled";
+
+interface HitlBatchRecord {
+  batchId: string;
+  status: HitlBatchStatus;
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  stepNumber: number;
+  toolCalls: HitlBatchToolCallSnapshot[];
+  toolResults: HitlBatchToolResult[];
+  toolExecutions: HitlBatchToolExecutionMarker[];
+  conversationEvents: MessageEvent[];
+  createdAt: string;
+  updatedAt: string;
+  lease?: HitlLease;
+  appendCommit?: HitlBatchAppendCommit;
+  continuationOutcome?: HitlContinuationOutcome; // §8.5 step 14 stuck recovery용 atomic marker
+  completion?: HitlBatchCompletion;
+  failure?: HitlFailure;
+  parentBatchId?: string;                        // chained HITL: 이 batch가 spawnedChild인 경우 parent
+  childBatchId?: string;                         // chained HITL: 이 batch가 spawnedChild로 close되며 만든 child
+  metadata?: Record<string, JsonValue>;
+}
 
 interface HitlRequestRecord {
   requestId: string;
+  batchId: string;
   status: HitlRequestStatus;
   agentName: string;
   conversationId: string;
   turnId: string;
   stepNumber: number;
   toolCallId: string;
+  toolCallIndex: number;
   toolName: string;
   originalArgs: JsonObject;
   finalArgs?: JsonObject;
   prompt?: string;
   responseSchema: HitlResponseSchema;
-  conversationEvents: MessageEvent[];
+  conversationEvents?: MessageEvent[];
   createdAt: string;
   updatedAt: string;
   expiresAt?: string;
   result?: HitlHumanResult;
   completion?: HitlCompletion;
-  lease?: {
-    ownerId: string;
-    expiresAt: string;
-  };
+  failure?: HitlFailure;
+  lease?: HitlLease;
   metadata?: Record<string, JsonValue>;
 }
 
-type HitlHumanResult =
-  | { decision: "approve"; value?: boolean | string | JsonObject; submittedBy?: string; submittedAt: string }
-  | { decision: "reject"; reason?: string; submittedBy?: string; submittedAt: string };
+// HitlQueuedSteer 타입 정의는 §9.4.1 "Queued steer" 단락의 type alias가 정식이며, §9.5는 중복 선언하지 않는다.
+// (이전 버전의 `interface HitlQueuedSteer extends HitlQueuedSteerInput`는 §9.4.1에서 union으로 바뀐 후 TypeScript 호환성을 잃어 제거됨.)
 ```
 
-### 10.5 StepResult / TurnResult 확장
+## 10. Runtime Responsibility
 
-```ts
-interface StepResult {
-  pendingHitlRequestIds?: string[];
-}
+- Core execution owns HITL policy evaluation, batch creation, non-HITL peer result recording, and `waitingForHuman` turn settlement.
+- Runtime control owns pending query, submit, resume, startup recovery, and direct `processTurn()` barrier handling.
+- Ingress owns routing input into `queuedForHitl` instead of starting a new turn when a queueable HITL batch exists, and rejecting input when a barrier is not queueable.
+- Store adapter owns atomicity, durability, idempotent submit, conversation barrier uniqueness, queued steer retention, resume append commit, and side-effect boundary markers.
+- Tool or host application owns external side effect idempotency.
 
-interface TurnResult {
-  status: "completed" | "aborted" | "error" | "maxStepsReached" | "waitingForHuman";
-  pendingHitlRequestIds?: string[];
-}
-```
+## 11. Acceptance Criteria
 
-### 10.6 Event payloads
+- Given one HITL tool call, When the step is processed, Then the handler is not called, batch/request are stored, and the turn returns `waitingForHuman`.
+- Given one normal tool call and two HITL tool calls in the same step, When the step is processed, Then the normal tool call executes and its result is stored, both HITL calls become pending requests with the same `batchId`, and no next LLM step runs.
+- Given only one of two peer HITL requests has been submitted, When submit succeeds, Then the human result is durable and resume is not scheduled.
+- Given the final peer HITL request is submitted, When submit succeeds, Then the request result and batch `ready` transition happen atomically and resume is scheduled.
+- Given the same request submit is retried after batch moved to `ready`, `resuming`, `continuing`, `completed`, `blocked`, or `failed`, When the submit is duplicate, Then the existing request state is returned and no mutation occurs.
+- Given the same idempotency key is reused for another request, When submit is attempted, Then it is rejected and no mutation occurs.
+- Given queueable HITL exists for a conversation, When ingress or direct `processTurn()` targets the same conversation, Then it is stored as queued steer and no new turn starts.
+- Given a HITL batch is `preparing`, When ingress or direct `processTurn()` targets the same conversation, Then the input is rejected/error and is not appended, steered, or accepted.
+- Given a queue-closed `resuming` batch or `failed(retryable)` batch exists, When a new batch is created for the same conversation, Then `createBatch()` returns conflict.
+- Given a queue-closed `resuming` batch exists, When ingress targets the same conversation, Then it is rejected/error rather than queued.
+- Given a HITL batch is `continuing` and no active continuation turn exists, When ingress or direct `processTurn()` targets the same conversation before completion, Then the input is rejected/error.
+- Given a HITL batch is `continuing` and an active continuation turn exists, When ingress targets the same conversation, Then it may use normal active-turn steering and must not be stored as HITL queued steer.
+- Given active-turn steering arrives before a step settles into HITL, When the step returns `waitingForHuman`, Then the steered input is durably queued before success is observed.
+- Given queued steer exists, When resume appends tool results, Then queued steer is appended after tool results and before continuation.
+- Given queued steer was accepted, When resume append commit fails, Then queued/draining steer remains recoverable for retry and the batch remains a conversation barrier.
+- Given approved HITL handler returns a result, When the result is stored, Then tool result and request completion are stored atomically.
+- Given handler execution has started and the process crashes, When startup recovery runs, Then core does not automatically rerun that handler.
+- Given commit append has succeeded and continuation starts, When continuation fails or the process crashes before batch completion, Then recovery does not automatically rerun continuation.
+- Given continuation returns error or aborted, When resume records the outcome, Then the batch is not marked `completed`.
+- Given continuation executes after resume, When turn middleware is registered, Then continuation observes the same turn middleware semantics as normal turn without adding a synthetic user message.
+- Given a `preparing` batch has recorded non-HITL result for every non-HITL peer, When startup recovery runs, Then it can expose the batch as `waitingForHuman` without rerunning peer handlers.
+- Given a `preparing` batch has a non-HITL execution marker without result, When startup recovery runs, Then it becomes blocked or safe-closed non-retryable and no handler is rerun.
+- Given runtime restarts with a `waitingForHuman` batch in durable store, When pending HITL is listed, Then the pending request is returned.
+- Given runtime restarts with a `ready` batch in durable store, When recovery runs, Then resume can be scheduled.
+- Given a continuation step triggers a new HITL barrier, When the runtime spawns a child batch, Then the parent is closed as `completed(spawnedChild)` and the child is created in the same atomic transaction with `parentBatchId`/`childBatchId` linked.
+- Given parent close and child create cannot be committed atomically, When the spawn transaction fails, Then both parent and child remain in their pre-spawn state, no `spawnedChild` continuation outcome marker is committed, and the conversation barrier is unchanged.
+- Given continuation has settled with an outcome, When runtime closes the batch, Then `recordContinuationOutcome()` is committed *before* the corresponding `completeBatch()`/`failBatch()` call.
+- Given continuation has settled with an outcome but `completeBatch()` or `failBatch()` fails after the marker was recorded, When startup recovery runs, Then it re-attempts the same close classification without rerunning continuation.
+- Given a `continuing` batch has no continuation outcome marker, When startup recovery runs, Then the batch remains `continuing` for operator action and continuation is not rerun.
+- Given an operator cancels a `continuing` batch with `abortContinuation: true`, When the cancel commits to durable store before `completeBatch()`, Then the batch is `canceled` durably, the runtime makes a best-effort attempt to deliver an abort signal to the active continuation turn, and a later `completeBatch()` performs no mutation while the control API surfaces the loss as `alreadyTerminal`.
+- Given a cancel commit succeeds and the runtime crashes before delivering the in-process abort signal, When startup recovery runs, Then the batch is observed as `canceled` and is not auto-resumed; the abort signal is not retried.
+- Given a `continuing` batch was already closed as `canceled` by `cancelBatch(abortContinuation: true)`, When the continuation later observes the abort signal and calls `recordContinuationOutcome("aborted")` or `failBatch()` / `completeBatch()`, Then the store returns the current canceled record with no mutation and no second close occurs (idempotent terminal observation; cancel is the sole `canceled` close path).
+- Given an operator cancels a `continuing` batch without `abortContinuation`, When the batch has an active continuation turn, Then cancel returns the current record unchanged and the control API surfaces `notCancelable`; no abort signal is sent.
+- Given the same `cancelHitlBatch()` is retried on an already-canceled batch with the same reason, When the call repeats, Then the store returns the current canceled record with no mutation and the control API surfaces the result as idempotent `canceled`.
+- Given `cancelHitlBatch()` is called on a batch that is already `completed`/`failed(nonRetryable)`/`expired`, or on a `canceled` batch with a different reason, When the call lands, Then the store returns the current terminal record with no mutation and the control API surfaces the result as `alreadyTerminal`.
+- Given `cancelHitlBatch()` is called on a `blocked` batch, When the call commits, Then the store transitions the batch from `blocked` to `canceled` (operator close path) and the control API surfaces the result as `canceled`.
+- Given `resumeHitlBatch()` is called on a `blocked` batch, When the call lands, Then the store returns the current record with no mutation and the control API surfaces the result as `blocked` (distinct from `alreadyTerminal` — `blocked` is not lifecycle terminal but resume requires operator cancel/recovery first).
+- Given a `pre-resume` execution marker (created during §8.1 non-HITL peer execution) is observed at startup recovery, When the marker has no `fencingToken`, Then it is accepted as a valid pre-resume marker and recovery converges per §8.6 step 7 without applying lease/fencing checks.
+- Given a `resume` execution marker (created during §8.5 step 6 HITL handler execution), When the marker is recorded, Then `startBatchToolExecution()` requires the marker's `(ownerId, fencingToken)` to match the batch's active lease.
+- Given a chained HITL spawn transaction succeeds, When the spawn returns, Then the parent record is `completed(spawnedChild)`, the child record is `preparing` with `parentBatchId` set, and the runtime proceeds with §8.1 step 6~8 on the child outside the spawn transaction.
+- Given HITL is not configured for any tool, When normal execution runs, Then existing execution behavior is unchanged.
 
-```ts
-type HitlEventPayload =
-  | { type: "hitl.requested"; request: HitlRequestView }
-  | { type: "hitl.resolved"; requestId: string; turnId: string; toolCallId: string }
-  | { type: "hitl.rejected"; requestId: string; turnId: string; toolCallId: string; reason?: string }
-  | { type: "hitl.resuming"; requestId: string; turnId: string; toolCallId: string }
-  | { type: "hitl.completed"; requestId: string; turnId: string; toolCallId: string; result: ToolResult }
-  | { type: "hitl.failed"; requestId: string; turnId: string; toolCallId: string; retryable: boolean; error: Error }
-  | { type: "hitl.recovery"; recovered: number; pending: number; queuedForResume: number };
-```
+## 12. Verification Plan
 
-## 11. Realization Specification
+### Unit
 
-### 11.1 Module Boundaries
+- opaque `batchId`, `requestId`, `queuedInputId` generation
+- HITL policy evaluation
+- response schema validation
+- duplicate/idempotent submit across `waitingForHuman`, `ready`, `resuming`, `continuing`, `completed`, `blocked`, `failed`
+- conflicting duplicate submit does not mutate stored result
+- batch ready transition when final peer is submitted
+- `completeRequestWithToolResult()` atomic result+completion behavior
+- conversation barrier conflict predicate independent of queueable predicate
+- queueable predicate closes on queue-close metadata without clearing conversation barrier
+- queued/draining steer ordering and retention until commit
+- middleware parity for HITL continuation
 
-- `packages/types/src/hitl.ts`
-  - HITL public types, store interface, event payload types.
-- `packages/core/src/hitl/store.ts`
-  - store helper, in-memory test store, lease utilities.
-- `packages/core/src/hitl/runtime.ts`
-  - list/get/submit/resume/cancel control API implementation.
-- `packages/core/src/execution/tool-call.ts`
-  - HITL policy check, request create, `waitingForHuman` short-circuit.
-- `packages/core/src/execution/step.ts`
-  - pending HITL result를 StepResult에 반영하고 tool-result append 타이밍 조정.
-- `packages/core/src/harness-runtime.ts`
-  - `HitlStore` 주입, startup recovery, resume worker lifecycle.
+### Integration
 
-### 11.2 Data Ownership
-
-- `ConversationState`는 LLM-visible message history를 소유한다.
-- `HitlStore`는 pending/resolved/completed HITL request lifecycle을 소유한다.
-- Tool handler side effect의 외부 idempotency는 해당 tool 또는 host application이 소유한다.
-
-### 11.3 Concurrency Strategy
-
-- result 제출은 idempotency key 기반으로 중복 제출을 같은 final state로 수렴시킨다.
-- resume worker는 `acquireLease()` 성공 후에만 tool handler를 호출한다.
-- lease 만료 전 같은 request에 대한 두 번째 worker는 실행하지 않는다.
-- `complete()`는 request status와 completion marker를 transaction으로 갱신해야 한다.
-
-### 11.4 Failure Handling
-
-- request create 실패는 tool 실행 실패로 취급한다.
-- result 저장 성공 후 resume 실패는 request를 잃지 않고 `failed(retryable)` 또는 `blocked`로 남긴다.
-- runtime close는 진행 중 resume lease를 가능한 한 release하되, 실패해도 lease TTL로 복구 가능해야 한다.
-- tool handler가 abort signal을 받으면 request는 retryable failure로 남긴다.
-
-### 11.5 Conversation Continuation
-
-- 기본 정책은 pending 전환 시 현재 Turn을 `waitingForHuman`으로 종료한다.
-- resume 시 runtime은 request에 저장된 conversation events를 복원하고 tool-result message를 append한다.
-- tool-result append 뒤 `continueAfterHitl`이 true이면 동일 conversation에서 LLM Step loop를 재개해 최종 assistant 응답을 생성한다.
-- continuation Turn은 원래 `turnId`를 재사용하지 않고 `continuationOfTurnId` metadata를 가진 새 `turnId`를 사용한다.
-
-### 11.6 Migration / Rollback
-
-- HITL이 비활성화된 config에서는 기존 타입/실행 동작이 유지된다.
-- `ToolDefinition.hitl`은 optional field이므로 기존 tool은 변경 없이 컴파일되어야 한다.
-- `TurnResult.status` union 확장은 downstream exhaustiveness check에 영향을 주므로 migration note가 필요하다.
-
-## 12. Dependency Map
-
-- Depends On:
-  - `execution-loop`
-  - `conversation-state`
-  - `extension-system`
-- Blocks:
-  - 승인 UI, Slack/Email approval connector, durable queue integration
-- Parallelizable With:
-  - CLI HITL UX
-  - durable store adapter 구현
-  - notification/reminder extension
-
-## 13. Acceptance Criteria
-
-- Given HITL required tool이 등록되어 있고 LLM이 해당 도구를 호출하면, When Step이 ToolCall에 도달하면, Then tool handler는 호출되지 않고 `HitlStore`에 pending request가 저장되며 Turn은 `waitingForHuman`으로 종료된다.
-- Given pending HITL request가 저장되어 있으면, When runtime을 종료하고 새 runtime을 생성한 뒤 `listPendingHitl()`을 호출하면, Then 같은 `requestId`가 조회된다.
-- Given pending request에 approve result를 제출하면, When `resumeHitl()`이 실행되면, Then 저장된 ToolCall의 tool handler가 1회 호출되고 tool-result message가 conversation에 append된다.
-- Given 같은 approve result를 같은 `requestId`로 두 번 제출하면, When 두 resume worker가 동시에 실행되어도, Then tool handler는 최대 1회 호출되고 두 호출자는 같은 final completion을 관찰한다.
-- Given pending request에 reject result를 제출하면, When resume이 실행되면, Then tool handler는 호출되지 않고 rejection ToolResult가 conversation에 append된다.
-- Given form result가 tool args를 변경하도록 mapping되어 있으면, When resume이 실행되면, Then 최종 args는 JSON Schema 검증을 다시 통과한 뒤 tool handler에 전달된다.
-- Given form result가 schema에 맞지 않으면, When `submitHitlResult()`를 호출하면, Then request 상태는 pending으로 유지되고 validation error가 반환된다.
-- Given process가 `resolved -> resuming` 중 crash되면, When lease TTL이 지난 뒤 새 runtime recovery가 실행되면, Then request는 다시 resume 대상이 된다.
-- Given tool handler가 retryable error를 던지면, When resume이 실패하면, Then request는 `failed(retryable)`로 저장되고 `hitl.failed` 이벤트가 발행된다.
-- Given HITL 기능을 사용하지 않는 tool이면, When 기존 tool call flow를 실행하면, Then 기존 `completed/error/maxStepsReached` 동작과 이벤트 순서는 유지된다.
-
-## 14. Open Questions
-
-- `continueAfterHitl` 기본값을 true로 둘지, host가 명시적으로 resume continuation을 호출하게 할지 결정이 필요하다.
-- 별도 conversation persistence store 참조 방식은 snapshot 비용이 문제가 될 때 도입할 차기 최적화로 남긴다.
-- HITL result 제출 권한 검증은 core가 token 필드만 제공하고 host가 검증할지, core에 pluggable authorizer를 둘지 결정이 필요하다.
-- 외부 side effect 도구의 exactly-once 보장은 일반적으로 불가능하므로, tool-level idempotency contract를 얼마나 강제할지 결정이 필요하다.
-
-## 15. Verification Plan
-
-- Unit:
-  - HITL policy evaluation
-  - deterministic request id
-  - result schema validation
-  - state transition validation
-  - duplicate submit idempotency
-- Integration:
-  - `processTurn()` -> `waitingForHuman` -> runtime recreate -> `submitHitlResult()` -> `resumeHitl()`
-  - concurrent resume race with fake durable store
-  - crash simulation by constructing a `resolved/resuming` record before runtime startup
-  - rejected request does not call tool handler
-  - form result mutates args and revalidates schema
-- Regression:
-  - existing execution-loop tests pass when no tool has HITL policy
-  - existing ingress steering behavior remains unchanged
-  - `pnpm -r run typecheck`
+- `processTurn()` -> `waitingForHuman` -> `submitHitlResult()` -> resume -> completed
+- one step with normal tool call plus multiple HITL tool calls
+- first peer submit returns waiting-for-peers behavior
+- final peer submit schedules resume
+- pending HITL ingress/direct input returns queued result and no new LLM step starts
+- ingress/direct input during `preparing` is rejected/error and is not memory-only steered
+- active-turn steer is flushed into the HITL queue when the same step stops for HITL
+- queue-closed `resuming` rejects new input but still blocks new batch creation
+- `failed(retryable)` blocks new batch creation and can resume if before side-effect boundary
+- ingress/direct input during `continuing` is rejected/error when there is no active continuation turn
+- ingress during an active continuation can steer into that continuation without using HITL queued steer
+- queued steer drains after tool-result flush and before continuation
+- resume append commit failure keeps queued/draining steer recoverable
+- handler-start crash leaves batch/request blocked or failed without automatic handler rerun
+- continuation error/abort does not complete the batch
+- continuation start followed by crash/recovery does not auto-rerun continuation
+- `completeBatch()` persistence failure after continuation does not trigger automatic continuation replay
+- `recordContinuationOutcome()` is committed before `completeBatch()`/`failBatch()` and survives close failure to drive recovery close classification
+- external callers cannot record `outcome: "spawnedChild"` directly via `recordContinuationOutcome()` or `completeBatch()` — the store rejects such calls
+- chained HITL: continuation step triggering a new HITL barrier calls `spawnChildBatch()`, which atomically records the parent's `spawnedChild` marker, closes the parent as `completed(spawnedChild)`, and creates the linked child
+- after a successful spawn, the child batch is `preparing` and proceeds via §8.1 step 6~8 outside the spawn transaction
+- spawn transaction rollback leaves both parent and child in pre-spawn state with conversation barrier intact and no `spawnedChild` marker committed
+- operator `cancelHitlBatch()` with `abortContinuation: true` durably converges the batch to `canceled`; the in-process abort signal is best-effort and is not retried after a crash
+- after `cancelBatch(abortContinuation: true)` commits, a continuation that later observes the abort signal and calls `recordContinuationOutcome("aborted")` / `failBatch()` / `completeBatch()` is a no-op: the store returns the current canceled record idempotently (cancel is the sole `canceled` close path; `aborted` outcome is reserved for cancel-free self-settle in §8.5 step 14)
+- cancel/`completeBatch()` race: first store commit wins; the loser performs no mutation and the control API surfaces the result as `alreadyTerminal` (loser sees batch already in another terminal state)
+- `notCancelable` is reserved for *cancel-not-applicable* states (`continuing` batch without `abortContinuation`), not race outcomes
+- `cancelHitlBatch()` on `blocked` is a legitimate operator close path: store transitions `blocked → canceled` (per §7.1)
+- `resumeHitlBatch()` on `blocked` returns no-mutation with control API `blocked` status; `blocked` is *not* folded into `alreadyTerminal` because lifecycle-wise it is a barrier state pending operator action, not a finalized terminal
+- `cancelHitlBatch()` retry on an already-canceled batch with the same reason returns idempotent `canceled`; with a different reason or on another terminal returns `alreadyTerminal`
+- `HitlBatchToolExecutionMarker` with `phase: "pre-resume"` is accepted without `fencingToken`; `phase: "resume"` requires `fencingToken` matching the active batch lease
+- `preparing` recovery exposes fully prepared batches and blocks marker-without-result batches without rerunning tools
+- runtime recreate lists `waitingForHuman` batch from durable store
+- runtime recreate schedules `ready` batch from durable store
+- HITL-disabled tools keep existing regression tests passing

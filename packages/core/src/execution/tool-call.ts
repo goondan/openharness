@@ -1,8 +1,17 @@
-import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharness-types";
+import type {
+  HitlStore,
+  ToolCallContext,
+  ToolContext,
+  ToolResult,
+} from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import { normalizeToolArgs } from "../tool-args.js";
+
+export type ToolExecutionResult =
+  | ToolResult
+  | { type: "pendingHitl"; requestId: string };
 
 /**
  * Execute a single tool call with full middleware chain, validation, event emission.
@@ -21,9 +30,11 @@ export async function executeToolCall(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    hitlStore?: HitlStore;
+    skipHitl?: boolean;
   }
-): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus } = deps;
+): Promise<ToolExecutionResult> {
+  const { toolRegistry, middlewareRegistry, eventBus, hitlStore, skipHitl = false } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -41,7 +52,7 @@ export async function executeToolCall(
   });
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
-  const coreHandler = async (_ctx: ToolCallContext): Promise<ToolResult> => {
+  const coreHandler = async (coreCtx: ToolCallContext): Promise<ToolExecutionResult> => {
     // Check tool exists
     const tool = toolRegistry.get(toolName);
     if (!tool) {
@@ -52,6 +63,27 @@ export async function executeToolCall(
     const validation = toolRegistry.validate(toolName, normalizedToolArgs);
     if (!validation.valid) {
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
+    }
+
+    if (!skipHitl && tool.hitl && tool.hitl.mode !== "never") {
+      const shouldRequestHitl =
+        tool.hitl.mode === "required" ||
+        (tool.hitl.mode === "conditional" &&
+          (tool.hitl.when ? await tool.hitl.when(coreCtx) : true));
+
+      if (shouldRequestHitl) {
+        if (!hitlStore) {
+          return {
+            type: "error",
+            error: `Tool "${toolName}" requires HITL but no HitlStore is configured`,
+          };
+        }
+
+        return {
+          type: "error",
+          error: `Tool "${toolName}" requires HITL but batch planning was not performed`,
+        };
+      }
     }
 
     // Build the simpler ToolContext that the handler receives
@@ -66,24 +98,26 @@ export async function executeToolCall(
   };
 
   // 3. Build the full middleware chain
-  const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler);
+  const chain = middlewareRegistry.buildChain<ToolCallContext, ToolExecutionResult>("toolCall", coreHandler);
 
   // 4. Run the chain, handling errors
   try {
     const result = await chain(normalizedCtx);
 
-    // Emit tool.done on success
-    eventBus.emit("tool.done", {
-      type: "tool.done",
-      turnId,
-      agentName,
-      conversationId,
-      stepNumber,
-      toolCallId,
-      toolName,
-      args: normalizedToolArgs,
-      result,
-    });
+    if (result.type !== "pendingHitl") {
+      // Emit tool.done on success
+      eventBus.emit("tool.done", {
+        type: "tool.done",
+        turnId,
+        agentName,
+        conversationId,
+        stepNumber,
+        toolCallId,
+        toolName,
+        args: normalizedToolArgs,
+        result,
+      });
+    }
 
     return result;
   } catch (err) {

@@ -1,6 +1,7 @@
 import type { Extension } from "./extension.js";
 import type { ToolDefinition } from "./tool.js";
 import type { Connector, RoutingRule } from "./ingress.js";
+import type { HitlRuntimeConfig } from "./hitl.js";
 
 // -----------------------------------------------------------------------
 // EnvRef — branded type for deferred environment variable resolution
@@ -9,6 +10,7 @@ import type { Connector, RoutingRule } from "./ingress.js";
 declare const ENV_REF_BRAND: unique symbol;
 
 export interface EnvRef {
+  readonly __openharnessEnvRef: true;
   readonly [ENV_REF_BRAND]: true;
   readonly name: string;
 }
@@ -56,6 +58,7 @@ export interface ConnectionConfig {
 export interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
+  hitl?: HitlRuntimeConfig;
 }
 
 // -----------------------------------------------------------------------
@@ -79,5 +82,10 @@ export function defineHarness(config: HarnessConfig): HarnessConfig {
 // -----------------------------------------------------------------------
 
 export function env(name: string): EnvRef {
-  return { name } as EnvRef;
+  const ref = { name } as EnvRef;
+  Object.defineProperty(ref, "__openharnessEnvRef", {
+    value: true,
+    enumerable: false,
+  });
+  return ref;
 }

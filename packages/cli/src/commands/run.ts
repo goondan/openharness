@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { createHarness } from "@goondan/openharness";
+import type { HarnessConfig, HarnessRuntime } from "@goondan/openharness-types";
 import { loadEnv } from "../env-loader.js";
 import { loadConfig } from "../config-loader.js";
 
@@ -28,7 +29,7 @@ export async function runCommand(text: string, options: RunOptions): Promise<voi
   loadEnv(workdir);
 
   // Load harness config
-  let config;
+  let config: HarnessConfig;
   try {
     config = await loadConfig(configPath);
   } catch (err) {
@@ -56,7 +57,7 @@ export async function runCommand(text: string, options: RunOptions): Promise<voi
   }
 
   // Create harness and process turn
-  let harness;
+  let harness: HarnessRuntime;
   try {
     const effectiveConfig =
       options.maxSteps === undefined

@@ -75,6 +75,46 @@ export function EchoTool(): ToolDefinition {
 }
 ```
 
+### 사람이 확인해야 하는 Tool
+
+Tool 실행 전에 승인이나 입력 보완이 필요하면 `hitl` 정책을 붙입니다. HITL ToolCall은 handler 실행 전에 durable request로 저장되고, Turn은 `waitingForHuman` 상태로 멈춥니다. 이후 host application이 `runtime.control.submitHitlResult()`로 approve/reject/text/form 결과를 제출하면 runtime 내부 resume task가 같은 ToolCall snapshot을 재개합니다.
+
+```ts
+import { InMemoryHitlStore, createHarness } from "@goondan/openharness";
+import type { ToolDefinition } from "@goondan/openharness-types";
+
+const deleteFile: ToolDefinition = {
+  name: "delete_file",
+  description: "Delete a file after human approval.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string" },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  hitl: {
+    mode: "required",
+    response: { type: "approval" },
+  },
+  async handler(args) {
+    return { type: "text", text: `deleted ${String(args["path"])}` };
+  },
+};
+
+const hitlStore = new InMemoryHitlStore();
+const runtime = await createHarness({
+  agents: {
+    assistant: {
+      model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+      tools: [deleteFile],
+    },
+  },
+  hitl: { store: hitlStore },
+});
+```
+
 ## Connector는 _외부 이벤트를 OpenHarness 입구로 바꿉니다_
 
 예:
@@ -108,4 +148,3 @@ Tools:
 - `JsonQueryTool`
 - `TextTransformTool`
 - `WaitTool`
-
