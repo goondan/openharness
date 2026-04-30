@@ -18,6 +18,7 @@ import type { MiddlewareRegistry } from "./middleware-chain.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
+import { executeToolCall } from "./execution/tool-call.js";
 import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
@@ -779,6 +780,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 approval: existing,
               } as any;
             }
+            this._runtimeEvents.emit("humanApproval.resuming", {
+              type: "humanApproval.resuming",
+              humanApprovalId: id,
+              leaseOwner: "runtime",
+              turnId: (gate as any).toolCall.turnId,
+            } as any);
             let completedGate: any;
             try {
               const toolCall = (gate as any).toolCall;
@@ -825,31 +832,37 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       humanApprovalId: id,
                       leaseOwner: "runtime",
                     } as any);
-                    this._runtimeEvents.emit("tool.start", {
-                      type: "tool.start",
+                    toolResult = await executeToolCall(toolCall.toolCallId, {
                       turnId: toolCall.turnId,
                       agentName: toolCall.agentName,
                       conversationId: toolCall.conversationId,
+                      conversation: conversationState,
+                      input: {
+                        name: "humanApproval.resume",
+                        content: [],
+                        properties: {
+                          humanApprovalId: id,
+                          toolCallId: toolCall.toolCallId,
+                        },
+                        conversationId: toolCall.conversationId,
+                        source: {
+                          connector: "humanApproval",
+                          connectionName: "humanApproval",
+                          receivedAt: new Date().toISOString(),
+                        },
+                      },
+                      llm: agentDeps.llmClient,
                       stepNumber: toolCall.stepNumber,
                       toolCallId: toolCall.toolCallId,
                       toolName: toolCall.toolName,
-                      args: finalArgs,
-                    });
-                    toolResult = await tool.handler(finalArgs, {
-                      agentName: toolCall.agentName,
-                      conversationId: toolCall.conversationId,
+                      toolArgs: finalArgs,
                       abortSignal: new AbortController().signal,
-                    });
-                    this._runtimeEvents.emit("tool.done", {
-                      type: "tool.done",
-                      turnId: toolCall.turnId,
-                      agentName: toolCall.agentName,
-                      conversationId: toolCall.conversationId,
-                      stepNumber: toolCall.stepNumber,
-                      toolCallId: toolCall.toolCallId,
-                      toolName: toolCall.toolName,
-                      args: finalArgs,
-                      result: toolResult,
+                    }, {
+                      toolRegistry: agentDeps.toolRegistry,
+                      middlewareRegistry: agentDeps.middlewareRegistry,
+                      eventBus: this._runtimeEvents,
+                      humanApprovalStore: this._humanApprovalStore as any,
+                      skipHumanApproval: true,
                     });
                   }
                 }

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Connector,
+  Extension,
   HarnessConfig,
   LlmClient,
   LlmResponse,
@@ -519,7 +520,18 @@ describe("durable inbound and Human Approval integration", () => {
   it("creates a durable Human Approval before running a guarded tool handler", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const middlewareCalls: string[] = [];
+    const toolMiddlewareExtension: Extension = {
+      name: "approval-tool-middleware",
+      register(api) {
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          middlewareCalls.push(ctx.toolName);
+          return next();
+        });
+      },
+    };
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
+    const resumingEvents: unknown[] = [];
     const guardedTool: ToolDefinition = {
       name: "guarded",
       description: "guarded tool",
@@ -542,6 +554,7 @@ describe("durable inbound and Human Approval integration", () => {
       agents: {
         default: {
           model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          extensions: [toolMiddlewareExtension],
           tools: [guardedTool],
         },
       },
@@ -556,6 +569,7 @@ describe("durable inbound and Human Approval integration", () => {
 
     expect(result.status).toBe("waitingForHuman");
     expect(toolHandler).not.toHaveBeenCalled();
+    expect(middlewareCalls).toEqual(["guarded"]);
 
     const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-human" });
     expect(tasks).toHaveLength(1);
@@ -579,6 +593,9 @@ describe("durable inbound and Human Approval integration", () => {
     expect(blocked.disposition).toBe("blocked");
     expect(blocked.blocker?.type).toBe("humanApproval");
 
+    runtime.events.on("humanApproval.resuming", (event) => {
+      resumingEvents.push(event);
+    });
     await runtime.control.submitHumanResult?.({
       humanTaskId: tasks[0].id,
       result: { type: "approval", approved: true },
@@ -590,6 +607,9 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumed?.continuation?.status).toBe("completed");
     expect(resumed?.continuation?.text).toBe("approved and continued");
     expect(toolHandler).toHaveBeenCalledOnce();
+    expect(middlewareCalls).toEqual(["guarded", "guarded"]);
+    expect(resumingEvents).toHaveLength(1);
+    expect((resumingEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-human",
       statuses: ["consumed"],
@@ -792,6 +812,76 @@ describe("durable inbound and Human Approval integration", () => {
     expect(canceled?.status).toBe("canceled");
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
     expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("dead-letters blocked inbound items when expiring a Human Approval", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "secret" })),
+    };
+    currentClient = mockClient({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-expire", toolName: "guarded", args: {} }],
+    });
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-expire-human",
+      idempotencyKey: "direct-human-expire",
+    });
+    expect(result.status).toBe("waitingForHuman");
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-expire-human" });
+
+    const blocked = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "while waiting then expired" }],
+        properties: { id: "evt-expire-blocked" },
+        conversationId: "conv-expire-human",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: new Date().toISOString(),
+        },
+      },
+    });
+    expect(blocked.disposition).toBe("blocked");
+
+    const expired = await runtime.control.cancelHumanApproval?.({
+      humanApprovalId: tasks[0].humanApprovalId,
+      expired: true,
+      reason: "approval expired",
+    });
+    const pendingItems = await inboundStore.listInboundItems({
+      conversationId: "conv-expire-human",
+      statuses: ["pending"],
+    });
+    const deadLetterItems = await inboundStore.listInboundItems({
+      conversationId: "conv-expire-human",
+      statuses: ["deadLetter"],
+    });
+
+    expect(expired?.status).toBe("expired");
+    expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
+    expect(deadLetterItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 
     await runtime.close();
   });

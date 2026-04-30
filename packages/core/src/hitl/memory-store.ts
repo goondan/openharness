@@ -296,7 +296,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     }
 
     const now = input.now ?? this._now();
-    const status = input.status ?? "canceled";
+    const status = input.status ?? (input.expired ? "expired" : "canceled");
     gate.status = status;
     gate.lease = undefined;
     gate.failure = input.reason

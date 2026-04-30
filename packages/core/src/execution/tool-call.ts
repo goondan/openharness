@@ -39,9 +39,10 @@ export async function executeToolCall(
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
+    skipHumanApproval?: boolean;
   }
 ): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore, skipHumanApproval } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -73,7 +74,7 @@ export async function executeToolCall(
     }
 
     const humanApproval = tool.humanApproval;
-    if (humanApproval && humanApproval.required !== false) {
+    if (!skipHumanApproval && humanApproval && humanApproval.required !== false) {
       if (!humanApprovalStore) {
         return { type: "error", error: `Tool "${toolName}" requires a Human Approval store` };
       }

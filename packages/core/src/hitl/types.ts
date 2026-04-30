@@ -182,6 +182,7 @@ export interface FailHumanApprovalInput {
 export interface CancelHumanApprovalInput {
   humanApprovalId: string;
   reason?: string;
+  expired?: boolean;
   status?: Extract<HumanApprovalStatus, "canceled" | "expired">;
   now?: string;
 }
