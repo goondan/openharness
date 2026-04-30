@@ -356,6 +356,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     runtimeEventBus,
     durableInboundStore as DurableInboundStore | undefined,
     humanApprovalStore as HumanApprovalStore | undefined,
+    config.humanApproval?.resumeLeaseMs,
   );
   runtimeRef = runtime;
 

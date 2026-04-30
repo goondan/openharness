@@ -164,6 +164,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _runtimeEvents: EventBus;
   private readonly _durableInboundStore?: DurableInboundStore;
   private readonly _humanApprovalStore?: HumanApprovalStore;
+  private readonly _humanApprovalResumeLeaseMs: number;
   private _closed = false;
 
   constructor(
@@ -172,12 +173,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     runtimeEvents: EventBus,
     durableInboundStore?: DurableInboundStore,
     humanApprovalStore?: HumanApprovalStore,
+    humanApprovalResumeLeaseMs = 30_000,
   ) {
     this._agents = agents;
     this._ingressPipeline = ingressPipeline;
     this._runtimeEvents = runtimeEvents;
     this._durableInboundStore = durableInboundStore;
     this._humanApprovalStore = humanApprovalStore;
+    this._humanApprovalResumeLeaseMs = humanApprovalResumeLeaseMs;
   }
 
   private _conversationKey(agentName: string, conversationId: string): string {
@@ -759,10 +762,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : undefined,
       resumeHumanApproval: this._humanApprovalStore
         ? async (id: string) => {
+            const leaseTtlMs = this._humanApprovalResumeLeaseMs;
+            const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
             const gate = await this._humanApprovalStore!.acquireApprovalForResume({
               humanApprovalId: id,
               leaseOwner: "runtime",
-              leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+              leaseExpiresAt,
+              leaseTtlMs,
             } as any);
             if (!gate) {
               const existing = await (this._humanApprovalStore as any).getApproval?.(id);
@@ -860,7 +866,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     }, {
                       toolRegistry: agentDeps.toolRegistry,
                       middlewareRegistry: agentDeps.middlewareRegistry,
-                      eventBus: this._runtimeEvents,
+                      eventBus: agentDeps.eventBus,
                       humanApprovalStore: this._humanApprovalStore as any,
                       skipHumanApproval: true,
                     });

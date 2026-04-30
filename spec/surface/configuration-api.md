@@ -107,6 +107,18 @@ interface AgentConfig {
   maxSteps?: number;
 }
 
+interface DurableInboundConfig {
+  enabled?: boolean;
+  store: DurableInboundStore;
+  leaseMs?: number;
+  maxAttempts?: number;
+}
+
+interface HumanApprovalConfig {
+  store: HumanApprovalStore;
+  resumeLeaseMs?: number;
+}
+
 interface HarnessRuntime {
   processTurn(
     agentName: string,
@@ -120,11 +132,15 @@ interface HarnessRuntime {
       agentName?: string;
       reason?: string;
     }): Promise<AbortResult>;
+    listHumanTasks?(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
+    submitHumanResult?(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
+    resumeHumanApproval?(id: string): Promise<HumanApprovalResumeResult>;
+    cancelHumanApproval?(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
   };
   close(): Promise<void>;
 }
 
-type IngressDisposition = "started" | "steered";
+type IngressDisposition = "started" | "delivered" | "blocked" | "duplicate" | "steered";
 
 interface IngressAcceptResult {
   accepted: true;

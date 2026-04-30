@@ -519,8 +519,11 @@ describe("durable inbound and Human Approval integration", () => {
 
   it("creates a durable Human Approval before running a guarded tool handler", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore({
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
     const middlewareCalls: string[] = [];
+    const extensionToolDoneEvents: unknown[] = [];
     const toolMiddlewareExtension: Extension = {
       name: "approval-tool-middleware",
       register(api) {
@@ -528,9 +531,18 @@ describe("durable inbound and Human Approval integration", () => {
           middlewareCalls.push(ctx.toolName);
           return next();
         });
+        api.on("tool.done", (event) => {
+          extensionToolDoneEvents.push(event);
+        });
       },
     };
-    const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
+    let humanApprovalId = "";
+    let resumeLeaseExpiresAt: string | undefined;
+    const toolHandler = vi.fn(async () => {
+      const approval = await humanApprovalStore.getApproval(humanApprovalId);
+      resumeLeaseExpiresAt = approval?.lease?.expiresAt;
+      return { type: "text" as const, text: "secret" };
+    });
     const resumingEvents: unknown[] = [];
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -559,7 +571,7 @@ describe("durable inbound and Human Approval integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanApprovalStore as any },
+      humanApproval: { store: humanApprovalStore as any, resumeLeaseMs: 1_234 },
     }));
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -574,6 +586,7 @@ describe("durable inbound and Human Approval integration", () => {
     const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-human" });
     expect(tasks).toHaveLength(1);
     expect(tasks[0].status).toBe("waitingForHuman");
+    humanApprovalId = tasks[0].humanApprovalId;
 
     const blocked = await runtime.ingress.dispatch({
       connectionName: "test",
@@ -610,6 +623,9 @@ describe("durable inbound and Human Approval integration", () => {
     expect(middlewareCalls).toEqual(["guarded", "guarded"]);
     expect(resumingEvents).toHaveLength(1);
     expect((resumingEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
+    expect(extensionToolDoneEvents).toHaveLength(1);
+    expect((extensionToolDoneEvents[0] as any).toolName).toBe("guarded");
+    expect(resumeLeaseExpiresAt).toBe("2026-01-01T00:00:01.234Z");
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-human",
       statuses: ["consumed"],
