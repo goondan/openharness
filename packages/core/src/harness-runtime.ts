@@ -200,7 +200,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
 
     const envelope = createProgrammaticEnvelope(input, conversationId);
-    const queuedForHitl = await this.queueHitlDirectInput(agentName, input, options, conversationId);
+    const queuedForHitl = await this.queueHitlDirectInput(agentName, envelope, options, conversationId);
     if (queuedForHitl) {
       return {
         turnId,
@@ -1383,7 +1383,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
   private async queueHitlDirectInput(
     agentName: string,
-    input: string | InboundEnvelope,
+    input: InboundEnvelope,
     options: ProcessTurnOptions | undefined,
     conversationId: string,
   ): Promise<{ batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" } | null> {
@@ -1405,7 +1405,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           options: serializableProcessTurnOptions(options),
         },
         receivedAt: new Date().toISOString(),
-        metadata: typeof input === "string" ? undefined : { envelopeName: input.name },
+        metadata: { envelopeName: input.name },
       });
     } catch (err) {
       const latest = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);

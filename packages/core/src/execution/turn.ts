@@ -137,7 +137,7 @@ async function enqueueSteerWithRetry(
         input: {
           agentName,
           conversationId,
-          content: extractText(input),
+          content: input,
           options: {},
         },
         receivedAt: new Date().toISOString(),

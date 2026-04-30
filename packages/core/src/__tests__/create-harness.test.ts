@@ -1171,9 +1171,11 @@ describe("createHarness", () => {
       expect(chat).toHaveBeenCalledTimes(2);
     });
     const continuationMessages = chat.mock.calls[1]?.[0] as Message[] | undefined;
-    expect(continuationMessages?.some((message) =>
+    const queuedMessage = continuationMessages?.find((message) =>
       message.data.role === "user" && message.data.content === "must not append over barrier",
-    )).toBe(true);
+    );
+    expect(queuedMessage).toBeDefined();
+    expect(queuedMessage?.metadata?.["__eventName"]).toBe("text");
 
     await runtime.close();
   });
@@ -1882,6 +1884,14 @@ describe("createHarness", () => {
     vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
 
     const store = new InMemoryHitlStore();
+    const markBatchWaitingForHuman = store.markBatchWaitingForHuman.bind(store);
+    vi.spyOn(store, "markBatchWaitingForHuman").mockImplementation(async (batchId) => {
+      const batch = await store.getBatch(batchId);
+      if (batch?.parentBatchId) {
+        throw new Error("spawned child HITL batch should already be exposed atomically");
+      }
+      return markBatchWaitingForHuman(batchId);
+    });
     const firstHandler = vi.fn(async () => ({ type: "text" as const, text: "first stage approved" }));
     const secondHandler = vi.fn(async () => ({ type: "text" as const, text: "second stage approved" }));
     const hitlTool = (name: string, handler: ToolDefinition["handler"]): ToolDefinition => ({

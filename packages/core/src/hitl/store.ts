@@ -635,6 +635,9 @@ export class InMemoryHitlStore implements HitlStore {
       }
     }
     const now = nowIso();
+    if (input.childBatch.status !== "preparing" && input.childBatch.status !== "waitingForHuman") {
+      throw new HitlStoreError("Child HITL batch must start preparing or waitingForHuman");
+    }
     const continuationOutcome: HitlContinuationOutcome = {
       outcome: "spawnedChild",
       recordedAt: now,
@@ -651,7 +654,7 @@ export class InMemoryHitlStore implements HitlStore {
     });
     const child = touchBatch({
       ...clone(input.childBatch),
-      status: "preparing",
+      status: input.childBatch.status,
       parentBatchId: parent.batchId,
       childBatchId: undefined,
       toolResults: input.childBatch.toolResults.map(clone),

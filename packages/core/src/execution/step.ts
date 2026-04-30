@@ -237,7 +237,7 @@ export async function executeStep(
 
         const childBatch = {
           batchId,
-          status: "preparing" as const,
+          status: parentHitlBatch ? "waitingForHuman" as const : "preparing" as const,
           agentName,
           conversationId,
           turnId,
@@ -263,7 +263,14 @@ export async function executeStep(
           if (nonHitlPeer) {
             throw new Error("Chained HITL steps cannot mix HITL requests with non-HITL peer tool calls");
           }
-          await hitlStore.spawnChildBatch({
+          for (const tc of plannedToolCalls) {
+            toolCallResults.push({
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+            });
+          }
+          const { child: waitingBatch } = await hitlStore.spawnChildBatch({
             parentBatchId: parentHitlBatch.batchId,
             parentCompletion: {
               completedAt: now,
@@ -275,6 +282,16 @@ export async function executeStep(
             childRequests: requests,
             guard: parentHitlBatch.guard,
           });
+          eventBus.emit("hitl.batch.requested", {
+            type: "hitl.batch.requested",
+            batch: toHitlBatchView(waitingBatch, requests),
+          });
+          for (const request of requests) {
+            eventBus.emit("hitl.requested", {
+              type: "hitl.requested",
+              request: toHitlRequestView(request),
+            });
+          }
         } else {
           const created = await hitlStore.createBatch({
             batch: childBatch,
@@ -283,63 +300,62 @@ export async function executeStep(
           if (created.status === "conflict") {
             throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
           }
-        }
+          let exposedForHuman = false;
+          try {
+            for (const tc of plannedToolCalls) {
+              if (tc.requiresHitl) {
+                toolCallResults.push({
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  args: tc.args,
+                });
+                continue;
+              }
 
-        let exposedForHuman = false;
-        try {
-          for (const tc of plannedToolCalls) {
-            if (tc.requiresHitl) {
+              const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
+                toolRegistry,
+                middlewareRegistry,
+                eventBus,
+                hitlStore,
+                batchId,
+              }));
+
+              await hitlStore.recordBatchToolResult(batchId, {
+                batchId,
+                toolCallId: tc.toolCallId,
+                toolCallIndex: tc.toolCallIndex,
+                toolName: tc.toolName,
+                result,
+                recordedAt: new Date().toISOString(),
+              });
+
               toolCallResults.push({
                 toolCallId: tc.toolCallId,
                 toolName: tc.toolName,
                 args: tc.args,
+                result,
               });
-              continue;
             }
 
-            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
-              toolRegistry,
-              middlewareRegistry,
-              eventBus,
-              hitlStore,
-              batchId,
-            }));
-
-            await hitlStore.recordBatchToolResult(batchId, {
-              batchId,
-              toolCallId: tc.toolCallId,
-              toolCallIndex: tc.toolCallIndex,
-              toolName: tc.toolName,
-              result,
-              recordedAt: new Date().toISOString(),
+            const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
+            exposedForHuman = true;
+            const waitingRequests = await hitlStore.listBatchRequests(batchId);
+            eventBus.emit("hitl.batch.requested", {
+              type: "hitl.batch.requested",
+              batch: toHitlBatchView(waitingBatch, waitingRequests),
             });
-
-            toolCallResults.push({
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: tc.args,
-              result,
-            });
+            for (const request of waitingRequests) {
+              eventBus.emit("hitl.requested", {
+                type: "hitl.requested",
+                request: toHitlRequestView(request),
+              });
+            }
+          } catch (err) {
+            if (!exposedForHuman) {
+              await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
+            }
+            throw err;
           }
-
-          const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
-          exposedForHuman = true;
-          const waitingRequests = await hitlStore.listBatchRequests(batchId);
-          eventBus.emit("hitl.batch.requested", {
-            type: "hitl.batch.requested",
-            batch: toHitlBatchView(waitingBatch, waitingRequests),
-          });
-          for (const request of waitingRequests) {
-            eventBus.emit("hitl.requested", {
-              type: "hitl.requested",
-              request: toHitlRequestView(request),
-            });
-          }
-        } catch (err) {
-          if (!exposedForHuman) {
-            await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
-          }
-          throw err;
         }
       } else {
         for (const tc of plannedToolCalls) {
