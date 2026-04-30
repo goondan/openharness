@@ -187,6 +187,7 @@ export interface HitlRequestRecord {
   createdAt: string;
   updatedAt: string;
   expiresAt?: string;
+  onTimeout?: "reject" | "expire";
   result?: HitlHumanResult;
   completion?: HitlCompletion;
   failure?: HitlFailure;
@@ -242,6 +243,11 @@ export type HitlQueuedSteer = HitlQueuedSteerInput & {
   batchId: string;
   status: "queued" | "draining" | "drained" | "canceled";
 };
+
+export interface ExpireHitlBatchInput {
+  batchId: string;
+  reason?: string;
+}
 
 export type CreateHitlBatchResult =
   | { status: "created"; batch: HitlBatchRecord; requests: HitlRequestRecord[] }
@@ -323,6 +329,7 @@ export interface HitlStore {
   ): Promise<HitlBatchRecord>;
   recordBatchToolResult(batchId: string, result: HitlBatchToolResult): Promise<HitlBatchRecord>;
   markBatchWaitingForHuman(batchId: string): Promise<HitlBatchRecord>;
+  expireBatch(input: ExpireHitlBatchInput): Promise<HitlBatchRecord>;
 
   resolveRequest(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;
   rejectRequest(requestId: string, result: HitlHumanResult, idempotencyKey?: string): Promise<HitlRequestRecord>;

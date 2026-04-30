@@ -17,6 +17,7 @@ import type { EventBus } from "../event-bus.js";
 import { executeToolCall } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 import { createHitlBatchId, createHitlRequestId, toHitlBatchView, toHitlRequestView } from "../hitl/store.js";
+import { ChainedChildPrepFailureError } from "../hitl/errors.js";
 
 interface CanonicalToolCall {
   toolCallId: string;
@@ -33,6 +34,7 @@ interface PlannedToolCall extends CanonicalToolCall {
   prompt?: string;
   responseSchema?: HitlResponseSchema;
   expiresAt?: string;
+  onTimeout?: "reject" | "expire";
 }
 
 function toToolResultOutput(toolResult: ToolResult) {
@@ -232,6 +234,7 @@ export async function executeStep(
               createdAt: now,
               updatedAt: now,
               ...(tc.expiresAt ? { expiresAt: tc.expiresAt } : {}),
+              ...(tc.onTimeout ? { onTimeout: tc.onTimeout } : {}),
             };
           });
 
@@ -304,6 +307,30 @@ export async function executeStep(
               batchId,
             }));
 
+            if (tc.malformedResult) {
+              eventBus.emit("tool.start", {
+                type: "tool.start",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+              });
+              eventBus.emit("tool.done", {
+                type: "tool.done",
+                turnId,
+                agentName,
+                conversationId,
+                stepNumber,
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                args: tc.args,
+                result: tc.malformedResult,
+              });
+            }
+
             await hitlStore.recordBatchToolResult(batchId, {
               batchId,
               toolCallId: tc.toolCallId,
@@ -344,14 +371,13 @@ export async function executeStep(
           // exposed, the child has been closed terminally above; the outer resume layer must
           // observe this and not attempt to re-fail the already-completed parent. We rely on
           // `_recordHitlBatchFailure()` re-reading the parent's state and short-circuiting on
-          // post-spawn terminal completion. The `__chainedChildPrepFailure` marker is set ONLY
-          // when the failure happened during child preparation (peer execution / atomic
-          // exposure) — not for post-exposure listener exceptions, which must surface
-          // unchanged so listener bugs are not silently swallowed.
+          // post-spawn terminal completion. We wrap the failure in a typed
+          // `ChainedChildPrepFailureError` ONLY when it happened during child preparation
+          // (peer execution / atomic exposure) — post-exposure listener exceptions must
+          // surface unchanged so listener bugs are not silently swallowed.
           if (spawnedFromParent && !exposedForHuman) {
-            const wrapped = err instanceof Error ? err : new Error(String(err));
-            (wrapped as Error & { __chainedChildPrepFailure?: boolean }).__chainedChildPrepFailure = true;
-            throw wrapped;
+            const cause = err instanceof Error ? err : new Error(String(err));
+            throw new ChainedChildPrepFailureError(cause);
           }
           throw err;
         }
@@ -526,7 +552,10 @@ async function planToolCallsForHitl(
       ...(prompt ? { prompt } : {}),
       responseSchema: tool.hitl.response,
       ...(tool.hitl.ttlMs
-        ? { expiresAt: new Date(Date.now() + tool.hitl.ttlMs).toISOString() }
+        ? {
+            expiresAt: new Date(Date.now() + tool.hitl.ttlMs).toISOString(),
+            onTimeout: tool.hitl.onTimeout ?? "expire",
+          }
         : {}),
     });
   }

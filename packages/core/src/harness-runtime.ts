@@ -37,6 +37,7 @@ import { executeContinuationTurn, executeTurn, type TurnSteeringController } fro
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
 import { toHitlBatchView, toHitlRequestView } from "./hitl/store.js";
+import { isChainedChildPrepFailureError } from "./hitl/errors.js";
 import _Ajv2020 from "ajv/dist/2020.js";
 import _addFormats from "ajv-formats";
 
@@ -411,21 +412,25 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       },
       listPendingHitl: async (filter?: HitlRequestFilter): Promise<HitlRequestView[]> => {
         const hitlStore = this._getHitlStore();
+        await this._settleExpiredHitlBatches({ agentName: filter?.agentName, conversationId: filter?.conversationId });
         const records = await hitlStore.listPendingRequests(filter);
         return records.map(toHitlRequestView);
       },
       listPendingHitlBatches: async (filter?: HitlBatchFilter): Promise<HitlBatchView[]> => {
         const hitlStore = this._getHitlStore();
+        await this._settleExpiredHitlBatches(filter);
         const records = await hitlStore.listPendingBatches(filter);
         return Promise.all(records.map((record) => this._toHitlBatchView(record)));
       },
       getHitlBatch: async (batchId: string): Promise<HitlBatchView | null> => {
         const hitlStore = this._getHitlStore();
+        await this._settleExpiredHitlBatches();
         const record = await hitlStore.getBatch(batchId);
         return record ? this._toHitlBatchView(record) : null;
       },
       getHitlRequest: async (requestId: string): Promise<HitlRequestView | null> => {
         const hitlStore = this._getHitlStore();
+        await this._settleExpiredHitlBatches();
         const record = await hitlStore.getRequest(requestId);
         return record ? toHitlRequestView(record) : null;
       },
@@ -434,6 +439,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           return { status: "error", requestId: input.requestId, error: "Runtime is closed" };
         }
         const hitlStore = this._getHitlStore();
+        await this._settleExpiredHitlBatches({ agentName: input.agentName, conversationId: input.conversationId });
         const record = await safeGetHitlRecord(hitlStore, input.requestId);
         if (record instanceof Error) {
           return { status: "error", requestId: input.requestId, error: record.message };
@@ -518,6 +524,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         return { status: "accepted", request: requestView, resume };
       },
       resumeHitlBatch: async (batchId: string) => {
+        await this._settleExpiredHitlBatches();
         if (this._closed) {
           return { status: "error", batchId, error: "Runtime is closed" };
         }
@@ -528,6 +535,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           : task.promise;
       },
       resumeHitl: async (requestId: string) => {
+        await this._settleExpiredHitlBatches();
         if (this._closed) {
           return { status: "error", requestId, error: "Runtime is closed" };
         }
@@ -1216,15 +1224,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     // Per spec §8.5 step 12.1, after a chained `spawnChildBatch()` commits, the parent is
     // atomically `completed(spawnedChild)` with its lease released. If the post-spawn child
     // preparation fails, the child has already been closed terminally by step.ts and step.ts
-    // tags the thrown error with `__chainedChildPrepFailure`. The parent must NOT be re-failed
-    // (its lease is gone and its terminal state is correct). Surface the child's current
-    // terminal state instead so the operator sees the real handoff outcome. We require BOTH
-    // the spec-defined parent state AND the explicit step.ts marker so unrelated post-spawn
-    // resume errors (e.g., `eventBus.emit` listener throwing) are NOT silently swallowed.
-    const isChainedChildPrepFailure = Boolean(
-      (error as Error & { __chainedChildPrepFailure?: boolean }).__chainedChildPrepFailure,
-    );
-    if (isChainedChildPrepFailure) {
+    // wraps the thrown error in a `ChainedChildPrepFailureError`. The parent must NOT be
+    // re-failed (its lease is gone and its terminal state is correct). Surface the child's
+    // current terminal state instead so the operator sees the real handoff outcome. We
+    // require BOTH the spec-defined parent state AND the typed marker so unrelated
+    // post-spawn resume errors (e.g., `eventBus.emit` listener throwing) are NOT silently
+    // swallowed.
+    if (isChainedChildPrepFailureError(error)) {
       const latestParent = await this._hitlStore.getBatch(batch.batchId).catch(() => null);
       if (
         latestParent?.status === "completed" &&
@@ -1391,6 +1397,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     if (!this._hitlStore) {
       return null;
     }
+    await this._settleExpiredHitlBatches({ agentName, conversationId });
     const batch = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);
     if (!batch) {
       return null;
@@ -1423,6 +1430,65 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       pendingRequestIds,
       disposition: "queuedForHitl",
     };
+  }
+
+
+  private async _settleExpiredHitlBatches(filter?: Pick<HitlBatchFilter, "agentName" | "conversationId">): Promise<void> {
+    if (!this._hitlStore) {
+      return;
+    }
+    const now = Date.now();
+    const batches = await this._hitlStore.listRecoverableBatches(filter);
+    for (const batch of batches) {
+      const requests = await this._hitlStore.listBatchRequests(batch.batchId);
+      const expiredPending = requests.filter((request) => {
+        if (request.status !== "pending" || !request.expiresAt) {
+          return false;
+        }
+        const expiresAt = Date.parse(request.expiresAt);
+        return Number.isFinite(expiresAt) && expiresAt <= now;
+      });
+      if (expiredPending.length === 0) {
+        continue;
+      }
+
+      if (expiredPending.some((request) => (request.onTimeout ?? "expire") === "expire")) {
+        await this._hitlStore.expireBatch({
+          batchId: batch.batchId,
+          reason: "HITL request timed out",
+        });
+        continue;
+      }
+
+      let latestBatch = batch;
+      for (const request of expiredPending) {
+        await this._hitlStore.rejectRequest(
+          request.requestId,
+          {
+            kind: "reject",
+            reason: "HITL request timed out",
+            submittedAt: new Date(now).toISOString(),
+          },
+          `hitl-timeout:${request.requestId}`,
+        );
+        const latest = await this._hitlStore.getBatch(batch.batchId);
+        if (latest) {
+          latestBatch = latest;
+        }
+        this._runtimeEvents.emit("hitl.rejected", {
+          type: "hitl.rejected",
+          batchId: batch.batchId,
+          requestId: request.requestId,
+          turnId: batch.turnId,
+          toolCallId: request.toolCallId,
+          conversationId: batch.conversationId,
+          reason: "HITL request timed out",
+        });
+      }
+      if (latestBatch.status === "ready") {
+        this._scheduleReadyHitlBatchResume(latestBatch);
+      }
+    }
   }
 
   private async queueHitlDirectInput(
@@ -1478,6 +1544,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     if (!this._hitlStore) {
       return false;
     }
+    await this._settleExpiredHitlBatches({ agentName, conversationId });
     const batches = await this._hitlStore.listRecoverableBatches({ agentName, conversationId });
     return batches.length > 0;
   }

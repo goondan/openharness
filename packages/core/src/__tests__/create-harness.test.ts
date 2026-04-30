@@ -3100,17 +3100,35 @@ describe("createHarness", () => {
   });
 
   it("does not leak unhandled rejections when startup recovery store read fails", async () => {
-    const runtime = await createHarness({
-      agents: {
-        default: {
-          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
-        },
-      },
-      hitl: { store: new FailingRecoverStore(), resumeOnStartup: true },
-    });
+    const unhandledRejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await runtime.close();
+    try {
+      const runtime = await createHarness({
+        agents: {
+          default: {
+            model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          },
+        },
+        hitl: { store: new FailingRecoverStore(), resumeOnStartup: true },
+      });
+
+      // Yield long enough for the fire-and-forget startup recovery promise to settle.
+      // Multiple setImmediate ticks flush the microtask queue *and* any IO callbacks
+      // queued by it, which is necessary because `listRecoverableBatches()` rejection
+      // bubbles via a .catch() chained inside the async runtime startup path.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      await runtime.close();
+
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   // -----------------------------------------------------------------------
@@ -3973,4 +3991,92 @@ describe("createHarness", () => {
 
     await runtime.close();
   });
+
+  it("expires HITL requests after ttl and releases the conversation barrier", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [{ toolCallId: "ttl-call", toolName: "ttl_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new InMemoryHitlStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "ttl_tool",
+              description: "expires",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" }, ttlMs: 5, onTimeout: "expire" },
+              handler,
+            },
+          ],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "need approval", { conversationId: "ttl-expire-conv" });
+    expect(result.status).toBe("waitingForHuman");
+    const request = await runtime.control.getHitlRequest(firstPendingHitlRequestId(result));
+    expect(request?.expiresAt).toBeDefined();
+    expect(request?.onTimeout).toBe("expire");
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await runtime.control.listPendingHitl({ conversationId: "ttl-expire-conv" })).toHaveLength(0);
+    const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+    expect(batch?.status).toBe("expired");
+    expect(handler).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
+  it("rejects timed-out HITL requests when onTimeout is reject and resumes the batch", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [{ toolCallId: "ttl-reject-call", toolName: "ttl_reject_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({ text: "continued", toolCalls: [], finishReason: "stop" } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "ttl_reject_tool",
+              description: "rejects",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" }, ttlMs: 5, onTimeout: "reject" },
+              handler,
+            },
+          ],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "need approval", { conversationId: "ttl-reject-conv" });
+    expect(result.status).toBe("waitingForHuman");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await runtime.control.listPendingHitl({ conversationId: "ttl-reject-conv" })).toHaveLength(0);
+
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("completed");
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
 });

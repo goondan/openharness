@@ -4,6 +4,7 @@ import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
 import { createConversationState } from "../../conversation-state.js";
+import { InMemoryHitlStore } from "../../hitl/store.js";
 import type {
   StepContext,
   StepResult,
@@ -651,4 +652,34 @@ describe("executeStep", () => {
       expect.any(Object) // AbortSignal
     );
   });
+
+  it("emits events for malformed non-HITL peers inside a HITL batch", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register({
+      ...makeTool("approval_tool"),
+      hitl: { mode: "required", response: { type: "approval" } },
+    });
+
+    const eventBus = new EventBus();
+    const emitted: string[] = [];
+    eventBus.on("tool.start", () => emitted.push("tool.start"));
+    eventBus.on("tool.done", () => emitted.push("tool.done"));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "bad-call", toolName: "missing_tool", args: {} },
+        { toolCallId: "approval-call", toolName: "approval_tool", args: { value: "ok" } },
+      ],
+    });
+
+    const result = await executeStep(makeStepContext(), {
+      ...makeDeps({ llmClient, toolRegistry, eventBus }),
+      hitlStore: new InMemoryHitlStore(),
+    });
+
+    expect(result.pendingHitlBatchId).toBeDefined();
+    expect(result.pendingHitlRequestIds).toHaveLength(1);
+    expect(emitted).toEqual(["tool.start", "tool.done"]);
+  });
+
 });

@@ -19,6 +19,24 @@ import { randomUUID } from "node:crypto";
 // Config
 // -----------------------------------------------------------------------
 
+/**
+ * Outcome returned by `dispatchTurn`. Discriminated by `disposition`:
+ * - `"queuedForHitl"` carries `batchId` + `pendingRequestIds` (no `turnId`)
+ * - any other `IngressDisposition` carries `turnId`
+ */
+export type DispatchTurnOutcome =
+  | { turnId: string; disposition: IngressDisposition }
+  | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" };
+
+/**
+ * Narrowing type guard for the `queuedForHitl` branch of `DispatchTurnOutcome`.
+ */
+export function isQueuedForHitlOutcome(
+  outcome: DispatchTurnOutcome,
+): outcome is Extract<DispatchTurnOutcome, { disposition: "queuedForHitl" }> {
+  return outcome.disposition === "queuedForHitl";
+}
+
 export interface IngressPipelineConfig {
   connections: Map<
     string,
@@ -42,13 +60,7 @@ export interface IngressPipelineConfig {
     agentName: string,
     envelope: InboundEnvelope,
     conversationId: string,
-  ) =>
-    | { turnId: string; disposition: IngressDisposition }
-    | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" }
-    | Promise<
-        | { turnId: string; disposition: IngressDisposition }
-        | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" }
-      >;
+  ) => DispatchTurnOutcome | Promise<DispatchTurnOutcome>;
 }
 
 // -----------------------------------------------------------------------
@@ -300,7 +312,7 @@ export class IngressPipeline implements IngressApi {
       return null;
     }
 
-    const acceptResult: IngressAcceptResult = dispatchOutcome.disposition === "queuedForHitl" && "batchId" in dispatchOutcome
+    const acceptResult: IngressAcceptResult = isQueuedForHitlOutcome(dispatchOutcome)
       ? {
           accepted: result.accepted,
           connectionName: result.connectionName,

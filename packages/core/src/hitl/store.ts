@@ -1,6 +1,7 @@
 import type {
   CancelHitlBatchInput,
   CreateHitlBatchResult,
+  ExpireHitlBatchInput,
   HitlBatchAppendCommit,
   HitlBatchCompletion,
   HitlBatchFilter,
@@ -347,6 +348,54 @@ export class InMemoryHitlStore implements HitlStore {
     const status = hasPendingRequests(batch.batchId, this.requests) ? "waitingForHuman" : "ready";
     const updated = touchBatch({ ...batch, status });
     this.batches.set(batchId, updated);
+    return clone(updated);
+  }
+
+
+  async expireBatch(input: ExpireHitlBatchInput): Promise<HitlBatchRecord> {
+    const batch = mustGetBatch(this.batches, input.batchId);
+    if (isTerminalBatchStatus(batch)) {
+      return clone(batch);
+    }
+    if (
+      batch.status !== "preparing" &&
+      batch.status !== "waitingForHuman" &&
+      batch.status !== "ready" &&
+      batch.status !== "blocked" &&
+      !(batch.status === "failed" && batch.failure?.retryable === true)
+    ) {
+      throw new HitlStoreError(`Cannot expire HITL batch from ${batch.status}`);
+    }
+
+    for (const request of this.requests.values()) {
+      if (request.batchId === input.batchId && !isTerminalRequestStatus(request.status)) {
+        this.requests.set(
+          request.requestId,
+          touchRequest({
+            ...request,
+            status: "expired",
+            metadata: {
+              ...request.metadata,
+              ...(input.reason ? { expireReason: input.reason } : {}),
+            },
+          }),
+        );
+      }
+    }
+
+    const steers = this.queuedSteers.get(input.batchId) ?? [];
+    this.queuedSteers.set(input.batchId, steers.map((item) => ({ ...item, status: "canceled" })));
+
+    const updated = touchBatch({
+      ...batch,
+      status: "expired",
+      metadata: {
+        ...batch.metadata,
+        ...(input.reason ? { expireReason: input.reason } : {}),
+      },
+      lease: undefined,
+    });
+    this.batches.set(input.batchId, updated);
     return clone(updated);
   }
 

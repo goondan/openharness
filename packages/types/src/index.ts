@@ -129,6 +129,7 @@ export type {
   CancelHitlResult,
   CreateHitlBatchResult,
   CreateHitlRequestResult,
+  ExpireHitlBatchInput,
   HitlBatchAppendCommit,
   HitlBatchCompletion,
   HitlBatchFilter,
