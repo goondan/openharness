@@ -306,7 +306,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           turnId: appended.item.turnId ?? `turn-${randomUUID()}`,
           agentName,
           conversationId,
-          status: appended.item.status === "blocked" ? "waitingForHuman" : "waitingForHuman",
+          status: appended.item.status === "blocked" ? "waitingForHuman" : "completed",
           steps: [],
         };
       }
@@ -474,7 +474,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         ? async (input: any) => {
             const result = await this._humanGateStore!.submitResult(input);
             const status = (result as any).task?.status;
-            if ((result as any).status === "accepted" || (result as any).status === "duplicate" || (result as any).accepted) {
+            if ((result as any).status === "accepted" || (result as any).accepted) {
               const task = (result as any).task;
               const gate = (result as any).gate;
               this._runtimeEvents.emit(status === "rejected" ? "humanTask.rejected" : "humanTask.resolved", {

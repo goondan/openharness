@@ -89,12 +89,14 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       updatedAt: now,
     }));
 
+    const duplicateTaskId = tasks.find((task) => this._tasks.has(task.id));
+    if (duplicateTaskId) {
+      throw new Error(`Duplicate human task id: "${duplicateTaskId.id}".`);
+    }
+
     this._gates.set(gate.id, gate);
     this._gateIdByToolCall.set(toolCallKey, gate.id);
     for (const task of tasks) {
-      if (this._tasks.has(task.id)) {
-        throw new Error(`Duplicate human task id: "${task.id}".`);
-      }
       this._tasks.set(task.id, task);
     }
     this._blockerByConversation.set(
