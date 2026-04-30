@@ -6,7 +6,7 @@ OpenHarness는 사람이 승인하거나 값을 보완해야 하는 tool call을
 
 ## 2. Design Premises
 
-이 스펙은 원하는 최종 계약을 정의한다. `HitlStore`와 runtime은 아래 전제를 동시에 만족해야 한다.
+이 스펙은 원하는 최종 계약을 정의한다. 구현이 이 계약을 따라야 하며, 현재 구현이 spec과 어긋나는 지점은 구현 측 수정 대상이지 spec 측 양보 대상이 아니다. `HitlStore`와 runtime은 아래 전제를 동시에 만족해야 한다.
 
 1. **Store is the durability boundary.** Runtime 선행 체크가 맞게 호출해주기를 기대하면 안 된다. `HitlStore` 메서드 하나하나가 atomic하고, idempotency와 conflict guard를 스스로 강제해야 한다.
 2. **Batch is one LLM step barrier.** 한 step에서 HITL tool call이 하나라도 있으면 그 step의 tool call 전체가 하나의 `HitlBatch`에 속한다.
@@ -481,28 +481,33 @@ Required store semantics:
 
 #### 9.4.1 Supporting types
 
-`HitlStore`와 Runtime control API에 등장하는 보조 타입은 아래 형태를 갖는다. adapter 구현자는 이 형태를 만족해야 하며, 추가 metadata 필드는 자유롭게 보유할 수 있다.
+이 절은 §2 Design Premises를 따른다 — 스펙이 원하는 최종 계약을 정의하고, 구현은 이 형태를 따라야 한다. 현재 구현이 아래 형태와 어긋나는 지점은 구현 측 수정 대상이지 spec 측 양보 대상이 아니다.
 
 **Lease & guard**
 
 ```ts
 interface HitlLease {
+  batchId: string;
   ownerId: string;
-  token: string;            // fencing token, monotonic per (batchId, owner)
+  fencingToken: string;            // monotonic per batchId
+  acquiredAt: string;
   expiresAt: string;
 }
 
 interface HitlLeaseGuard {
+  batchId: string;                 // guard는 발급된 batch에 대해서만 유효해야 한다
   ownerId: string;
-  token: string;            // matches HitlLease.token
+  fencingToken: string;
 }
 
 type HitlBatchLeaseResult =
-  | { status: "acquired"; guard: HitlLeaseGuard; batch: HitlBatchRecord }
-  | { status: "busy"; batch: HitlBatchRecord | null };
+  | { status: "acquired"; lease: HitlLease; guard: HitlLeaseGuard; batch: HitlBatchRecord }
+  | { status: "busy"; currentLease: HitlLease; batch: HitlBatchRecord }
+  | { status: "batchTerminal"; batch: HitlBatchRecord }
+  | { status: "notFound"; batchId: string };
 ```
 
-`token`은 `acquireBatchLease()`가 발급하고 모든 mutation 메서드에 `HitlLeaseGuard`로 전달된다. store는 stale guard 거부에 이 token을 fencing token으로 사용해야 한다.
+`fencingToken`은 `acquireBatchLease()`가 batch 단위로 monotonic하게 발급한다. store의 모든 mutation 메서드는 전달된 guard의 `(batchId, ownerId, fencingToken)` 삼중을 검증해야 한다. `batchId`를 guard에 포함시키는 이유는 한 owner가 여러 batch를 lease 받을 때 다른 batch의 guard를 잘못 적용하는 사고를 store level에서 차단하기 위함이다.
 
 **Tool call/result records**
 
@@ -511,43 +516,43 @@ interface HitlBatchToolCallSnapshot {
   toolCallId: string;
   toolCallIndex: number;
   toolName: string;
-  toolArgs: JsonObject;
-  requiresHitl: boolean;
-  requestId?: string;       // present iff requiresHitl
+  args: JsonObject;
+  hitlRequired: boolean;
+  requestId?: string;              // present iff hitlRequired
 }
 
 interface HitlBatchToolExecutionMarker {
-  batchId?: string;
+  batchId: string;
   toolCallId: string;
   toolCallIndex: number;
-  toolName: string;
-  requestId?: string;       // present iff this marker belongs to a HITL request
+  requestId?: string;              // present iff this marker belongs to a HITL request
   startedAt: string;
+  ownerId: string;                 // owner that started the side-effect
+  fencingToken: string;            // fencing token at the time of start
 }
 
 interface HitlBatchToolResult {
   batchId: string;
   toolCallId: string;
   toolCallIndex: number;
-  toolName: string;
-  result: ToolResult;
+  toolResult: ToolResult;
   finalArgs?: JsonObject;
   recordedAt: string;
+  source: "non-hitl-peer" | "hitl-handler" | "hitl-rejection";
+  requestId?: string;              // present iff source !== "non-hitl-peer"
 }
 ```
 
-`HitlBatchToolExecutionMarker`/`HitlBatchToolResult`는 startup recovery에서 `preparing` 수렴 분기를 결정한다 (§8.6 step 6~8 참조).
+`HitlBatchToolResult.source`는 §8.6 startup recovery에서 `preparing` 수렴 분기를 결정한다 (peer result vs hitl handler result vs rejection 구분). `HitlBatchToolExecutionMarker.ownerId`/`fencingToken`은 fence-aware recovery에 필요하다 — recovery가 stale owner의 marker를 식별해 같은 fencing 줄을 따르도록 강제한다.
 
 **Append commit & completion**
 
 ```ts
 interface HitlBatchAppendCommit {
-  committedAt: string;
-  toolResultEventIds: string[];
-  queuedSteerEventIds: string[];
-  queuedSteerIds: string[];
+  appendedToolResultIds: string[];   // tool-result message ID들 (deterministic order)
+  appendedQueuedSteerIds: string[];  // queued steer로부터 append된 message ID들
   continuationTurnId: string;
-  conversationEvents?: MessageEvent[];
+  committedAt: string;
 }
 
 interface HitlCompletion {
@@ -557,21 +562,22 @@ interface HitlCompletion {
 }
 
 interface HitlBatchCompletion {
-  completedAt: string;
   continuationTurnId: string;
-  continuationStatus: "completed" | "maxStepsReached" | "waitingForHuman";
+  outcome: "completed" | "maxStepsReached"; // §8.5 step 13의 successful terminal state만 허용
+  completedAt: string;
 }
 ```
 
-`HitlBatchCompletion.continuationStatus`는 continuation이 도달한 자연 종착점이다. `waitingForHuman`은 continuation 안에서 새 HITL barrier가 생긴 경우(체인된 HITL)를 가리킨다.
+`HitlBatchCompletion.outcome`은 `completeBatch()`가 호출 가능한 두 successful terminal state로 한정한다. continuation 안에서 새 HITL barrier가 생긴 경우(chained HITL)는 completion이 아니라 새 batch 생성으로 처리되며, 이전 batch는 별도로 close된다. `maxStepsReached`는 step budget을 다 쓰고 conversation이 정상 종결된 successful terminal로 간주한다.
 
 **Failure**
 
 ```ts
 interface HitlFailure {
   error: string;
-  retryable: boolean;       // §7.1의 failed(retryable)/failed(nonRetryable) 분기를 결정
+  retryable: boolean;              // §7.1의 failed(retryable)/failed(nonRetryable) 분기를 결정
   failedAt: string;
+  cause?: JsonValue;               // 디버깅·로그 용 raw cause (선택)
 }
 ```
 
@@ -579,7 +585,7 @@ interface HitlFailure {
 
 ```ts
 interface HitlQueuedSteerInput {
-  source: "ingress" | "dispatch";   // "dispatch" = direct processTurn() 입력
+  source: "ingress" | "direct";    // "direct" = direct processTurn() 입력
   envelope: InboundEnvelope;
   receivedAt: string;
   metadata?: Record<string, JsonValue>;
@@ -591,6 +597,8 @@ interface HitlQueuedSteer extends HitlQueuedSteerInput {
   status: "queued" | "draining" | "drained" | "canceled";
 }
 ```
+
+`source: "direct"`는 §10 Runtime Responsibility의 "direct `processTurn()` barrier handling" 표현과 일치시키기 위한 정식 명명이다.
 
 **Filters & views**
 
