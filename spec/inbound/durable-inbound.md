@@ -244,7 +244,7 @@ interface DurableInboundStore {
 - `runtime.ingress.receive()` and `runtime.ingress.dispatch()` return accepted handles with `inboundItemId` in durable mode.
 - `runtime.processTurn()` durable mode preserves the existing `TurnResult` contract while using append-first processing internally.
 - `runtime.control.listInboundItems(filter)` exposes pending/blocked/failed/deadLetter item views.
-- `runtime.control.retryInboundItem(id)`, `deadLetterInboundItem(id)`, `releaseInboundItem(id)` provide operator control.
+- `runtime.control.retryInboundItem(id)`, `deadLetterInboundItem(id)` provide operator control; `releaseInboundItem(id)` is exposed only when the configured store implements true release semantics.
 
 ### 5.3 Event Contract
 
@@ -328,6 +328,7 @@ interface DurableInboundStore {
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item이 append된다, Then item은 durable store에 남고 active Turn은 Step 경계에서 그 item을 user message로 반영한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item을 deliver한다, Then runtime은 `markDelivered()` 성공 이후에만 active Turn memory steering inbox에 notify한다.
 - Given active Turn delivery가 `markDelivered()` 이후 consume 전에 crash된다, When operator/recovery가 `retryInboundItem()` 또는 `releaseInboundItem()`을 호출한다, Then item은 `pending`으로 돌아가 다시 처리 가능하다.
+- Given durable store가 `releaseInboundItem`를 구현하지 않는다, When runtime control API가 생성된다, Then `releaseInboundItem` control은 노출되지 않고 `retryInboundItem` fallback으로 leased release를 흉내내지 않는다.
 - Given durable direct input이 active Turn에 delivered 된 뒤 consumed 된다, When 같은 idempotency key로 duplicate direct call이 들어온다, Then runtime은 cached active Turn result를 반환하고 consumed item을 aborted/error로 보고하지 않는다.
 - Given conversation이 human approval로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanApproval` metadata와 함께 `blocked`가 된다.
 - Given human approval이 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.

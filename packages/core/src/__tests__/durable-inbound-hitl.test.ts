@@ -174,6 +174,27 @@ describe("durable inbound and Human Approval integration", () => {
     expect(released.blockedBy).toBeUndefined();
   });
 
+  it("does not expose releaseInboundItem control when the store has no release API", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const storeWithoutRelease = new Proxy(inboundStore, {
+      get(target, property, receiver) {
+        if (property === "releaseInboundItem") {
+          return undefined;
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: storeWithoutRelease as any },
+    }));
+
+    expect(runtime.control.releaseInboundItem).toBeUndefined();
+
+    await runtime.close();
+  });
+
   it("appends ingress input before returning a durable accepted result", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const runtime = await createHarness(baseConfig({

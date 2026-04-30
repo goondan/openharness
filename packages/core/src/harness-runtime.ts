@@ -841,16 +841,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             return item;
           }
         : undefined,
-      releaseInboundItem: this._durableInboundStore
+      releaseInboundItem: this._durableInboundStore?.releaseInboundItem
         ? async (input: any) => {
-            let item: DurableInboundItem;
-            if (this._durableInboundStore!.releaseInboundItem) {
-              item = await this._durableInboundStore!.releaseInboundItem(
-                typeof input === "string" ? { id: input } : input,
-              );
-            } else {
-              item = await this._durableInboundStore!.retryInboundItem(typeof input === "string" ? input : input.id);
-            }
+            const item = await this._durableInboundStore!.releaseInboundItem!(
+              typeof input === "string" ? { id: input } : input,
+            );
             this._scheduleDurableInboundItemInBackground(item as any);
             return item;
           }
