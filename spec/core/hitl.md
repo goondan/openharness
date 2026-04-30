@@ -31,7 +31,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   2. core는 ToolCall snapshot, prompt, expected result schema, conversation cursor/snapshot을 포함한 approval record를 만든다.
   3. core는 `HumanApprovalStore.createApproval()`를 호출해 approval와 task를 atomically 저장한다.
   4. `HumanApprovalStore.createApproval()`는 approval/task 저장과 conversation blocker `humanApproval` 등록을 같은 atomic boundary에서 완료한다.
-  5. core는 `humanApproval.created`와 `humanTask.created` 이벤트를 발행한다.
+  5. core는 public `duplicate=false` result에 대해서만 `humanApproval.created`와 `humanTask.created` 이벤트를 발행하고, task event의 `taskType`은 public `HumanTaskView.type`을 기준으로 채운다.
   6. 현재 Turn은 `waitingForHuman` 상태로 settle한다.
 - Outputs:
   - `TurnResult.status = "waitingForHuman"`

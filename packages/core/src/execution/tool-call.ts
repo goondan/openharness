@@ -114,7 +114,8 @@ export async function executeToolCall(
             }]),
       });
 
-      if (created.created) {
+      const approvalCreated = (created as any).created ?? !created.duplicate;
+      if (approvalCreated) {
         eventBus.emit("humanApproval.created", {
           type: "humanApproval.created",
           humanApprovalId: created.approval.id,
@@ -128,7 +129,7 @@ export async function executeToolCall(
             type: "humanTask.created",
             humanApprovalId: created.approval.id,
             humanTaskId: task.id,
-            taskType: task.taskType as "approval" | "text" | "form",
+            taskType: ((task as any).taskType ?? (task as any).type) as "approval" | "text" | "form",
             agentName,
             conversationId,
           });
