@@ -295,6 +295,7 @@ interface HumanApprovalStore {
 - Given human task store creation이 실패한다, When tool call이 평가된다, Then Turn은 error가 되고 human task event와 handler side effect는 관찰되지 않는다.
 - Given conversation이 Human Approval에서 waiting 상태다, When 새 ingress/direct input이 들어온다, Then input은 HITL 전용 queue가 아니라 durable inbound queue에 append되고 `blockedBy=humanApproval`로 표시된다.
 - Given active Turn으로 delivered 된 durable inbound item이 consume 되기 전에 같은 Turn이 Human Approval로 pause된다, When Turn이 `waitingForHuman`으로 반환된다, Then delivered item은 같은 Human Approval blocker로 `blocked` 상태가 된다.
+- Given ToolCall이 Human Approval을 생성하며 정상적으로 pause된다, When Turn이 `waitingForHuman`으로 반환된다, Then runtime은 `step.error` 또는 `tool.error`를 발행하지 않는다.
 - Given pending human task에 같은 idempotency key의 duplicate submit request가 들어온다, When 두 submit이 완료된다, Then durable result는 하나만 존재하고 두 caller는 같은 final result를 관찰한다.
 - Given human task가 rejected 상태다, When resume이 실행된다, Then 원래 tool handler는 호출되지 않고 rejection tool result가 append된다.
 - Given human task가 form args와 함께 approved 상태다, When resume이 실행된다, Then mapped args는 handler 실행 전에 tool JSON Schema 검증을 통과한다.

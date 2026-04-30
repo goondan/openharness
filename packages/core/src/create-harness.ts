@@ -237,7 +237,6 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           envelope.name,
           externalId ?? [
             "no-external-id",
-            envelope.source.receivedAt,
             JSON.stringify(envelope.properties ?? {}),
             JSON.stringify(envelope.content),
           ].join(":"),

@@ -151,7 +151,7 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
-  it("does not collapse repeated ingress text without an external id", async () => {
+  it("deduplicates repeated ingress without an external id when the normalized event is identical", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
@@ -186,6 +186,50 @@ describe("durable inbound and Human Approval integration", () => {
       },
     });
     const items = await inboundStore.listInboundItems({ conversationId: "conv-repeat-ingress" });
+
+    expect(first.disposition).not.toBe("duplicate");
+    expect(second.disposition).toBe("duplicate");
+    expect(second.inboundItemId).toBe(first.inboundItemId);
+    expect(items).toHaveLength(1);
+
+    await runtime.close();
+  });
+
+  it("uses normalized content in fallback ingress idempotency keys", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const first = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "first message" }],
+        properties: {},
+        conversationId: "conv-no-external-content",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const second = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "second message" }],
+        properties: {},
+        conversationId: "conv-no-external-content",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    });
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-no-external-content" });
 
     expect(first.disposition).not.toBe("duplicate");
     expect(second.disposition).not.toBe("duplicate");
@@ -723,6 +767,7 @@ describe("durable inbound and Human Approval integration", () => {
     const markCompleted = vi.spyOn(humanApprovalStore, "markApprovalCompleted");
     const middlewareCalls: string[] = [];
     const extensionToolDoneEvents: unknown[] = [];
+    const stepErrors: unknown[] = [];
     const toolMiddlewareExtension: Extension = {
       name: "approval-tool-middleware",
       register(api) {
@@ -772,6 +817,9 @@ describe("durable inbound and Human Approval integration", () => {
       durableInbound: { enabled: true, store: inboundStore as any },
       humanApproval: { store: humanApprovalStore as any, resumeLeaseMs: 1_234 },
     }));
+    runtime.events.on("step.error", (event) => {
+      stepErrors.push(event);
+    });
 
     const result = await runtime.processTurn("default", "run guarded", {
       conversationId: "conv-human",
@@ -779,6 +827,7 @@ describe("durable inbound and Human Approval integration", () => {
     });
 
     expect(result.status).toBe("waitingForHuman");
+    expect(stepErrors).toHaveLength(0);
     expect(toolHandler).not.toHaveBeenCalled();
     expect(middlewareCalls).toEqual(["guarded"]);
 
