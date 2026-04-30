@@ -940,34 +940,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               throwIfResumeAborted();
 
               const blockedInboundItemIds: string[] = [];
-              conversationState._turnActive = true;
-              try {
-                conversationState.emit({
-                  type: "appendMessage",
-                  message: {
-                    id: `tool-result-${toolCall.toolCallId}`,
-                    data: {
-                      role: "tool",
-                      content: [
-                        {
-                          type: "tool-result",
-                          toolCallId: toolCall.toolCallId,
-                          toolName: toolCall.toolName,
-                          output: toolResult.type === "text"
-                            ? { type: "text", value: toolResult.text }
-                            : toolResult.type === "json"
-                              ? { type: "json", value: toolResult.data }
-                              : { type: "error-text", value: toolResult.error },
-                        },
-                      ],
-                    },
-                    metadata: {
-                      __createdBy: "core",
-                      __humanApprovalId: id,
-                    },
-                  },
-                });
-
+              const drainBlockedInboundItemsForApproval = async (): Promise<void> => {
                 const blockedItems = this._durableInboundStore
                   ? await this._durableInboundStore.listInboundItems({
                       agentName: toolCall.agentName,
@@ -1007,7 +980,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     turnId: toolCall.turnId,
                     commitRef,
                   } as any);
-                  blockedInboundItemIds.push(item.id);
+                  if (!blockedInboundItemIds.includes(item.id)) {
+                    blockedInboundItemIds.push(item.id);
+                  }
                   this._runtimeEvents.emit("inbound.consumed", {
                     type: "inbound.consumed",
                     inboundItemId: item.id,
@@ -1015,13 +990,43 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     commitRef,
                   });
                 }
+              };
+              conversationState._turnActive = true;
+              try {
+                conversationState.emit({
+                  type: "appendMessage",
+                  message: {
+                    id: `tool-result-${toolCall.toolCallId}`,
+                    data: {
+                      role: "tool",
+                      content: [
+                        {
+                          type: "tool-result",
+                          toolCallId: toolCall.toolCallId,
+                          toolName: toolCall.toolName,
+                          output: toolResult.type === "text"
+                            ? { type: "text", value: toolResult.text }
+                            : toolResult.type === "json"
+                              ? { type: "json", value: toolResult.data }
+                              : { type: "error-text", value: toolResult.error },
+                        },
+                      ],
+                    },
+                    metadata: {
+                      __createdBy: "core",
+                      __humanApprovalId: id,
+                    },
+                  },
+                });
 
+                await drainBlockedInboundItemsForApproval();
                 completedGate = await this._humanApprovalStore!.markApprovalCompleted({
                   humanApprovalId: id,
                   leaseOwner: "runtime",
                   turnId: toolCall.turnId,
                   blockedInboundItemIds,
                 } as any);
+                await drainBlockedInboundItemsForApproval();
               } finally {
                 conversationState._turnActive = false;
               }

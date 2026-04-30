@@ -67,13 +67,14 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Main Flow:
   1. runtime은 task/approval을 조회한다.
   2. scope guard가 `agentName`, `conversationId`, optional token/secret을 검증한다.
-  3. runtime은 result payload를 task response schema로 검증한다.
+  3. runtime은 result payload를 task type과 task response schema로 검증한다.
   4. runtime은 idempotency key와 함께 `HumanApprovalStore.submitResult()`를 호출한다.
   5. 저장 성공 후 duplicate가 아니면 `humanTask.resolved` 또는 `humanTask.rejected` 이벤트를 발행한다.
   6. 모든 required task가 resolved/rejected되면 approval을 `ready`로 전환한다.
   7. runtime은 resume worker를 schedule하거나 즉시 resume을 시도한다.
 - Alternative Flow:
   - duplicate submit은 lifecycle event를 재발행하지 않고 `{ accepted: true, duplicate: true, task, approval }`을 반환한다.
+  - task type과 result type이 맞지 않으면 durable state를 바꾸지 않고 typed error로 수렴한다.
   - approval이 `resuming` 또는 `failed` 상태이면 late task submission은 approval 상태를 `ready`로 되돌리지 않고 typed error로 수렴한다.
   - missing/invalid submit은 `SubmitHumanResult` payload로 누출하지 않고 typed error를 던진다.
   - rejection은 handler 호출 없이 rejection tool result를 만들 수 있는 approval result로 저장된다.
@@ -101,9 +102,10 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   5. tool result를 conversation에 append한다.
   6. Human Approval blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanApproval` item을 sequence order로 drain한다.
   7. drained inbound item을 user message로 append하고 consumed 처리한다.
-  8. blocked item consume이 완료된 뒤 blocker를 해제한다.
-  9. runtime은 획득한 resume `leaseOwner`로 approval을 `completed`로 전환하고 lifecycle event를 발행한다.
-  10. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
+  8. blocked item consume이 완료된 뒤 runtime은 획득한 resume `leaseOwner`로 approval을 `completed`로 전환하며 blocker를 해제한다.
+  9. runtime은 blocker 해제 경계에서 같은 blocker로 새로 `blocked` 된 item을 재조회해 consumed 또는 scheduler-owned 상태로 수렴시킨다.
+  10. runtime은 lifecycle event를 발행한다.
+  11. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
 - Outputs:
   - `HumanApprovalResumeResult`
   - continuation `TurnResult`

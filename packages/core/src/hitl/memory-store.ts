@@ -13,6 +13,7 @@ import type {
   HumanTaskFilter,
   HumanTaskRecord,
   HumanTaskStatus,
+  HumanTaskType,
   HumanTaskView,
   MarkHumanApprovalHandlerStartedInput,
   SubmitHumanResult,
@@ -186,6 +187,12 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     }
     if (!isValidHumanResult(input.result)) {
       return { status: "invalid", reason: "Invalid human result payload." };
+    }
+    if (!isHumanResultCompatibleWithTask(task.taskType, input.result)) {
+      return {
+        status: "invalid",
+        reason: `Human result type "${input.result.type}" does not match task type "${task.taskType}".`,
+      };
     }
 
     const now = input.now ?? this._now();
@@ -475,6 +482,19 @@ function isValidHumanResult(result: HumanResult): boolean {
     return !!result.data && typeof result.data === "object" && !Array.isArray(result.data);
   }
   return false;
+}
+
+function isHumanResultCompatibleWithTask(taskType: HumanTaskType, result: HumanResult): boolean {
+  if (taskType === "approval") {
+    return result.type === "approval" || result.type === "rejection";
+  }
+  if (taskType === "text") {
+    return result.type === "text";
+  }
+  if (taskType === "form") {
+    return result.type === "form";
+  }
+  return true;
 }
 
 function isTerminalGateStatus(status: HumanApprovalStatus): boolean {

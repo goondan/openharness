@@ -847,6 +847,85 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("drains inbound items that become blocked while completing a Human Approval", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "secret" })),
+    };
+    currentClient = mockClient([
+      {
+        text: "need tool",
+        toolCalls: [{ toolCallId: "call-completion-race", toolName: "guarded", args: {} }],
+      },
+      { text: "continued after completion race", toolCalls: [] },
+    ]);
+
+    let runtime: Awaited<ReturnType<typeof createHarness>>;
+    let lateInboundItemId = "";
+    const markCompleted = humanApprovalStore.markApprovalCompleted.bind(humanApprovalStore);
+    vi.spyOn(humanApprovalStore, "markApprovalCompleted").mockImplementation(async (input) => {
+      if (!lateInboundItemId) {
+        const late = await runtime.ingress.dispatch({
+          connectionName: "test",
+          envelope: {
+            name: "message.created",
+            content: [{ type: "text", text: "blocked during completion" }],
+            properties: { id: "evt-completion-race" },
+            conversationId: "conv-completion-race",
+            source: {
+              connector: "test",
+              connectionName: "test",
+              receivedAt: new Date().toISOString(),
+            },
+          },
+        });
+        expect(late.disposition).toBe("blocked");
+        lateInboundItemId = String(late.inboundItemId);
+      }
+      return markCompleted(input as any);
+    });
+
+    runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-completion-race",
+      idempotencyKey: "direct-human-completion-race",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-completion-race" });
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-completion-race",
+    });
+    const resumed = await runtime.control.resumeHumanApproval!(tasks[0].humanApprovalId);
+    const consumed = await inboundStore.listInboundItems({
+      conversationId: "conv-completion-race",
+      statuses: ["consumed"],
+    });
+
+    expect(resumed.status).toBe("completed");
+    expect(lateInboundItemId).not.toBe("");
+    expect(consumed.some((item) => item.id === lateInboundItemId)).toBe(true);
+
+    await runtime.close();
+  });
+
   it("reacquires resuming Human Approvals after resume lease expiry", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({
@@ -972,6 +1051,35 @@ describe("durable inbound and Human Approval integration", () => {
     expect(stillResuming?.status).toBe("resuming");
     expect(lateWhileFailed.status).toBe("invalid");
     expect(stillFailed?.status).toBe("failed");
+  });
+
+  it("rejects human results that do not match the task type", async () => {
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const created = await humanApprovalStore.createApproval({
+      humanApprovalId: "approval-type-mismatch",
+      toolCall: {
+        turnId: "turn-type-mismatch",
+        agentName: "default",
+        conversationId: "conv-type-mismatch",
+        stepNumber: 1,
+        toolCallId: "call-type-mismatch",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-approval-only", type: "approval", required: true }],
+    });
+
+    const invalid = await humanApprovalStore.submitResult({
+      humanTaskId: "task-approval-only",
+      result: { type: "text", text: "not an approval" },
+      idempotencyKey: "type-mismatch",
+    });
+    const approval = await humanApprovalStore.getApproval(created.approval.id);
+    const tasks = await humanApprovalStore.listTasks({ humanApprovalId: created.approval.id });
+
+    expect(invalid.status).toBe("invalid");
+    expect(approval?.status).toBe("waitingForHuman");
+    expect(tasks[0].status).toBe("waitingForHuman");
   });
 
   it("releases blocked inbound items when canceling a Human Approval", async () => {
