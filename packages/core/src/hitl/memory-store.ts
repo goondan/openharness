@@ -14,6 +14,7 @@ import type {
   HumanTaskRecord,
   HumanTaskStatus,
   HumanTaskView,
+  MarkHumanGateHandlerStartedInput,
   SubmitHumanResult,
   SubmitHumanResultInput,
 } from "./types.js";
@@ -219,6 +220,9 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       return null;
     }
     const resumeLeaseExpired = gate.status === "resuming" && !resumeLeaseActive;
+    if (resumeLeaseExpired && gate.handlerStartedAt) {
+      return null;
+    }
     const retryableFailure = gate.status === "failed" && gate.failure?.retryable;
     if (gate.status !== "ready" && !retryableFailure && !resumeLeaseExpired) {
       return null;
@@ -231,6 +235,20 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       expiresAt: addMs(now, input.leaseTtlMs ?? this._defaultLeaseTtlMs),
     };
     gate.updatedAt = now;
+    return cloneValue(gate);
+  }
+
+  async markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord> {
+    const gate = this._mustGetGate(input.humanGateId);
+    this._assertLeaseOwner(gate, input.leaseOwner);
+    if (gate.status !== "resuming") {
+      throw new Error(`Cannot mark human gate "${gate.id}" handler started from status "${gate.status}".`);
+    }
+    if (!gate.handlerStartedAt) {
+      const now = input.now ?? this._now();
+      gate.handlerStartedAt = now;
+      gate.updatedAt = now;
+    }
     return cloneValue(gate);
   }
 
@@ -307,6 +325,9 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
         return false;
       }
       if (gate.status === "ready" || gate.status === "resuming") {
+        if (gate.status === "resuming" && gate.handlerStartedAt) {
+          return false;
+        }
         return true;
       }
       return !!filter.includeFailed && gate.status === "failed" && gate.failure?.retryable === true;

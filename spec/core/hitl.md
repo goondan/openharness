@@ -94,18 +94,19 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
      - approval: 원래 args 또는 보정 args로 tool handler 실행
      - rejection: tool handler 호출 없이 rejection tool result 생성
      - form/text input: mapped args를 JSON Schema로 재검증한 뒤 tool handler 실행
-  4. tool result를 conversation에 append한다.
-  5. Human Gate blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanGate` item을 sequence order로 drain한다.
-  6. drained inbound item을 user message로 append하고 consumed 처리한다.
-  7. blocked item consume이 완료된 뒤 blocker를 해제한다.
-  8. gate를 `completed`로 전환하고 lifecycle event를 발행한다.
-  9. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
+  4. handler 실행이 필요한 action이면 runtime은 `markGateHandlerStarted()`를 durable하게 기록한 뒤 tool handler를 호출한다.
+  5. tool result를 conversation에 append한다.
+  6. Human Gate blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanGate` item을 sequence order로 drain한다.
+  7. drained inbound item을 user message로 append하고 consumed 처리한다.
+  8. blocked item consume이 완료된 뒤 blocker를 해제한다.
+  9. gate를 `completed`로 전환하고 lifecycle event를 발행한다.
+  10. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
 - Outputs:
   - `HumanGateResumeResult`
   - continuation `TurnResult`
 - Failure Modes:
-  - process crash before side-effect boundary: `resuming` lease expiry 후 다른 worker가 같은 gate를 재획득할 수 있다.
-  - process crash after side-effect boundary: gate를 `blocked` 또는 retry policy가 지정한 상태로 남겨 operator가 확인한다.
+  - process crash before `markGateHandlerStarted()`: `resuming` lease expiry 후 다른 worker가 같은 gate를 재획득할 수 있다.
+  - process crash after `markGateHandlerStarted()`: runtime은 자동 재획득/handler 재실행을 하지 않고 operator 확인 대상으로 남긴다.
   - tool handler 실패: `failed(retryable|nonRetryable)`로 전환하고 event를 발행한다.
 
 #### Flow ID: HG-CANCEL-01
@@ -201,6 +202,7 @@ interface HumanGateStore {
   listTasks(filter: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
   acquireGateForResume(input: AcquireHumanGateInput): Promise<HumanGateRecord | null>;
+  markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord>;
   markGateCompleted(input: CompleteHumanGateInput): Promise<HumanGateRecord>;
   markGateFailed(input: FailHumanGateInput): Promise<HumanGateRecord>;
   cancelGate(input: CancelHumanGateInput): Promise<HumanGateRecord>;
@@ -251,7 +253,8 @@ interface HumanGateStore {
 - Concurrency Strategy:
   - create/submit/resume/cancel use idempotency key and compare-and-set transitions.
   - resume owns a lease; only the lease holder may execute handler or append tool result.
-  - a gate in `resuming` with an expired resume lease is recoverable and may be acquired by another worker.
+  - a gate in `resuming` with an expired resume lease is recoverable only if `handlerStartedAt` has not been recorded.
+  - once `handlerStartedAt` is recorded, automatic reacquire must not re-run the handler; operator/idempotent adapter intervention is required.
 - Failure Handling:
   - before side-effect boundary, retry is automatic after lease expiry.
   - canceling a Human Gate releases its conversation blocker and returns blocked inbound items to scheduler ownership; expiring a gate dead-letters those items by default.

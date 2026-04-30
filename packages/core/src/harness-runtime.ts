@@ -814,6 +814,10 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   if (!validation.valid) {
                     toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
                   } else {
+                    await this._humanGateStore!.markGateHandlerStarted({
+                      humanGateId: id,
+                      leaseOwner: "runtime",
+                    } as any);
                     this._runtimeEvents.emit("tool.start", {
                       type: "tool.start",
                       turnId: toolCall.turnId,

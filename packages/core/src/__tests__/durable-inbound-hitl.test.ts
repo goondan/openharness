@@ -708,12 +708,24 @@ describe("durable inbound and Human Gate integration", () => {
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:03.001Z",
     });
+    await humanGateStore.markGateHandlerStarted({
+      humanGateId: created.gate.id,
+      leaseOwner: "worker-2",
+      now: "2026-01-01T00:00:03.002Z",
+    });
+    const blockedAfterHandlerStarted = await humanGateStore.acquireGateForResume({
+      humanGateId: created.gate.id,
+      leaseOwner: "worker-3",
+      leaseTtlMs: 1_000,
+      now: "2026-01-01T00:00:04.003Z",
+    });
 
     expect(first?.status).toBe("resuming");
     expect(first?.lease?.owner).toBe("worker-1");
     expect(blockedByActiveLease).toBeNull();
     expect(reacquired?.status).toBe("resuming");
     expect(reacquired?.lease?.owner).toBe("worker-2");
+    expect(blockedAfterHandlerStarted).toBeNull();
   });
 
   it("releases blocked inbound items when canceling a Human Gate", async () => {

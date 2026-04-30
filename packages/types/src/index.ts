@@ -23,6 +23,7 @@ export type {
   SubmitHumanResultInput,
   SubmitHumanResult,
   AcquireHumanGateInput,
+  MarkHumanGateHandlerStartedInput,
   CompleteHumanGateInput,
   FailHumanGateInput,
   CancelHumanGateInput,

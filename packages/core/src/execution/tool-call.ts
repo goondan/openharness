@@ -113,23 +113,25 @@ export async function executeToolCall(
             }]),
       });
 
-      eventBus.emit("humanGate.created", {
-        type: "humanGate.created",
-        humanGateId: created.gate.id,
-        agentName,
-        conversationId,
-        turnId,
-        toolCallId,
-      });
-      for (const task of created.tasks) {
-        eventBus.emit("humanTask.created", {
-          type: "humanTask.created",
+      if (created.created) {
+        eventBus.emit("humanGate.created", {
+          type: "humanGate.created",
           humanGateId: created.gate.id,
-          humanTaskId: task.id,
-          taskType: task.taskType as "approval" | "text" | "form",
           agentName,
           conversationId,
+          turnId,
+          toolCallId,
         });
+        for (const task of created.tasks) {
+          eventBus.emit("humanTask.created", {
+            type: "humanTask.created",
+            humanGateId: created.gate.id,
+            humanTaskId: task.id,
+            taskType: task.taskType as "approval" | "text" | "form",
+            agentName,
+            conversationId,
+          });
+        }
       }
 
       throw new HumanGatePendingError(created.gate.id);

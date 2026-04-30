@@ -95,6 +95,7 @@ export interface HumanGateRecord {
   requiredTaskIds: string[];
   blocker: ConversationBlockerRef;
   blockedInboundItemIds?: string[];
+  handlerStartedAt?: string;
   lease?: {
     owner: string;
     expiresAt: string;
@@ -183,6 +184,12 @@ export interface CompleteHumanGateInput {
   now?: string;
 }
 
+export interface MarkHumanGateHandlerStartedInput {
+  humanGateId: string;
+  leaseOwner?: string;
+  now?: string;
+}
+
 export interface FailHumanGateInput {
   humanGateId: string;
   reason: string;
@@ -209,6 +216,7 @@ export interface HumanGateStore {
   listTasks(filter: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
   acquireGateForResume(input: AcquireHumanGateInput): Promise<HumanGateRecord | null>;
+  markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord>;
   markGateCompleted(input: CompleteHumanGateInput): Promise<HumanGateRecord>;
   markGateFailed(input: FailHumanGateInput): Promise<HumanGateRecord>;
   cancelGate(input: CancelHumanGateInput): Promise<HumanGateRecord>;
