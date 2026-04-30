@@ -323,6 +323,8 @@ interface DurableInboundStore {
 - Given 같은 external id/idempotency key payload 두 개가 동시에 들어온다, When durable append가 실행된다, Then store에는 inbound item이 하나만 생성되고 두 번째 호출은 기존 item identity를 반환한다.
 - Given connector가 stable external id를 제공하지 않는다, When 같은 conversation에 동일한 normalized event가 다른 `receivedAt`으로 재전달된다, Then runtime은 `receivedAt`를 fallback idempotency key에 포함하지 않고 duplicate로 처리한다.
 - Given connector가 stable external id를 제공하지 않는다, When 같은 conversation에 content/properties가 다른 normalized event가 들어온다, Then runtime은 각 event를 서로 다른 fallback idempotency key로 append한다.
+- Given connector가 blank external id를 제공한다, When 같은 conversation에 서로 다른 content/properties event가 들어온다, Then blank id는 missing id로 취급되어 fallback idempotency key가 사용된다.
+- Given connector가 stable external id를 제공하지 않는다, When semantically identical properties/content가 object key order만 다르게 재전달된다, Then fallback idempotency key는 stable serialization으로 duplicate 처리한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item이 append된다, Then item은 durable store에 남고 active Turn은 Step 경계에서 그 item을 user message로 반영한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item을 deliver한다, Then runtime은 `markDelivered()` 성공 이후에만 active Turn memory steering inbox에 notify한다.
 - Given active Turn delivery가 `markDelivered()` 이후 consume 전에 crash된다, When operator/recovery가 `retryInboundItem()` 또는 `releaseInboundItem()`을 호출한다, Then item은 `pending`으로 돌아가 다시 처리 가능하다.

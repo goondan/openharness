@@ -29,6 +29,24 @@ import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
 
 const DEFAULT_MAX_STEPS = 25;
 
+function stableStringify(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortKeys);
+  }
+  if (value && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortKeys((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // createHarness
 // ---------------------------------------------------------------------------
@@ -226,8 +244,9 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
 
       if (durableInboundStore) {
-        const externalId = typeof envelope.properties["id"] === "string"
-          ? envelope.properties["id"]
+        const rawExternalId = envelope.properties["id"];
+        const externalId = typeof rawExternalId === "string" && rawExternalId.trim().length > 0
+          ? rawExternalId
           : undefined;
         const inboundEventIdempotencyKey = [
           "ingress",
@@ -237,8 +256,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           envelope.name,
           externalId ?? [
             "no-external-id",
-            JSON.stringify(envelope.properties ?? {}),
-            JSON.stringify(envelope.content),
+            stableStringify(envelope.properties ?? {}),
+            stableStringify(envelope.content),
           ].join(":"),
         ].join(":");
         const appended = await durableInboundStore.append({

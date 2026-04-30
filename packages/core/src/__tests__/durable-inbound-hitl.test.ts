@@ -287,6 +287,94 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("treats blank ingress external ids as missing", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const first = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "blank id first" }],
+        properties: { id: "" },
+        conversationId: "conv-blank-external-id",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const second = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "blank id second" }],
+        properties: { id: "" },
+        conversationId: "conv-blank-external-id",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    });
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-blank-external-id" });
+
+    expect(first.disposition).not.toBe("duplicate");
+    expect(second.disposition).not.toBe("duplicate");
+    expect(items).toHaveLength(2);
+    expect(new Set(items.map((item) => item.idempotencyKey)).size).toBe(2);
+
+    await runtime.close();
+  });
+
+  it("uses stable property serialization in fallback ingress idempotency keys", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const first = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "same event" }],
+        properties: { b: 2, a: 1 },
+        conversationId: "conv-stable-fallback",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const second = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "same event" }],
+        properties: { a: 1, b: 2 },
+        conversationId: "conv-stable-fallback",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    });
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-stable-fallback" });
+
+    expect(first.disposition).not.toBe("duplicate");
+    expect(second.disposition).toBe("duplicate");
+    expect(second.inboundItemId).toBe(first.inboundItemId);
+    expect(items).toHaveLength(1);
+
+    await runtime.close();
+  });
+
   it("marks active-turn delivery in the durable store before notifying memory steering", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const markDelivered = vi.fn(async () => {
