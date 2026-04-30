@@ -285,17 +285,17 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
         const activeTurn = runtimeRef.getActiveTurn(agentName, conversationId);
         if (activeTurn) {
-          const delivered = await durableInboundStore.markDelivered({
-            id: appended.item.id,
-            turnId: activeTurn.turnId,
-          });
-          const commitRef = inboundUserMessageCommitRef(delivered.id);
+          const commitRef = inboundUserMessageCommitRef(appended.item.id);
           const steered = runtimeRef.steerTurn(agentName, {
             envelope,
-            inboundItem: delivered as any,
+            inboundItem: appended.item as any,
             commitRef,
           }, conversationId);
           if (steered) {
+            const delivered = await durableInboundStore.markDelivered({
+              id: appended.item.id,
+              turnId: activeTurn.turnId,
+            });
             ingressEventBus.emit("inbound.delivered", {
               type: "inbound.delivered",
               inboundItemId: delivered.id,
@@ -308,7 +308,6 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
               inboundItemId: delivered.id,
             };
           }
-          await durableInboundStore.retryInboundItem(delivered.id);
         }
 
         runtimeRef

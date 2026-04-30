@@ -332,17 +332,17 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       const conversationKey = this._conversationKey(agentName, conversationId);
       const activeTurn = this._activeTurnByConversation.get(conversationKey);
       if (activeTurn) {
-        const delivered = await this._durableInboundStore.markDelivered({
-          id: appended.item.id,
-          turnId: activeTurn.turnId,
-        } as any);
-        const commitRef = inboundUserMessageCommitRef(delivered.id);
+        const commitRef = inboundUserMessageCommitRef(appended.item.id);
         const steered = activeTurn.steeringInbox.enqueue({
           envelope,
-          inboundItem: delivered as any,
+          inboundItem: appended.item as any,
           commitRef,
         });
         if (steered) {
+          const delivered = await this._durableInboundStore.markDelivered({
+            id: appended.item.id,
+            turnId: activeTurn.turnId,
+          } as any);
           this._runtimeEvents.emit("inbound.delivered", {
             type: "inbound.delivered",
             inboundItemId: delivered.id,
@@ -503,6 +503,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             } as any);
             if (!gate) {
               const existing = await (this._humanGateStore as any).getGate?.(id);
+              if (!existing) {
+                throw new HarnessError(`Unknown human gate: "${id}"`);
+              }
               return {
                 humanGateId: id,
                 status: existing?.status === "completed" ? "completed" : "blocked",
