@@ -212,10 +212,15 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     }
 
     const now = input.now ?? this._now();
-    if (gate.status === "resuming" && gate.lease && Date.parse(gate.lease.expiresAt) > Date.parse(now)) {
+    const resumeLeaseActive = gate.status === "resuming" &&
+      gate.lease &&
+      Date.parse(gate.lease.expiresAt) > Date.parse(now);
+    if (resumeLeaseActive) {
       return null;
     }
-    if (gate.status !== "ready" && !(gate.status === "failed" && gate.failure?.retryable)) {
+    const resumeLeaseExpired = gate.status === "resuming" && !resumeLeaseActive;
+    const retryableFailure = gate.status === "failed" && gate.failure?.retryable;
+    if (gate.status !== "ready" && !retryableFailure && !resumeLeaseExpired) {
       return null;
     }
 

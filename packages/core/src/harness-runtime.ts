@@ -729,9 +729,32 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           }
         : undefined,
       cancelHumanGate: this._humanGateStore
-        ? async (input: any) => this._humanGateStore!.cancelGate(
-            typeof input === "string" ? { humanGateId: input } : input,
-          ) as any
+        ? async (input: any) => {
+            const cancelInput = typeof input === "string" ? { humanGateId: input } : input;
+            const gate = await this._humanGateStore!.cancelGate(cancelInput) as any;
+            if (this._durableInboundStore) {
+              if (gate.status === "expired") {
+                const blockedItems = await this._durableInboundStore.listInboundItems({
+                  agentName: gate.toolCall.agentName,
+                  conversationId: gate.toolCall.conversationId,
+                  status: ["blocked"],
+                  statuses: ["blocked"],
+                  blockedBy: gate.blocker,
+                } as any);
+                await Promise.all(blockedItems.map((item: any) => this._durableInboundStore!.deadLetterInboundItem({
+                  id: item.id,
+                  reason: cancelInput.reason ?? `Human gate "${gate.id}" expired.`,
+                })));
+              } else {
+                await (this._durableInboundStore as any).releaseBlockedInboundItems?.({
+                  agentName: gate.toolCall.agentName,
+                  conversationId: gate.toolCall.conversationId,
+                  blockedBy: gate.blocker,
+                });
+              }
+            }
+            return gate;
+          }
         : undefined,
     };
   }

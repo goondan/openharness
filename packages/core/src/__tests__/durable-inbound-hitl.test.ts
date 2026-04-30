@@ -465,6 +465,122 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
+  it("reacquires resuming Human Gates after resume lease expiry", async () => {
+    const humanGateStore = createInMemoryHumanGateStore();
+    const created = await humanGateStore.createGate({
+      humanGateId: "gate-resume-expiry",
+      toolCall: {
+        turnId: "turn-resume-expiry",
+        agentName: "default",
+        conversationId: "conv-resume-expiry",
+        stepNumber: 1,
+        toolCallId: "call-resume-expiry",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-resume-expiry", type: "approval", required: true }],
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    await humanGateStore.submitResult({
+      humanTaskId: created.tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approval-resume-expiry",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+
+    const first = await humanGateStore.acquireGateForResume({
+      humanGateId: created.gate.id,
+      leaseOwner: "worker-1",
+      leaseTtlMs: 1_000,
+      now: "2026-01-01T00:00:02.000Z",
+    });
+    const blockedByActiveLease = await humanGateStore.acquireGateForResume({
+      humanGateId: created.gate.id,
+      leaseOwner: "worker-2",
+      leaseTtlMs: 1_000,
+      now: "2026-01-01T00:00:02.500Z",
+    });
+    const reacquired = await humanGateStore.acquireGateForResume({
+      humanGateId: created.gate.id,
+      leaseOwner: "worker-2",
+      leaseTtlMs: 1_000,
+      now: "2026-01-01T00:00:03.001Z",
+    });
+
+    expect(first?.status).toBe("resuming");
+    expect(first?.lease?.owner).toBe("worker-1");
+    expect(blockedByActiveLease).toBeNull();
+    expect(reacquired?.status).toBe("resuming");
+    expect(reacquired?.lease?.owner).toBe("worker-2");
+  });
+
+  it("releases blocked inbound items when canceling a Human Gate", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanGateStore = createInMemoryHumanGateStore();
+    const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanGate: { required: true, prompt: "Approve?" },
+      handler: toolHandler,
+    };
+    currentClient = mockClient({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-cancel", toolName: "guarded", args: {} }],
+    });
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanGate: { store: humanGateStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-cancel-human",
+      idempotencyKey: "direct-human-cancel",
+    });
+    expect(result.status).toBe("waitingForHuman");
+    const tasks = await humanGateStore.listTasks({ conversationId: "conv-cancel-human" });
+
+    const blocked = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "while waiting then canceled" }],
+        properties: { id: "evt-cancel-blocked" },
+        conversationId: "conv-cancel-human",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: new Date().toISOString(),
+        },
+      },
+    });
+    expect(blocked.disposition).toBe("blocked");
+
+    const canceled = await runtime.control.cancelHumanGate?.(tasks[0].humanGateId);
+    const blockedItems = await inboundStore.listInboundItems({
+      conversationId: "conv-cancel-human",
+      statuses: ["blocked"],
+    });
+    const pendingItems = await inboundStore.listInboundItems({
+      conversationId: "conv-cancel-human",
+      statuses: ["pending"],
+    });
+
+    expect(canceled?.status).toBe("canceled");
+    expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
+    expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
+
+    await runtime.close();
+  });
+
   it("rejects resume when a Human Gate record is missing", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanGateStore = createInMemoryHumanGateStore();

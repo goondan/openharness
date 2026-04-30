@@ -104,7 +104,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable
   - `HumanGateResumeResult`
   - continuation `TurnResult` if continuation is enabled
 - Failure Modes:
-  - process crash before side-effect boundary: lease expiry 후 retry 가능하다.
+  - process crash before side-effect boundary: `resuming` lease expiry 후 다른 worker가 같은 gate를 재획득할 수 있다.
   - process crash after side-effect boundary: gate를 `blocked` 또는 retry policy가 지정한 상태로 남겨 operator가 확인한다.
   - tool handler 실패: `failed(retryable|nonRetryable)`로 전환하고 event를 발행한다.
 
@@ -251,8 +251,10 @@ interface HumanGateStore {
 - Concurrency Strategy:
   - create/submit/resume/cancel use idempotency key and compare-and-set transitions.
   - resume owns a lease; only the lease holder may execute handler or append tool result.
+  - a gate in `resuming` with an expired resume lease is recoverable and may be acquired by another worker.
 - Failure Handling:
   - before side-effect boundary, retry is automatic after lease expiry.
+  - canceling a Human Gate releases its conversation blocker and returns blocked inbound items to scheduler ownership; expiring a gate dead-letters those items by default.
   - after side-effect boundary, retry requires idempotent tool result commit or operator intervention.
 - Deployment Location:
   - core provides in-memory/reference store and contracts.
