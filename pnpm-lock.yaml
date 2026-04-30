@@ -33,8 +33,8 @@ importers:
   packages/base:
     dependencies:
       '@goondan/openharness-types':
-        specifier: ^0.1.13
-        version: 0.1.13(ai@6.0.159(zod@4.3.6))
+        specifier: workspace:^
+        version: link:../types
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -340,11 +340,6 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
-
-  '@goondan/openharness-types@0.1.13':
-    resolution: {integrity: sha512-7am/btLqq+W+ulTGY57xGgQJhURFyzLh2lf6we6ZilxzjblP6gudCSEaaAMOQ/NmHGI9Lqx1+yRblfZjp717sg==}
-    peerDependencies:
-      ai: ^6.0.159
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1075,10 +1070,6 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.4':
     optional: true
-
-  '@goondan/openharness-types@0.1.13(ai@6.0.159(zod@4.3.6))':
-    dependencies:
-      ai: 6.0.159(zod@4.3.6)
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

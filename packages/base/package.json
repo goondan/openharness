@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-base",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -20,7 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness-types": "^0.1.13"
+    "@goondan/openharness-types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
