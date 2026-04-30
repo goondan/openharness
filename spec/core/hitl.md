@@ -396,7 +396,7 @@ interface ControlApi {
 }
 ```
 
-`resumeHitlBatch(batchId)`가 canonical resume API다. 이 API는 idempotent해야 한다. 다른 owner가 batch lease를 보유 중이거나 batch가 이미 `continuing`/`completed`/`canceled`/`expired`/`failed(nonRetryable)`/`blocked` 같은 terminal 또는 post-side-effect 상태이면, 호출은 mutation 없이 현재 상태를 `ResumeHitlResult`로 반환한다. `resumeHitl(requestId)`는 request의 owning batch를 찾는 helper다. owning batch가 resume 가능한 상태가 아니면 `resumeHitlBatch`와 동일한 idempotent semantics를 따른다.
+`resumeHitlBatch(batchId)`가 canonical resume API다. 이 API는 idempotent해야 한다. 다른 owner가 batch lease를 보유 중이거나 batch가 이미 `continuing`/`completed`/`canceled`/`expired`/`failed(nonRetryable)`/`blocked` 같은 terminal 또는 post-side-effect 상태이면, 호출은 mutation 없이 현재 상태를 `ResumeHitlResult`로 반환한다 — `completed`는 `alreadyCompleted`, `canceled`/`failed(nonRetryable)`/`expired`는 `alreadyTerminal`, `blocked`는 `blocked`로 분류된다 (§9.4.1). `resumeHitl(requestId)`는 request의 owning batch를 찾는 helper다. owning batch가 resume 가능한 상태가 아니면 `resumeHitlBatch`와 동일한 idempotent semantics를 따른다.
 
 `cancelHitlBatch(input)`도 idempotent해야 한다. 이미 `canceled`/`completed`/`failed(nonRetryable)`/`expired` terminal 상태이면 mutation 없이 control API가 `alreadyTerminal`(이미 다른 terminal로 수렴됨) 또는 `canceled`(같은 reason 재호출)로 분류해 노출한다. `blocked` batch는 §7.1 전이에 따라 `cancel`로 정식 close가 가능한 상태다 — operator가 풀어주기 전까지 barrier로 남는 post-side-effect failure 상태라서 cancel은 mutation으로 처리되어 `canceled`로 수렴한다 (§7.2 `blocked`는 operator recovery/cancel 대상). `continuing` batch에 대해서는 `input.abortContinuation`이 active continuation turn에 abort 신호를 보낼지를 결정한다 — `false`/생략이면 cancel은 `notCancelable`로 거절되고, `true`이면 store는 batch를 `canceled`로 닫고 runtime은 active continuation turn에 abort 신호를 보낸다 (§9.4 `cancelBatch()` semantics 참조). cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* — cancel이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `completed`/`failed`/`expired`), completion이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `canceled`) 분류해 노출한다. 이 status 명칭은 store가 반환한 `HitlBatchRecord`를 보고 control surface가 분류해 노출하는 결과다 — store 자체는 별도 status enum을 두지 않는다 (§9.4 마지막 단락).
 
@@ -728,7 +728,8 @@ type ResumeHitlResult =
   | { status: "completed"; batch: HitlBatchView; result?: ToolResult }
   | { status: "scheduled"; batchId: string }
   | { status: "alreadyCompleted"; batch: HitlBatchView }      // batch.status === "completed"
-  | { status: "alreadyTerminal"; batch: HitlBatchView }       // batch.status ∈ { canceled, failed(nonRetryable), expired, blocked } — resume 불가, 운영 action 대상
+  | { status: "alreadyTerminal"; batch: HitlBatchView }       // batch.status ∈ { canceled, failed(nonRetryable), expired } — lifecycle terminal, resume 불가
+  | { status: "blocked"; batch: HitlBatchView }               // batch.status === "blocked" — operator cancel/recovery 전까지 barrier (§7.2)
   | { status: "notReady"; batch: HitlBatchView; pendingRequestIds: string[] }
   | { status: "notFound"; batchId?: string; requestId?: string }
   | { status: "leaseConflict"; batch: HitlBatchView | null }
@@ -754,7 +755,7 @@ type CancelHitlResult =
   | { status: "error"; batchId?: string; requestId?: string; batch?: HitlBatchView; error: string };
 ```
 
-`ResumeHitlResult.leaseConflict`/`alreadyCompleted`/`alreadyTerminal`가 §9.2의 idempotent contract를 받쳐주는 정식 status다. 두 번째 resume 호출은 mutation 없이 이 셋 중 하나(또는 `notReady`)로 수렴한다 — `alreadyCompleted`는 batch가 `completed`로 settle된 경우, `alreadyTerminal`은 batch가 `canceled`/`failed(nonRetryable)`/`expired`/`blocked`로 닫힌 경우. `CancelHitlResult.alreadyTerminal`은 cancel race에서 졌거나 호출 시점에 batch가 이미 다른 terminal에 있는 경우의 control surface다 — store는 record만 반환하고 control API가 분류한다 (§9.4 마지막 단락).
+`ResumeHitlResult.leaseConflict`/`alreadyCompleted`/`alreadyTerminal`/`blocked`가 §9.2의 idempotent contract를 받쳐주는 정식 status다. 두 번째 resume 호출은 mutation 없이 이 넷 중 하나(또는 `notReady`)로 수렴한다 — `alreadyCompleted`는 batch가 `completed`로 settle된 경우, `alreadyTerminal`은 batch가 lifecycle terminal(`canceled`/`failed(nonRetryable)`/`expired`)로 닫힌 경우, `blocked`는 batch가 `blocked` barrier 상태인 경우 (§7.2 — `blocked`는 lifecycle terminal이 아니라 operator cancel/recovery 대상이라 별도 status로 분리한다). `CancelHitlResult.alreadyTerminal`은 cancel race에서 졌거나 호출 시점에 batch가 이미 다른 terminal에 있는 경우의 control surface다 — store는 record만 반환하고 control API가 분류한다 (§9.4 마지막 단락).
 
 ### 9.5 Core data types
 
@@ -880,6 +881,7 @@ interface HitlRequestRecord {
 - Given the same `cancelHitlBatch()` is retried on an already-canceled batch with the same reason, When the call repeats, Then the store returns the current canceled record with no mutation and the control API surfaces the result as idempotent `canceled`.
 - Given `cancelHitlBatch()` is called on a batch that is already `completed`/`failed(nonRetryable)`/`expired`, or on a `canceled` batch with a different reason, When the call lands, Then the store returns the current terminal record with no mutation and the control API surfaces the result as `alreadyTerminal`.
 - Given `cancelHitlBatch()` is called on a `blocked` batch, When the call commits, Then the store transitions the batch from `blocked` to `canceled` (operator close path) and the control API surfaces the result as `canceled`.
+- Given `resumeHitlBatch()` is called on a `blocked` batch, When the call lands, Then the store returns the current record with no mutation and the control API surfaces the result as `blocked` (distinct from `alreadyTerminal` — `blocked` is not lifecycle terminal but resume requires operator cancel/recovery first).
 - Given a `pre-resume` execution marker (created during §8.1 non-HITL peer execution) is observed at startup recovery, When the marker has no `fencingToken`, Then it is accepted as a valid pre-resume marker and recovery converges per §8.6 step 7 without applying lease/fencing checks.
 - Given a `resume` execution marker (created during §8.5 step 6 HITL handler execution), When the marker is recorded, Then `startBatchToolExecution()` requires the marker's `(ownerId, fencingToken)` to match the batch's active lease.
 - Given a chained HITL spawn transaction succeeds, When the spawn returns, Then the parent record is `completed(spawnedChild)`, the child record is `preparing` with `parentBatchId` set, and the runtime proceeds with §8.1 step 6~8 on the child outside the spawn transaction.
@@ -930,6 +932,7 @@ interface HitlRequestRecord {
 - cancel/`completeBatch()` race: first store commit wins; the loser performs no mutation and the control API surfaces the result as `alreadyTerminal` (loser sees batch already in another terminal state)
 - `notCancelable` is reserved for *cancel-not-applicable* states (`continuing` batch without `abortContinuation`), not race outcomes
 - `cancelHitlBatch()` on `blocked` is a legitimate operator close path: store transitions `blocked → canceled` (per §7.1)
+- `resumeHitlBatch()` on `blocked` returns no-mutation with control API `blocked` status; `blocked` is *not* folded into `alreadyTerminal` because lifecycle-wise it is a barrier state pending operator action, not a finalized terminal
 - `cancelHitlBatch()` retry on an already-canceled batch with the same reason returns idempotent `canceled`; with a different reason or on another terminal returns `alreadyTerminal`
 - `HitlBatchToolExecutionMarker` with `phase: "pre-resume"` is accepted without `fencingToken`; `phase: "resume"` requires `fencingToken` matching the active batch lease
 - `preparing` recovery exposes fully prepared batches and blocks marker-without-result batches without rerunning tools
