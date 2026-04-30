@@ -330,6 +330,7 @@ interface DurableInboundStore {
 - Given conversation이 human approval로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanApproval` metadata와 함께 `blocked`가 된다.
 - Given human approval이 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.
 - Given human approval blocker가 completed 전환으로 해제되는 경계다, When 같은 conversation으로 inbound event가 들어온다, Then scheduler는 새 Turn을 시작하지 않고 준비된 continuation Turn으로 item을 deliver한다.
+- Given delivered 후 Human Approval로 blocked 된 inbound item이 operator cancel로 pending release 된다, When release가 완료된다, Then stale `turnId`/`commitRef` delivery metadata는 제거된다.
 - Given 두 worker가 같은 conversation pending item을 동시에 schedule한다, When 둘 다 lease를 시도한다, Then 하나만 lease를 얻고 다른 worker는 no-op/conflict result로 수렴한다.
 - Given inbound item이 conversation에 이미 append되었지만 consume marking 전 crash가 발생했다, When recovery가 같은 item을 다시 처리한다, Then 같은 inbound item id의 user message가 중복 append되지 않는다.
 - Given durable inbound mode가 꺼져 있다, When 기존 ingress/processTurn 테스트가 실행된다, Then 기존 started/steered 동작이 유지된다.

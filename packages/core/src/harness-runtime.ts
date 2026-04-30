@@ -1207,13 +1207,19 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       cancelHumanApproval: this._humanApprovalStore
         ? async (input: any) => {
             const cancelInput = typeof input === "string" ? { humanApprovalId: input } : input;
+            const existingApproval = await (this._humanApprovalStore as any).getApproval?.(cancelInput.humanApprovalId);
             const gate = await this._humanApprovalStore!.cancelApproval(cancelInput) as any;
-            this._runtimeEvents.emit("humanApproval.canceled", {
-              type: "humanApproval.canceled",
-              humanApprovalId: gate.id,
-              reason: cancelInput.reason,
-            } as any);
-            if (this._durableInboundStore) {
+            const transitioned = existingApproval
+              ? existingApproval.status !== gate.status && ["canceled", "expired"].includes(gate.status)
+              : ["canceled", "expired"].includes(gate.status);
+            if (transitioned) {
+              this._runtimeEvents.emit("humanApproval.canceled", {
+                type: "humanApproval.canceled",
+                humanApprovalId: gate.id,
+                reason: cancelInput.reason,
+              } as any);
+            }
+            if (transitioned && this._durableInboundStore) {
               if (gate.status === "expired") {
                 const blockedItems = await this._durableInboundStore.listInboundItems({
                   agentName: gate.toolCall.agentName,

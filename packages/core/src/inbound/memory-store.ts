@@ -297,10 +297,7 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
         continue;
       }
 
-      item.status = "pending";
-      item.blockedBy = undefined;
-      item.updatedAt = now;
-      released.push(cloneInboundItem(item));
+      released.push(this._releaseToPending(item, now));
     }
 
     return released;

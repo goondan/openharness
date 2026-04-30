@@ -126,6 +126,54 @@ describe("durable inbound and Human Approval integration", () => {
     expect(reacquiredAfterRetry?.id).toBe(appended.item.id);
   });
 
+  it("clears stale delivery metadata when releasing blocked inbound items", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const appended = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-release-blocked-metadata",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "blocked after delivery" }],
+        properties: { id: "evt-release-blocked-metadata" },
+        conversationId: "conv-release-blocked-metadata",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-release-blocked-metadata",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-release-blocked-metadata:evt-release-blocked-metadata",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    await inboundStore.markDelivered({
+      id: appended.item.id,
+      turnId: "turn-before-block",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+    await inboundStore.markBlocked({
+      id: appended.item.id,
+      blockedBy: { type: "humanApproval", id: "approval-release-blocked-metadata" },
+      now: "2026-01-01T00:00:02.000Z",
+    });
+
+    const [released] = await inboundStore.releaseBlockedInboundItems({
+      conversationId: "conv-release-blocked-metadata",
+      blockedBy: { type: "humanApproval", id: "approval-release-blocked-metadata" },
+      now: "2026-01-01T00:00:03.000Z",
+    });
+
+    expect(released.status).toBe("pending");
+    expect(released.turnId).toBeUndefined();
+    expect(released.commitRef).toBeUndefined();
+    expect(released.blockedBy).toBeUndefined();
+  });
+
   it("appends ingress input before returning a durable accepted result", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const runtime = await createHarness(baseConfig({
@@ -1564,6 +1612,10 @@ describe("durable inbound and Human Approval integration", () => {
     expect((canceledEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
     expect(consumedItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
+
+    const repeatedCancel = await runtime.control.cancelHumanApproval?.(tasks[0].humanApprovalId);
+    expect(repeatedCancel?.status).toBe("canceled");
+    expect(canceledEvents).toHaveLength(1);
 
     await runtime.close();
   });

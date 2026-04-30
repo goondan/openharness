@@ -304,5 +304,6 @@ interface HumanApprovalStore {
 - Given ready approval이 completed로 전환되어 blocker가 해제되는 순간 같은 conversation inbound input이 들어온다, When continuation Turn handoff가 아직 LLM 실행을 시작하기 전이다, Then input은 새 Turn을 시작하지 않고 준비된 continuation Turn에 delivered 된다.
 - Given resume 중 completion 전 transient 예외가 발생한다, When runtime이 approval을 failed로 기록한다, Then failure는 retryable이며 이후 `resumeHumanApproval(id)`가 다시 lease를 획득할 수 있다.
 - Given 같은 conversation에 active Human Approval이 2개 있다, When 그 중 하나가 completed/canceled 된다, Then 나머지 approval blocker는 conversation blocker lookup에 남아 inbound를 계속 block한다.
+- Given Human Approval이 이미 terminal 상태다, When late/repeated cancel request가 들어온다, Then runtime은 상태를 바꾸지 않고 `humanApproval.canceled` event를 다시 발행하지 않는다.
 - Given approval이 non-retryable `failed`, `canceled`, 또는 `expired` 상태다, When `resumeHumanApproval(id)`가 호출된다, Then runtime은 `blocked`가 아니라 `failed` resume result를 반환한다.
 - Given 두 resume worker가 같은 ready approval을 처리하려 한다, When 둘 다 lease 획득을 시도한다, Then 하나만 handler를 실행하고 다른 하나는 existing completion 또는 lease conflict로 수렴한다.
