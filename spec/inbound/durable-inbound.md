@@ -284,6 +284,8 @@ interface DurableInboundStore {
   - `leased -> pending`
   - `leased -> failed -> pending|deadLetter`
   - `blocked -> deadLetter`
+  - `delivered` is not a lease state and must not be automatically released to `pending` by lease expiry. Recovery must use an explicit operator/recovery decision after determining the active Turn cannot consume it.
+  - duplicate direct input must report from the existing item state: `blocked` maps to `waitingForHuman`, `consumed` maps to the cached/completed result, and non-terminal or failed states must not be coerced to successful completion.
 - Concurrency Strategy:
   - store methods are compare-and-set/transactional at item and conversation sequence boundaries.
   - scheduler may run opportunistically in request path and/or background worker, but store lease decides ownership.
@@ -299,6 +301,7 @@ interface DurableInboundStore {
 - Migration / Rollback:
   - durable mode is opt-in.
   - existing `steered` disposition is accepted as migration alias for canonical `delivered`.
+  - if Human Gate blockers are used with ingress, durable inbound storage is required to preserve blocked envelopes; non-durable ingress must fail explicitly instead of returning `blocked` for an unpersisted envelope.
 
 ---
 
@@ -323,3 +326,6 @@ interface DurableInboundStore {
 - Given 두 worker가 같은 conversation pending item을 동시에 schedule한다, When 둘 다 lease를 시도한다, Then 하나만 lease를 얻고 다른 worker는 no-op/conflict result로 수렴한다.
 - Given inbound item이 conversation에 이미 append되었지만 consume marking 전 crash가 발생했다, When recovery가 같은 item을 다시 처리한다, Then 같은 inbound item id의 user message가 중복 append되지 않는다.
 - Given durable inbound mode가 꺼져 있다, When 기존 ingress/processTurn 테스트가 실행된다, Then 기존 started/steered 동작이 유지된다.
+- Given inbound item이 `delivered` 상태다, When lease expiry recovery가 실행된다, Then item은 자동으로 `pending`이 되지 않는다.
+- Given durable direct input이 duplicate이고 기존 item이 `delivered` 또는 `failed` 상태다, When `processTurn()`이 호출된다, Then runtime은 성공 완료로 보고하지 않는다.
+- Given durable inbound mode가 꺼져 있고 conversation이 human gate로 blocked 상태다, When ingress event가 들어온다, Then runtime은 envelope를 drop하지 않고 명시적 오류를 반환한다.

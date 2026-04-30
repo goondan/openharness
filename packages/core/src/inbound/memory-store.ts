@@ -194,13 +194,6 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
     let released = 0;
 
     for (const item of this._items.values()) {
-      if (item.status === "delivered" && !item.commitRef && Date.parse(item.updatedAt) <= nowMs) {
-        item.status = "pending";
-        item.turnId = undefined;
-        item.updatedAt = now;
-        released += 1;
-        continue;
-      }
       if (item.status !== "leased" || !item.lease) {
         continue;
       }

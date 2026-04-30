@@ -200,6 +200,9 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     ? undefined
     : config.durableInbound?.store;
   const humanGateStore = config.humanGate?.store;
+  if (humanGateStore && connectionsMap.size > 0 && !durableInboundStore) {
+    throw new ConfigError("humanGate with ingress connections requires durableInbound.store.");
+  }
 
   // Create the runtime first (we need a reference for dispatchTurn)
   // Build the runtime so dispatchTurn can call processTurn
@@ -330,10 +333,9 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
       const blocker = await (humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
       if (blocker) {
-        return {
-          disposition: "blocked" as const,
-          blocker,
-        };
+        throw new ConfigError(
+          "Human Gate blocked ingress requires durableInbound.store so blocked envelopes are preserved.",
+        );
       }
 
       const steered = runtimeRef.steerTurn(agentName, envelope, conversationId);

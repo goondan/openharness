@@ -9,6 +9,7 @@ import type {
   LlmClient,
   EventPayload,
   DurableInboundStore,
+  DurableInboundItem,
   HumanGateStore,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
@@ -94,6 +95,57 @@ function createDeferred<T>(): {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function turnResultForDurableDuplicate(
+  item: DurableInboundItem & { failure?: { reason?: string } },
+  agentName: string,
+  conversationId: string,
+  cached?: TurnResult,
+): TurnResult {
+  if (item.status === "consumed" && cached) {
+    return cached;
+  }
+
+  const turnId = item.turnId ?? `turn-${randomUUID()}`;
+  const base = {
+    turnId,
+    agentName,
+    conversationId,
+    steps: [],
+  };
+
+  switch (item.status) {
+    case "blocked":
+      return {
+        ...base,
+        status: "waitingForHuman",
+      };
+    case "consumed":
+      return {
+        ...base,
+        status: "completed",
+      };
+    case "pending":
+    case "leased":
+    case "delivered":
+      return {
+        ...base,
+        status: "aborted",
+        error: new Error(
+          `Durable inbound item "${item.id}" is ${item.status}; duplicate caller must wait for recovery or the active turn.`,
+        ),
+      };
+    case "failed":
+    case "deadLetter": {
+      const reason = item.failure?.reason ?? item.lastError ?? `Durable inbound item "${item.id}" is ${item.status}.`;
+      return {
+        ...base,
+        status: "error",
+        error: new Error(reason),
+      };
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,12 +341,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         idempotencyKey: appended.item.idempotencyKey,
           status: appended.item.status,
       } as any);
-      if (appended.duplicate && appended.item.status === "consumed") {
-        const cached = this._turnResultByInboundItem.get(appended.item.id);
-        if (cached) {
-          return cached;
-        }
-      }
       if (appended.duplicate) {
         if (appended.item.turnId) {
           const active = this._inFlightTurns.get(appended.item.turnId);
@@ -302,13 +348,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             return active.promise;
           }
         }
-        return {
-          turnId: appended.item.turnId ?? `turn-${randomUUID()}`,
+        return turnResultForDurableDuplicate(
+          appended.item,
           agentName,
           conversationId,
-          status: appended.item.status === "blocked" ? "waitingForHuman" : "completed",
-          steps: [],
-        };
+          this._turnResultByInboundItem.get(appended.item.id),
+        );
       }
       const blocker = await (this._humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
       if (blocker) {
