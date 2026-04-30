@@ -1004,6 +1004,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         ? async (input: any) => {
             const cancelInput = typeof input === "string" ? { humanApprovalId: input } : input;
             const gate = await this._humanApprovalStore!.cancelApproval(cancelInput) as any;
+            this._runtimeEvents.emit("humanApproval.canceled", {
+              type: "humanApproval.canceled",
+              humanApprovalId: gate.id,
+              reason: cancelInput.reason,
+            } as any);
             if (this._durableInboundStore) {
               if (gate.status === "expired") {
                 const blockedItems = await this._durableInboundStore.listInboundItems({

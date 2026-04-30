@@ -662,7 +662,6 @@ describe("durable inbound and Human Approval integration", () => {
       durableInbound: { enabled: true, store: inboundStore as any },
       humanApproval: { store: humanApprovalStore as any },
     }));
-
     const turnPromise = runtime.processTurn("default", "run guarded", {
       conversationId: "conv-steered-human",
       idempotencyKey: "direct-human-steered",
@@ -768,6 +767,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("releases blocked inbound items when canceling a Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const canceledEvents: unknown[] = [];
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -791,6 +791,9 @@ describe("durable inbound and Human Approval integration", () => {
       durableInbound: { enabled: true, store: inboundStore as any },
       humanApproval: { store: humanApprovalStore as any },
     }));
+    runtime.events.on("humanApproval.canceled", (event) => {
+      canceledEvents.push(event);
+    });
 
     const result = await runtime.processTurn("default", "run guarded", {
       conversationId: "conv-cancel-human",
@@ -826,6 +829,8 @@ describe("durable inbound and Human Approval integration", () => {
     });
 
     expect(canceled?.status).toBe("canceled");
+    expect(canceledEvents).toHaveLength(1);
+    expect((canceledEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
     expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 
@@ -835,6 +840,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("dead-letters blocked inbound items when expiring a Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const canceledEvents: unknown[] = [];
     const guardedTool: ToolDefinition = {
       name: "guarded",
       description: "guarded tool",
@@ -857,6 +863,9 @@ describe("durable inbound and Human Approval integration", () => {
       durableInbound: { enabled: true, store: inboundStore as any },
       humanApproval: { store: humanApprovalStore as any },
     }));
+    runtime.events.on("humanApproval.canceled", (event) => {
+      canceledEvents.push(event);
+    });
 
     const result = await runtime.processTurn("default", "run guarded", {
       conversationId: "conv-expire-human",
@@ -896,6 +905,9 @@ describe("durable inbound and Human Approval integration", () => {
     });
 
     expect(expired?.status).toBe("expired");
+    expect(canceledEvents).toHaveLength(1);
+    expect((canceledEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
+    expect((canceledEvents[0] as any).reason).toBe("approval expired");
     expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
     expect(deadLetterItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 
