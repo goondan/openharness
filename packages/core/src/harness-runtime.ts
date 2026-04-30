@@ -79,7 +79,6 @@ class SteeringInbox implements TurnSteeringController {
 
   close(): void {
     this._closed = true;
-    this._queue = [];
   }
 }
 
