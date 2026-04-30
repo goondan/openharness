@@ -173,7 +173,7 @@ Rules:
 - `listPending*()`은 `waitingForHuman`과 `pending` request만 반환한다.
 - `listRecoverable*()` 또는 recovery scan은 pending-visible 상태뿐 아니라 `preparing`, `ready`, `resuming`, `failed(retryable)`, `continuing`, `blocked`을 관찰할 수 있어야 한다. 단, 관찰과 automatic resume은 다르다.
 - side-effect boundary 이후 자동 재실행이 안전하지 않은 실패는 `failed(retryable)`로 남으면 안 된다. `blocked` 또는 `failed(nonRetryable)`로 수렴해야 한다. conversation을 안전하게 이어갈 수 없으면 `blocked`를 사용한다.
-- `continuing` cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* (§9.4 `cancelBatch()` semantics). 운영자 cancel은 `abortContinuation: true`로 active continuation turn에 abort 신호를 보낼 수 있고, 이미 `completeBatch()`가 commit됐으면 cancel은 `notCancelable`로 idempotent 수렴한다.
+- `continuing` cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* (§9.4 `cancelBatch()` semantics). 운영자 cancel은 `abortContinuation: true`로 active continuation turn에 abort 신호를 보낼 수 있고, 이미 `completeBatch()`가 commit돼 batch가 terminal이면 cancel은 `alreadyTerminal`로 idempotent 수렴한다. `abortContinuation` 없이 `continuing` batch에 호출된 cancel은 race가 아니라 *cancel 부적용*이며 `notCancelable`로 거절된다.
 - Conversation barrier는 **새 turn 생성**과 **새 HITL batch 생성**을 차단한다. 기존 active turn에 대한 active-turn steering은 conversation barrier와 별개 메커니즘이며, §8.4 step 8 예외 외에는 사용되지 않는다.
 - **Chained HITL 예외:** `continuing` batch의 active continuation turn이 같은 conversation에서 새 HITL barrier를 trigger하는 tool call을 만들었을 때, runtime은 이전 batch를 `completed(spawnedChild)`로 닫은 *직후* 같은 atomic operation으로 새 child batch를 생성할 수 있다. 이 spawn 경로 외에는 conversation barrier가 그대로 적용된다. 두 batch는 `parentBatchId`/`childBatchId`로 링크되며, child batch는 parent의 `appendCommit` 이후 step 13의 successful terminal로 settle하기 *전* 시점에서만 spawn될 수 있다 (§8.5 step 12.1 참조).
 
@@ -328,7 +328,7 @@ Request result mutation rules:
 12. Runtime은 continuation을 실행한다. Continuation은 일반 turn middleware 의미를 유지하되 resume 자체를 새 user input으로 append하지 않는다.
 12.1. **Chained HITL spawn:** continuation step이 새 HITL barrier를 trigger하는 tool call을 만들면, runtime은 `spawnChildBatch()`(§9.4)를 호출한다. 이 호출 *내부에서* 세 효과가 *하나의 atomic transaction*으로 처리된다 — (a) parent batch에 `recordContinuationOutcome()`로 `outcome: "spawnedChild"`(+ `childBatchId`) 기록, (b) parent batch를 `completeBatch()`로 `outcome: "spawnedChild"`로 close, (c) child batch와 child requests를 `createBatch()` 의미로 생성하면서 `parentBatchId`/`childBatchId`를 양쪽에 박는다. runtime은 (a)(b)(c)를 직접 분리해 호출하지 않는다 — `spawnChildBatch()`가 chained spawn의 *유일한 정식 경로*다. 이 spawn 경로에서만 §7.2의 conversation barrier 룰이 chained spawn을 허용한다 (parent close와 child create가 같은 transaction이므로 barrier predicate는 그 시점 어느 한쪽이든 통과시켜야 한다). transaction이 실패하면 parent와 child는 모두 spawn 이전 상태로 남고 — `recordContinuationOutcome("spawnedChild")` marker도 commit되지 않으며 partial close (parent만 닫힌 흔적)는 발생하지 않는다 — 이후 step 14의 일반 stuck-recovery 경로로 이어진다 (이 경우 outcome은 `errored`로 분류된다). spawn transaction이 성공한 직후 child batch는 `preparing` 상태로 노출되며, runtime은 §8.1 step 6~8을 그대로 따라 child의 non-HITL peer result 실행과 `markBatchWaitingForHuman()`을 진행한다. child의 peer 실행은 spawn transaction *바깥*이며 parent의 lease/fencing 줄을 잇지 않는다.
 13. Continuation이 successful terminal state로 settle되면 runtime은 두 단계를 *순서대로* 수행한다 — (a) `recordContinuationOutcome()`으로 `completed` 또는 `maxStepsReached` outcome을 durable하게 기록한다, (b) marker 기록 성공 후 `completeBatch()`를 같은 outcome으로 호출해 batch를 `completed`로 닫는다. (a)가 실패하면 close 시도 자체가 막히고 step 14의 stuck 경로로 이어진다. (a)는 성공했으나 (b)가 실패하면 marker가 이미 박혀 있어 §8.6 step 9.1이 같은 분류로 close를 재시도한다.
-14. Continuation이 error/abort로 settle되면 runtime은 같은 두 단계 순서를 따른다 — (a) `recordContinuationOutcome()`으로 `aborted`(cancel/abort signal 관찰) 또는 `errored`(continuation 자체 실패 또는 spawn transaction 실패) outcome을 durable하게 기록한 뒤, (b) `failBatch()`로 batch를 `blocked` 또는 `failed(nonRetryable)`로 수렴시킨다. continuation은 자동 재실행하지 않는다. (a) 또는 (b) 호출 자체가 실패하면 batch는 일시적으로 `continuing` 상태로 stuck될 수 있다. 이 경우 startup recovery는 `continuing` batch를 자동 resume하지 않지만, durable하게 박혀 있는 continuation outcome marker(`completed` / `maxStepsReached` / `aborted` / `errored`)를 보고 같은 분류로 close 시도를 재수행할 수 있다 (§8.6 step 9.1 참조). `spawnedChild` marker는 `spawnChildBatch()` transaction이 atomic하게 처리하므로, parent가 stuck `continuing` 상태로 `spawnedChild` marker만 가진 케이스는 발생하지 않는다.
+14. Continuation이 error/abort로 settle되면 runtime은 같은 두 단계 순서를 따른다 — (a) `recordContinuationOutcome()`으로 `aborted`(continuation 자체가 abort signal 또는 host cancellation을 관찰해 자체 중단) 또는 `errored`(continuation 자체 실패 또는 spawn transaction 실패) outcome을 durable하게 기록한 뒤, (b) `failBatch()`로 batch를 `blocked` 또는 `failed(nonRetryable)`로 수렴시킨다. continuation은 자동 재실행하지 않는다. *batch가 이미 `cancelBatch(abortContinuation: true)`로 `canceled` terminal 상태가 되어 있다면*, (a)/(b) 호출은 store의 idempotent 규칙에 따라 현재 canceled record를 반환하고 mutation은 일어나지 않는다 — cancel이 먼저 commit된 race에서 continuation의 self-converge 호출은 *no-op*이다 (§9.4 cancelBatch semantics). (a) 또는 (b) 호출 자체가 실패하면 batch는 일시적으로 `continuing` 상태로 stuck될 수 있다. 이 경우 startup recovery는 `continuing` batch를 자동 resume하지 않지만, durable하게 박혀 있는 continuation outcome marker(`completed` / `maxStepsReached` / `aborted` / `errored`)를 보고 같은 분류로 close 시도를 재수행할 수 있다 (§8.6 step 9.1 참조). `spawnedChild` marker는 `spawnChildBatch()` transaction이 atomic하게 처리하므로, parent가 stuck `continuing` 상태로 `spawnedChild` marker만 가진 케이스는 발생하지 않는다.
 
 **Failure Handling:**
 
@@ -398,9 +398,9 @@ interface ControlApi {
 
 `resumeHitlBatch(batchId)`가 canonical resume API다. 이 API는 idempotent해야 한다. 다른 owner가 batch lease를 보유 중이거나 batch가 이미 `continuing`/`completed`/`canceled`/`expired`/`failed(nonRetryable)`/`blocked` 같은 terminal 또는 post-side-effect 상태이면, 호출은 mutation 없이 현재 상태를 `ResumeHitlResult`로 반환한다. `resumeHitl(requestId)`는 request의 owning batch를 찾는 helper다. owning batch가 resume 가능한 상태가 아니면 `resumeHitlBatch`와 동일한 idempotent semantics를 따른다.
 
-`cancelHitlBatch(input)`도 idempotent해야 한다. 이미 `canceled`/`completed`/`failed(nonRetryable)`/`blocked`/`expired` 상태이면 mutation 없이 `notCancelable` 또는 `canceled`(같은 reason 재호출)로 수렴한다. `continuing` batch에 대해서는 `input.abortContinuation`이 active continuation turn에 abort 신호를 보낼지를 결정한다 — `false`/생략이면 cancel은 `notCancelable`로 거절되고, `true`이면 store는 batch를 `canceled`로 닫고 runtime은 active continuation turn에 abort 신호를 보낸다 (§9.4 `cancelBatch()` semantics 참조). cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다*. control API의 `notCancelable` / `alreadyTerminal` 같은 status 명칭은 store가 반환한 `HitlBatchRecord`를 보고 control surface가 분류해 노출하는 결과다 — store 자체는 별도 status enum을 두지 않는다 (§9.4 마지막 단락).
+`cancelHitlBatch(input)`도 idempotent해야 한다. 이미 `canceled`/`completed`/`failed(nonRetryable)`/`expired` terminal 상태이면 mutation 없이 control API가 `alreadyTerminal`(이미 다른 terminal로 수렴됨) 또는 `canceled`(같은 reason 재호출)로 분류해 노출한다. `blocked` batch는 §7.1 전이에 따라 `cancel`로 정식 close가 가능한 상태다 — operator가 풀어주기 전까지 barrier로 남는 post-side-effect failure 상태라서 cancel은 mutation으로 처리되어 `canceled`로 수렴한다 (§7.2 `blocked`는 operator recovery/cancel 대상). `continuing` batch에 대해서는 `input.abortContinuation`이 active continuation turn에 abort 신호를 보낼지를 결정한다 — `false`/생략이면 cancel은 `notCancelable`로 거절되고, `true`이면 store는 batch를 `canceled`로 닫고 runtime은 active continuation turn에 abort 신호를 보낸다 (§9.4 `cancelBatch()` semantics 참조). cancel과 `completeBatch()`가 경합하면 *먼저 commit된 호출이 이긴다* — cancel이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `completed`/`failed`/`expired`), completion이 늦으면 control API는 `alreadyTerminal`로(batch는 이미 `canceled`) 분류해 노출한다. 이 status 명칭은 store가 반환한 `HitlBatchRecord`를 보고 control surface가 분류해 노출하는 결과다 — store 자체는 별도 status enum을 두지 않는다 (§9.4 마지막 단락).
 
-abort signal 전달의 보장 수준: `abortContinuation: true` cancel이 store에 commit되면 batch는 durable하게 `canceled`다. 그러나 active continuation turn에 abort 신호가 *전달*되는 것은 in-process best-effort 효과이며, store transaction의 atomic 보장 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 §8.5 step 14의 `aborted` 경로로 self-converge한다. cancel commit 후 process가 죽거나 in-process 신호 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다 (§7.2 `canceled`는 terminal). 외부 side effect의 cancellation propagation은 host 책임이다.
+abort signal 전달의 보장 수준: `abortContinuation: true` cancel이 store에 commit되면 batch는 durable하게 `canceled`이고 *terminal*이다 — 이후 continuation이 settle해도 추가 store close는 발생하지 않는다. active continuation turn에 abort 신호가 *전달*되는 것은 in-process best-effort 효과이며, store transaction의 atomic 보장 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 *추가 store mutation 없이* 중단한다 — batch는 이미 `canceled`이므로 `recordContinuationOutcome()` 또는 `failBatch()`/`completeBatch()` 후속 호출이 발생하더라도 store는 idempotent 규칙에 따라 현재 canceled record를 반환할 뿐이다 (§9.4). §8.5 step 14의 `aborted` outcome 경로는 *cancel 없이* continuation이 자체적으로 abort/error로 settle한 경우의 close 분류이지, cancel 후 self-converge 경로가 아니다. cancel commit 후 process가 죽거나 in-process 신호 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다 (§7.2 `canceled`는 terminal). 외부 side effect의 cancellation propagation은 host 책임이다.
 
 ### 9.3 Human result
 
@@ -516,9 +516,9 @@ Required store semantics:
 - `recordContinuationOutcome()`은 `commitBatchAppend()`가 성공한 batch에 대해서만 허용된다. 같은 batch에 다른 outcome으로 두 번째 호출이 오면 conflict로 거절한다 (continuation outcome은 idempotent 단일 사실이다). 같은 outcome 재호출은 mutation 없이 성공으로 수렴한다. 이 메서드는 §8.5 step 13~14의 close 호출이 실패해도 outcome을 잃지 않게 만드는 핵심 저장점이며, runtime은 close 호출 *전에* 먼저 marker를 박는다.
 - 외부 호출자가 `recordContinuationOutcome()`을 직접 `outcome: "spawnedChild"`로 호출하는 것도 spec 위반이다 — `spawnedChild` outcome은 `spawnChildBatch()` transaction 내부에서만 박힌다. store는 외부 진입의 `spawnedChild` marker를 거절해야 한다. 외부 호출자는 `completed` / `maxStepsReached` / `aborted` / `errored` 중 하나만 사용한다.
 - `spawnChildBatch()`는 chained HITL spawn의 *유일한 정식 진입점*이다. 호출은 (a) parent의 `recordContinuationOutcome("spawnedChild", { childBatchId })`, (b) parent의 `completeBatch({ outcome: "spawnedChild", childBatchId })`, (c) child의 `createBatch` 의미를 모두 *같은 atomic transaction*으로 처리한다. parent의 conversation barrier가 풀리는 시점과 child의 barrier가 잡히는 시점 사이에 다른 turn/batch가 끼어들면 안 된다. transaction이 실패하면 parent와 child 모두 spawn 이전 상태로 남으며, partial close (parent만 닫힌 흔적) 또는 partial marker (`spawnedChild` marker만 commit된 흔적)는 발생하지 않는다.
-- `cancelBatch()`는 두 효과를 분리해 정의한다 — **durable boundary**와 **abort signal**. durable boundary는 store atomic이다: `continuing` batch에 `abortContinuation: true`로 호출되면 store는 batch를 `canceled`로 닫고 cancel 사실을 durable하게 commit한다. 이 commit은 startup recovery가 동일하게 관찰한다. abort signal 전달 — runtime이 active continuation turn에 abort 신호를 보내는 in-process 효과 — 은 *best-effort*이며 `cancelBatch()`의 atomic guarantee 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 §8.5 step 14의 `aborted` 경로로 self-converge한다. cancel commit 후 process가 죽거나 abort signal 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다.
-- cancel과 `completeBatch()`가 경합하면 *먼저 commit된 store 호출이 이긴다* — 늦게 도착한 쪽은 mutation 없이 현재 record를 반환한다. control API(§9.2)는 그 record를 보고 `notCancelable`(cancel이 늦은 경우) 또는 `alreadyTerminal`(completion이 늦은 경우)로 분류해 노출한다.
-- `cancelBatch()`는 같은 `batchId`에 대해 idempotent해야 한다. 이미 `canceled`/`completed`/`failed(nonRetryable)`/`blocked`/`expired` 상태이면 mutation 없이 현재 record를 반환한다 — 같은 record를 받은 control API가 `notCancelable`로 분류해 노출한다.
+- `cancelBatch()`는 두 효과를 분리해 정의한다 — **durable boundary**와 **abort signal**. durable boundary는 store atomic이다: `continuing` batch에 `abortContinuation: true`로 호출되면 store는 batch를 `canceled`로 닫고 cancel 사실을 durable하게 commit한다. 이 commit이 끝난 시점에서 batch는 *terminal*이며, 이후 continuation이 settle해도 추가 store close는 발생하지 않는다. 이 commit은 startup recovery가 동일하게 관찰한다. abort signal 전달 — runtime이 active continuation turn에 abort 신호를 보내는 in-process 효과 — 은 *best-effort*이며 `cancelBatch()`의 atomic guarantee 안에 있지 않다. continuation은 다음 await/yield 또는 host가 정의한 cancellation observation point에서 cancel을 관찰하고 *추가 store mutation 없이* 중단한다. continuation이 abort 신호를 늦게 관찰해 `recordContinuationOutcome()` 또는 `failBatch()`/`completeBatch()`를 호출하더라도, batch가 이미 `canceled`이므로 store는 idempotent 규칙에 따라 현재 canceled record를 반환할 뿐이다 — 추가 close나 outcome marker overwrite는 발생하지 않는다. §8.5 step 14의 `aborted` outcome 경로는 *cancel 없이* continuation이 자체적으로 abort/error로 settle한 경우의 close 분류이지, cancel 후 self-converge 경로가 아니다. cancel commit 후 process가 죽거나 abort signal 전달이 실패해도 batch는 store에서 이미 `canceled`이고, recovery는 그 batch를 자동 resume하지 않는다.
+- cancel과 `completeBatch()`가 경합하면 *먼저 commit된 store 호출이 이긴다* — 늦게 도착한 쪽은 mutation 없이 현재 record를 반환한다. control API(§9.2)는 그 record를 보고 분류한다 — cancel이 늦으면 batch는 이미 `completed`/`failed`/`expired`이라 `alreadyTerminal`로, completion이 늦으면 batch는 이미 `canceled`이라 마찬가지로 `alreadyTerminal`로 노출한다. (`notCancelable`은 race가 아니라 *cancel이 적용 불가능한 상태*에서 사용된다 — 예: `continuing` batch에 `abortContinuation` 없이 cancel을 시도한 경우.)
+- `cancelBatch()`는 같은 `batchId`에 대해 idempotent해야 한다. 이미 terminal 상태(`canceled`/`completed`/`failed(nonRetryable)`/`expired`)면 mutation 없이 현재 record를 반환한다 — 같은 record를 받은 control API가 `alreadyTerminal`(또는 같은 reason 재호출이면 `canceled`)로 분류해 노출한다. `blocked` batch는 §7.1 전이에 따라 cancel mutation 대상이다 — store는 `blocked → canceled` 전이를 commit하고 control API는 `canceled`로 노출한다. `continuing` batch에 `abortContinuation: false`/생략으로 호출된 cancel은 mutation 없이 현재 record를 반환하고 control API는 `notCancelable`로 노출한다.
 
 > **Store return 표면.** `HitlStore`의 모든 메서드는 batch/request `*Record`를 반환한다 (또는 result envelope의 record 필드). `notCancelable` / `alreadyTerminal` / `leaseConflict` / `notReady` 같은 status 명칭은 control API(§9.2)가 같은 record를 보고 분류해 노출하는 *control-surface*다. store는 자체 status enum을 두지 않으며, idempotent 결과를 status 문자열로 반환하지 않는다.
 
@@ -607,9 +607,11 @@ interface HitlCompletion {
 
 interface HitlBatchCompletion {
   continuationTurnId: string;
-  outcome: "completed" | "maxStepsReached" | "spawnedChild"; // §8.5 step 13/12.1의 close-eligible terminal state
+  // 외부 호출자(runtime → completeBatch())가 사용 가능한 outcome은 `completed` / `maxStepsReached` 둘이다.
+  // `spawnedChild`는 spawnChildBatch() transaction 내부에서만 사용된다 — 외부 completeBatch() 호출에 사용하면 §9.4 store semantics가 거절한다.
+  outcome: "completed" | "maxStepsReached" | "spawnedChild"; // §8.5 step 13의 successful terminal + §8.5 step 12.1의 spawn-internal close
   completedAt: string;
-  childBatchId?: string;             // outcome === "spawnedChild"일 때 child batch ID (parent record에 박힌다)
+  childBatchId?: string;             // outcome === "spawnedChild"일 때만 채워진다 (spawnChildBatch internal). parent record에 박힌다.
 }
 
 type HitlContinuationOutcome =
@@ -622,7 +624,7 @@ type HitlContinuationOutcome =
 
 `HitlBatchCompletion.outcome`은 `completeBatch()`가 호출 가능한 close-eligible terminal state로 한정한다. `completed`/`maxStepsReached`는 successful terminal, `spawnedChild`는 chained HITL spawn에서 parent를 닫는 분류다. continuation 안에서 새 HITL barrier가 생긴 경우(chained HITL)는 별도 completion이 아니라 *spawn transaction* (§8.5 step 12.1, §9.4 `spawnChildBatch()`) 으로 처리되며, parent는 `outcome: "spawnedChild"`로 닫히고 새 child batch가 같은 transaction에서 생성된다.
 
-`HitlContinuationOutcome`은 `recordContinuationOutcome()`이 batch에 박는 atomic marker다. `completeBatch()`/`failBatch()` 호출이 실패해 `continuing` batch가 일시적으로 stuck됐을 때, startup recovery가 같은 분류로 close 시도를 재수행할 근거가 된다 (§8.6 step 9.1). `aborted`/`errored`는 cancel 신호 또는 continuation 자체 실패를 표현하며, `failBatch()`로 `blocked` 또는 `failed(nonRetryable)`에 수렴된다. `spawnedChild`는 spawn transaction이 commit된 상태이지만 close가 실패한 경우의 분류다 — recovery는 parent를 `completed(spawnedChild)`로 다시 닫는다.
+`HitlContinuationOutcome`은 `recordContinuationOutcome()`이 batch에 박는 atomic marker다. `completeBatch()`/`failBatch()` 호출이 실패해 `continuing` batch가 일시적으로 stuck됐을 때, startup recovery가 같은 분류로 close 시도를 재수행할 근거가 된다 (§8.6 step 9.1). 외부 호출자가 사용 가능한 outcome은 `completed` / `maxStepsReached` / `aborted` / `errored` 넷이다. `aborted`는 continuation이 abort signal(cancel-driven 또는 host cancellation)을 관찰해 자체적으로 settle한 경우의 close 분류이며 `failBatch()`로 `blocked` 또는 `failed(nonRetryable)`에 수렴된다 — 단, `cancelBatch(abortContinuation: true)`가 이미 batch를 `canceled`로 닫아 둔 상태에서 continuation이 늦게 신호를 관찰해 `recordContinuationOutcome("aborted")`/`failBatch()`를 호출하면 store는 idempotent 규칙에 따라 현재 canceled record를 반환하고 mutation은 일어나지 않는다 (§9.4 cancelBatch semantics; `aborted` 경로는 *cancel 없이* continuation이 자체 settle한 경우에만 실제 close mutation을 만든다). `errored`는 continuation 자체 실패 또는 spawn transaction 실패의 분류이며 마찬가지로 `failBatch()`로 수렴된다. `spawnedChild`는 `spawnChildBatch()` transaction *내부에서만* atomic하게 박히는 marker이며, 외부 호출자가 `recordContinuationOutcome("spawnedChild")` 또는 `completeBatch(outcome:"spawnedChild")`를 직접 호출하는 것은 spec 위반이다 (§9.4 store semantics에서 거절). spawn transaction은 marker 기록 + parent close + child create를 한 atomic operation으로 처리하므로, parent가 stuck `continuing` 상태로 `spawnedChild` marker만 갖는 케이스는 *발생할 수 없으며* — 그런 record가 발견되면 store atomicity 위반으로 분류한다 (§8.6 step 9.1). 일반 recovery는 `spawnedChild` marker를 close 재시도 대상으로 다루지 않는다.
 
 **Failure**
 
@@ -725,7 +727,8 @@ type SubmitHitlResult =
 type ResumeHitlResult =
   | { status: "completed"; batch: HitlBatchView; result?: ToolResult }
   | { status: "scheduled"; batchId: string }
-  | { status: "alreadyCompleted"; batch: HitlBatchView }
+  | { status: "alreadyCompleted"; batch: HitlBatchView }      // batch.status === "completed"
+  | { status: "alreadyTerminal"; batch: HitlBatchView }       // batch.status ∈ { canceled, failed(nonRetryable), expired, blocked } — resume 불가, 운영 action 대상
   | { status: "notReady"; batch: HitlBatchView; pendingRequestIds: string[] }
   | { status: "notFound"; batchId?: string; requestId?: string }
   | { status: "leaseConflict"; batch: HitlBatchView | null }
@@ -744,13 +747,14 @@ interface CancelHitlInput {
 }
 
 type CancelHitlResult =
-  | { status: "canceled"; batch: HitlBatchView }
+  | { status: "canceled"; batch: HitlBatchView }              // mutation으로 canceled에 도달했거나 같은 reason 재호출로 idempotent 수렴
+  | { status: "alreadyTerminal"; batch: HitlBatchView }       // race에서 졌거나 cancel 호출 시 batch가 이미 다른 terminal(`completed`/`failed(nonRetryable)`/`expired`/`canceled` with different reason)
+  | { status: "notCancelable"; batch: HitlBatchView }         // cancel이 적용 불가능한 상태 — `continuing` batch에 `abortContinuation` 없이 호출된 경우
   | { status: "notFound"; batchId?: string; requestId?: string }
-  | { status: "notCancelable"; batch: HitlBatchView }
   | { status: "error"; batchId?: string; requestId?: string; batch?: HitlBatchView; error: string };
 ```
 
-`ResumeHitlResult.leaseConflict`/`alreadyCompleted`가 §9.2의 idempotent contract를 받쳐주는 정식 status다. 두 번째 resume 호출은 mutation 없이 이 둘 중 하나(또는 `notReady`)로 수렴한다.
+`ResumeHitlResult.leaseConflict`/`alreadyCompleted`/`alreadyTerminal`가 §9.2의 idempotent contract를 받쳐주는 정식 status다. 두 번째 resume 호출은 mutation 없이 이 셋 중 하나(또는 `notReady`)로 수렴한다 — `alreadyCompleted`는 batch가 `completed`로 settle된 경우, `alreadyTerminal`은 batch가 `canceled`/`failed(nonRetryable)`/`expired`/`blocked`로 닫힌 경우. `CancelHitlResult.alreadyTerminal`은 cancel race에서 졌거나 호출 시점에 batch가 이미 다른 terminal에 있는 경우의 control surface다 — store는 record만 반환하고 control API가 분류한다 (§9.4 마지막 단락).
 
 ### 9.5 Core data types
 
@@ -826,11 +830,8 @@ interface HitlRequestRecord {
   metadata?: Record<string, JsonValue>;
 }
 
-interface HitlQueuedSteer extends HitlQueuedSteerInput {
-  queuedInputId: string;
-  batchId: string;
-  status: "queued" | "draining" | "drained" | "canceled";
-}
+// HitlQueuedSteer 타입 정의는 §9.4.1 "Queued steer" 단락의 type alias가 정식이며, §9.5는 중복 선언하지 않는다.
+// (이전 버전의 `interface HitlQueuedSteer extends HitlQueuedSteerInput`는 §9.4.1에서 union으로 바뀐 후 TypeScript 호환성을 잃어 제거됨.)
 ```
 
 ## 10. Runtime Responsibility
@@ -874,8 +875,11 @@ interface HitlQueuedSteer extends HitlQueuedSteerInput {
 - Given a `continuing` batch has no continuation outcome marker, When startup recovery runs, Then the batch remains `continuing` for operator action and continuation is not rerun.
 - Given an operator cancels a `continuing` batch with `abortContinuation: true`, When the cancel commits to durable store before `completeBatch()`, Then the batch is `canceled` durably, the runtime makes a best-effort attempt to deliver an abort signal to the active continuation turn, and a later `completeBatch()` performs no mutation while the control API surfaces the loss as `alreadyTerminal`.
 - Given a cancel commit succeeds and the runtime crashes before delivering the in-process abort signal, When startup recovery runs, Then the batch is observed as `canceled` and is not auto-resumed; the abort signal is not retried.
+- Given a `continuing` batch was already closed as `canceled` by `cancelBatch(abortContinuation: true)`, When the continuation later observes the abort signal and calls `recordContinuationOutcome("aborted")` or `failBatch()` / `completeBatch()`, Then the store returns the current canceled record with no mutation and no second close occurs (idempotent terminal observation; cancel is the sole `canceled` close path).
 - Given an operator cancels a `continuing` batch without `abortContinuation`, When the batch has an active continuation turn, Then cancel returns the current record unchanged and the control API surfaces `notCancelable`; no abort signal is sent.
-- Given the same `cancelHitlBatch()` is retried on an already-canceled or terminal batch, When the call repeats, Then the store returns the current terminal record with no mutation and the control API surfaces the result as idempotent `notCancelable`.
+- Given the same `cancelHitlBatch()` is retried on an already-canceled batch with the same reason, When the call repeats, Then the store returns the current canceled record with no mutation and the control API surfaces the result as idempotent `canceled`.
+- Given `cancelHitlBatch()` is called on a batch that is already `completed`/`failed(nonRetryable)`/`expired`, or on a `canceled` batch with a different reason, When the call lands, Then the store returns the current terminal record with no mutation and the control API surfaces the result as `alreadyTerminal`.
+- Given `cancelHitlBatch()` is called on a `blocked` batch, When the call commits, Then the store transitions the batch from `blocked` to `canceled` (operator close path) and the control API surfaces the result as `canceled`.
 - Given a `pre-resume` execution marker (created during §8.1 non-HITL peer execution) is observed at startup recovery, When the marker has no `fencingToken`, Then it is accepted as a valid pre-resume marker and recovery converges per §8.6 step 7 without applying lease/fencing checks.
 - Given a `resume` execution marker (created during §8.5 step 6 HITL handler execution), When the marker is recorded, Then `startBatchToolExecution()` requires the marker's `(ownerId, fencingToken)` to match the batch's active lease.
 - Given a chained HITL spawn transaction succeeds, When the spawn returns, Then the parent record is `completed(spawnedChild)`, the child record is `preparing` with `parentBatchId` set, and the runtime proceeds with §8.1 step 6~8 on the child outside the spawn transaction.
@@ -922,7 +926,11 @@ interface HitlQueuedSteer extends HitlQueuedSteerInput {
 - after a successful spawn, the child batch is `preparing` and proceeds via §8.1 step 6~8 outside the spawn transaction
 - spawn transaction rollback leaves both parent and child in pre-spawn state with conversation barrier intact and no `spawnedChild` marker committed
 - operator `cancelHitlBatch()` with `abortContinuation: true` durably converges the batch to `canceled`; the in-process abort signal is best-effort and is not retried after a crash
-- cancel/`completeBatch()` race: first store commit wins; the loser performs no mutation and the control API surfaces the result as idempotent `notCancelable` or `alreadyTerminal`
+- after `cancelBatch(abortContinuation: true)` commits, a continuation that later observes the abort signal and calls `recordContinuationOutcome("aborted")` / `failBatch()` / `completeBatch()` is a no-op: the store returns the current canceled record idempotently (cancel is the sole `canceled` close path; `aborted` outcome is reserved for cancel-free self-settle in §8.5 step 14)
+- cancel/`completeBatch()` race: first store commit wins; the loser performs no mutation and the control API surfaces the result as `alreadyTerminal` (loser sees batch already in another terminal state)
+- `notCancelable` is reserved for *cancel-not-applicable* states (`continuing` batch without `abortContinuation`), not race outcomes
+- `cancelHitlBatch()` on `blocked` is a legitimate operator close path: store transitions `blocked → canceled` (per §7.1)
+- `cancelHitlBatch()` retry on an already-canceled batch with the same reason returns idempotent `canceled`; with a different reason or on another terminal returns `alreadyTerminal`
 - `HitlBatchToolExecutionMarker` with `phase: "pre-resume"` is accepted without `fencingToken`; `phase: "resume"` requires `fencingToken` matching the active batch lease
 - `preparing` recovery exposes fully prepared batches and blocks marker-without-result batches without rerunning tools
 - runtime recreate lists `waitingForHuman` batch from durable store
