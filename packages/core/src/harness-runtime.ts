@@ -4,6 +4,7 @@ import type {
   MessageEvent,
   IngressApi,
   ControlApi,
+  CancelHitlResult,
   AbortResult,
   ProcessTurnOptions,
   TurnResult,
@@ -577,7 +578,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         if (batch.status === "continuing" && input.abortContinuation !== true) {
           return { status: "notCancelable", batch: await this._toHitlBatchView(batch) };
         }
-        const canceled = await hitlStore.cancelBatch(input);
+        let canceled: HitlBatchRecord;
+        try {
+          canceled = await hitlStore.cancelBatch(input);
+        } catch (err) {
+          return this._hitlCancelStoreErrorResult(hitlStore, input.batchId, input.reason, err);
+        }
         if (input.abortContinuation === true) {
           this._inFlightHitlResumes.get(input.batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
         }
@@ -615,12 +621,60 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         if (batch.status === "continuing" && input.abortContinuation !== true) {
           return { status: "notCancelable", batch: await this._toHitlBatchView(batch) };
         }
-        const canceled = await hitlStore.cancelBatch({ batchId, reason: input.reason, abortContinuation: input.abortContinuation });
+        let canceled: HitlBatchRecord;
+        try {
+          canceled = await hitlStore.cancelBatch({ batchId, reason: input.reason, abortContinuation: input.abortContinuation });
+        } catch (err) {
+          return this._hitlCancelStoreErrorResult(hitlStore, batchId, input.reason, err, input.requestId);
+        }
         if (input.abortContinuation === true) {
           this._inFlightHitlResumes.get(batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
         }
         return { status: "canceled", batch: await this._toHitlBatchView(canceled) };
       },
+    };
+  }
+
+  private async _hitlCancelStoreErrorResult(
+    hitlStore: HitlStore,
+    batchId: string,
+    reason: string | undefined,
+    cause: unknown,
+    requestId?: string,
+  ): Promise<CancelHitlResult> {
+    const latest = await hitlStore.getBatch(batchId).catch(() => null);
+    if (!latest) {
+      return {
+        status: "error",
+        batchId,
+        ...(requestId ? { requestId } : {}),
+        error: cause instanceof Error ? cause.message : String(cause),
+      };
+    }
+
+    if (
+      latest.status === "completed" ||
+      latest.status === "expired" ||
+      (latest.status === "failed" && latest.failure?.retryable !== true) ||
+      latest.status === "canceled"
+    ) {
+      const view = await this._toHitlBatchView(latest);
+      if (latest.status === "canceled" && latest.metadata?.["cancelReason"] === reason) {
+        return { status: "canceled", batch: view };
+      }
+      return { status: "alreadyTerminal", batch: view };
+    }
+
+    if (latest.status === "resuming") {
+      return { status: "notCancelable", batch: await this._toHitlBatchView(latest) };
+    }
+
+    return {
+      status: "error",
+      batchId,
+      ...(requestId ? { requestId } : {}),
+      batch: await this._toHitlBatchView(latest),
+      error: cause instanceof Error ? cause.message : String(cause),
     };
   }
 
@@ -1500,7 +1554,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     if (!this._hitlStore) {
       return null;
     }
-    const batch = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);
+    let batch = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);
+    if (!batch) {
+      return null;
+    }
+    await this._settleExpiredHitlBatches({ agentName, conversationId });
+    batch = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);
     if (!batch) {
       return null;
     }

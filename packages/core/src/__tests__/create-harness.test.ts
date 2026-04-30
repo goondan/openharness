@@ -251,6 +251,15 @@ class BlockingDispatchEnqueueStore extends InMemoryHitlStore {
   }
 }
 
+class ResumingBeforeCancelStore extends InMemoryHitlStore {
+  override async cancelBatch(
+    input: Parameters<HitlStore["cancelBatch"]>[0],
+  ): ReturnType<HitlStore["cancelBatch"]> {
+    await this.acquireBatchLease(input.batchId, "cancel-race-runtime", 60_000);
+    return super.cancelBatch(input);
+  }
+}
+
 // We need to mock createLlmClient so we don't need real API clients
 vi.mock("../models/index.js", () => ({
   createLlmClient: vi.fn(() => mockLlmClient()),
@@ -4076,6 +4085,92 @@ describe("createHarness", () => {
     });
     expect(handler).not.toHaveBeenCalled();
     expect(chat).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it("settles expired HITL before queueing direct input", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [{ toolCallId: "ttl-direct-call", toolName: "ttl_direct_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({ text: "fresh direct turn", toolCalls: [], finishReason: "stop" } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new InMemoryHitlStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "ttl_direct_tool",
+              description: "expires before direct queue",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" }, ttlMs: 5, onTimeout: "expire" },
+              handler,
+            },
+          ],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const first = await runtime.processTurn("default", "need approval", { conversationId: "ttl-direct-conv" });
+    expect(first.status).toBe("waitingForHuman");
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = await runtime.processTurn("default", "direct after expiry", { conversationId: "ttl-direct-conv" });
+
+    const expired = await store.getBatch(first.pendingHitlBatchId!);
+    expect(expired?.status).toBe("expired");
+    expect(await store.listQueuedSteers(first.pendingHitlBatchId!)).toHaveLength(0);
+    if (second.status === "waitingForHuman") {
+      expect(second.pendingHitlBatchId).not.toBe(first.pendingHitlBatchId);
+    }
+    expect(handler).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("returns a structured cancel result when the batch starts resuming during cancel", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [{ toolCallId: "cancel-race-call", toolName: "cancel_race_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new ResumingBeforeCancelStore();
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "cancel_race_tool",
+              description: "requires approval before cancel race",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+            },
+          ],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "need approval", { conversationId: "cancel-race-conv" });
+    const requestId = firstPendingHitlRequestId(result);
+    await store.resolveRequest(requestId, { decision: "approve", submittedAt: new Date().toISOString() });
+
+    const canceled = await runtime.control.cancelHitlBatch({ batchId: result.pendingHitlBatchId! });
+    expect(canceled.status).toBe("notCancelable");
+    expect(canceled.status === "notCancelable" ? canceled.batch.status : null).toBe("resuming");
+
     await runtime.close();
   });
 
