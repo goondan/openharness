@@ -82,6 +82,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       humanApprovalId: gateId,
       taskType: task.taskType ?? task.type ?? "approval",
       status: "waitingForHuman",
+      title: task.title,
       prompt: task.prompt,
       required: task.required ?? true,
       responseSchema: cloneValue(task.responseSchema),
@@ -180,6 +181,9 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       }
       return { status: "invalid", reason: `Human task is already "${task.status}".` };
     }
+    if (gate.status !== "waitingForHuman" && gate.status !== "ready") {
+      return { status: "invalid", reason: `Human approval is already "${gate.status}".` };
+    }
     if (!isValidHumanResult(input.result)) {
       return { status: "invalid", reason: "Invalid human result payload." };
     }
@@ -192,11 +196,12 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     task.submittedAt = now;
     task.updatedAt = now;
 
-    const approvalReady = this._allRequiredTasksSettled(gate);
-    if (approvalReady) {
+    const requiredTasksSettled = this._allRequiredTasksSettled(gate);
+    if (requiredTasksSettled && gate.status === "waitingForHuman") {
       gate.status = "ready";
       gate.updatedAt = now;
     }
+    const approvalReady = gate.status === "ready";
 
     return {
       status: "accepted",

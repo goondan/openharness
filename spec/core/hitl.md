@@ -53,7 +53,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   3. runtime은 store payload를 public `HumanTaskView` shape으로 정규화한다.
   4. pending/resolved/rejected/canceled/expired task view를 반환한다.
 - Outputs:
-  - `HumanTaskView[]`; task 종류는 public `type`, result idempotency key는 public `idempotencyKey` field로 노출한다.
+  - `HumanTaskView[]`; task 종류는 public `type`, task label은 public `title`, result idempotency key는 public `idempotencyKey` field로 노출한다.
 - Failure Modes:
   - store unavailable: typed error를 던지고 runtime lifecycle은 유지한다.
 
@@ -63,7 +63,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Trigger: `runtime.control.submitHumanResult(input)`
 - Preconditions:
   - `humanTaskId`가 존재한다.
-  - task 상태가 `waitingForHuman`이거나 duplicate submit으로 수렴 가능한 terminal state다.
+  - task 상태가 `waitingForHuman`이고 approval 상태가 `waitingForHuman` 또는 `ready`이거나, duplicate submit으로 수렴 가능한 already-submitted task다.
 - Main Flow:
   1. runtime은 task/approval을 조회한다.
   2. scope guard가 `agentName`, `conversationId`, optional token/secret을 검증한다.
@@ -74,6 +74,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   7. runtime은 resume worker를 schedule하거나 즉시 resume을 시도한다.
 - Alternative Flow:
   - duplicate submit은 lifecycle event를 재발행하지 않고 `{ accepted: true, duplicate: true, task, approval }`을 반환한다.
+  - approval이 `resuming` 또는 `failed` 상태이면 late task submission은 approval 상태를 `ready`로 되돌리지 않고 typed error로 수렴한다.
   - missing/invalid submit은 `SubmitHumanResult` payload로 누출하지 않고 typed error를 던진다.
   - rejection은 handler 호출 없이 rejection tool result를 만들 수 있는 approval result로 저장된다.
 - Outputs:

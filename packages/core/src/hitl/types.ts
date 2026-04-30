@@ -53,6 +53,7 @@ export interface HumanTaskRecord {
   humanApprovalId: string;
   taskType: HumanTaskType;
   status: HumanTaskStatus;
+  title?: string;
   prompt?: string;
   required: boolean;
   responseSchema?: JsonSchema;

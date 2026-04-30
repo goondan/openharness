@@ -908,6 +908,72 @@ describe("durable inbound and Human Approval integration", () => {
     expect(blockedAfterHandlerStarted).toBeNull();
   });
 
+  it("keeps resuming and failed Human Approvals from being reopened by late task submissions", async () => {
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const created = await humanApprovalStore.createApproval({
+      humanApprovalId: "approval-late-task",
+      toolCall: {
+        turnId: "turn-late-task",
+        agentName: "default",
+        conversationId: "conv-late-task",
+        stepNumber: 1,
+        toolCallId: "call-late-task",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [
+        { humanTaskId: "task-required", type: "approval", title: "Required approval", required: true },
+        { humanTaskId: "task-optional", type: "text", title: "Optional note", required: false },
+      ],
+      now: "2026-01-01T00:00:00.000Z",
+    });
+
+    const listedTasks = await humanApprovalStore.listTasks({ humanApprovalId: created.approval.id });
+    expect(listedTasks.find((task) => task.id === "task-required")?.title).toBe("Required approval");
+    expect(listedTasks.find((task) => task.id === "task-optional")?.title).toBe("Optional note");
+
+    await humanApprovalStore.submitResult({
+      humanTaskId: "task-required",
+      result: { type: "approval", approved: true },
+      idempotencyKey: "required-result",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+    const resuming = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: created.approval.id,
+      leaseOwner: "worker-1",
+      leaseTtlMs: 10_000,
+      now: "2026-01-01T00:00:02.000Z",
+    });
+    const lateWhileResuming = await humanApprovalStore.submitResult({
+      humanTaskId: "task-optional",
+      result: { type: "text", text: "late note" },
+      idempotencyKey: "late-resuming",
+      now: "2026-01-01T00:00:03.000Z",
+    });
+    const stillResuming = await humanApprovalStore.getApproval(created.approval.id);
+
+    await humanApprovalStore.markApprovalFailed({
+      humanApprovalId: created.approval.id,
+      leaseOwner: "worker-1",
+      reason: "resume failed",
+      retryable: true,
+      now: "2026-01-01T00:00:04.000Z",
+    });
+    const lateWhileFailed = await humanApprovalStore.submitResult({
+      humanTaskId: "task-optional",
+      result: { type: "text", text: "late note" },
+      idempotencyKey: "late-failed",
+      now: "2026-01-01T00:00:05.000Z",
+    });
+    const stillFailed = await humanApprovalStore.getApproval(created.approval.id);
+
+    expect(resuming?.status).toBe("resuming");
+    expect(lateWhileResuming.status).toBe("invalid");
+    expect(stillResuming?.status).toBe("resuming");
+    expect(lateWhileFailed.status).toBe("invalid");
+    expect(stillFailed?.status).toBe("failed");
+  });
+
   it("releases blocked inbound items when canceling a Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
