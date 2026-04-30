@@ -23,6 +23,7 @@ import type {
   HitlQueuedSteerInput,
   HitlRequestRecord,
   HitlStore,
+  ToolCallContext,
 } from "@goondan/openharness-types";
 import { defineHarness, env } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
@@ -178,6 +179,18 @@ class FailingOnceRecordStore extends InMemoryHitlStore {
   }
 }
 
+class FailingOnceMarkWaitingStore extends InMemoryHitlStore {
+  private failed = false;
+
+  override async markBatchWaitingForHuman(batchId: string): Promise<HitlBatchRecord> {
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("mark waiting store write failed");
+    }
+    return super.markBatchWaitingForHuman(batchId);
+  }
+}
+
 class FailingOnceCompleteRequestStore extends InMemoryHitlStore {
   private failed = false;
 
@@ -251,6 +264,22 @@ class BlockingDispatchEnqueueStore extends InMemoryHitlStore {
   }
 }
 
+class RaceyLastApprovalStore extends InMemoryHitlStore {
+  raceRequestId: string | undefined;
+  private raced = false;
+
+  override async getBatch(batchId: string): Promise<HitlBatchRecord | null> {
+    if (!this.raced && this.raceRequestId) {
+      this.raced = true;
+      await super.resolveRequest(this.raceRequestId, {
+        decision: "approve",
+        submittedAt: new Date().toISOString(),
+      });
+    }
+    return super.getBatch(batchId);
+  }
+}
+
 // We need to mock createLlmClient so we don't need real API clients
 vi.mock("../models/index.js", () => ({
   createLlmClient: vi.fn(() => mockLlmClient()),
@@ -295,6 +324,30 @@ describe("createHarness", () => {
     });
 
     await expect(createHarness(config)).rejects.toThrow("hitl.store is required");
+  });
+
+  it("rejects extension-registered HITL tools without a store at creation time", async () => {
+    const hitlExtension: Extension = {
+      name: "extension-hitl-tool",
+      register(api) {
+        api.tools.register({
+          name: "extension_hitl_tool",
+          description: "Extension-provided tool that requires approval",
+          parameters: { type: "object", additionalProperties: false },
+          hitl: { mode: "required", response: { type: "approval" } },
+          handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+        });
+      },
+    };
+
+    await expect(createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          extensions: [hitlExtension],
+        },
+      },
+    })).rejects.toThrow('Tool "extension_hitl_tool" on agent "default" requires HITL');
   });
 
   it("HITL required tool waits, survives runtime recreation, and resumes after approval", async () => {
@@ -378,6 +431,52 @@ describe("createHarness", () => {
     await runtime2.close();
   });
 
+  it("converges duplicate HITL submit when the last approval wins before batch validation", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [{ toolCallId: "call-racey-submit", toolName: "racey_submit_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new RaceyLastApprovalStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "racey approval handled" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "racey_submit_tool",
+            description: "Requires approval for duplicate submit race",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "run racey submit tool", {
+      conversationId: "racey-submit-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+    const requestId = firstPendingHitlRequestId(result);
+    store.raceRequestId = requestId;
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+
+    expect(submitted.status).toBe("duplicate");
+    expect(submitted.status === "duplicate" ? submitted.request.status : null).toBe("resolved");
+    expect(handler).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
   it("executes non-HITL peer tool calls while HITL calls remain pending in the same step", async () => {
     const { createLlmClient } = await import("../models/index.js");
     vi.mocked(createLlmClient).mockImplementation(() => ({
@@ -444,6 +543,115 @@ describe("createHarness", () => {
     expect(approvalHandler).not.toHaveBeenCalled();
     expect(laterHandler).toHaveBeenCalledOnce();
 
+    await runtime.close();
+  });
+
+  it("emits turn.done when a turn pauses for HITL", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [
+          { toolCallId: "call-turn-done-hitl", toolName: "turn_done_hitl_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "turn_done_hitl_tool",
+            description: "Requires approval",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+          }],
+        },
+      },
+      hitl: { store: new InMemoryHitlStore(), resumeOnStartup: false },
+    });
+    const turnDoneResults: TurnResult[] = [];
+    const unsubscribe = runtime.events.on("turn.done", (event) => {
+      turnDoneResults.push(event.result);
+    });
+
+    const result = await runtime.processTurn("default", "pause for HITL", {
+      conversationId: "turn-done-hitl-conv",
+    });
+
+    expect(result.status).toBe("waitingForHuman");
+    expect(turnDoneResults).toHaveLength(1);
+    expect(turnDoneResults[0]?.status).toBe("waitingForHuman");
+    unsubscribe();
+    await runtime.close();
+  });
+
+  it("keeps previous non-HITL peer results visible to later mixed-step tools", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [
+          { toolCallId: "call-visible-normal-a", toolName: "visible_normal_a", args: {} },
+          { toolCallId: "call-visible-hitl", toolName: "visible_hitl_tool", args: {} },
+          { toolCallId: "call-visible-normal-b", toolName: "visible_normal_b", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const normalBConversationSnapshots: string[] = [];
+    const middlewareExtension: Extension = {
+      name: "observe-mixed-step-conversation",
+      register(api) {
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "visible_normal_b") {
+            normalBConversationSnapshots.push(JSON.stringify(ctx.conversation.messages));
+          }
+          return next();
+        });
+      },
+    };
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          extensions: [middlewareExtension],
+          tools: [
+            {
+              name: "visible_normal_a",
+              description: "Runs before the HITL peer",
+              parameters: { type: "object", additionalProperties: false },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "normal-a-result" })),
+            },
+            {
+              name: "visible_hitl_tool",
+              description: "Requires approval",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "approved" })),
+            },
+            {
+              name: "visible_normal_b",
+              description: "Runs after the earlier normal peer",
+              parameters: { type: "object", additionalProperties: false },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "normal-b-result" })),
+            },
+          ],
+        },
+      },
+      hitl: { store: new InMemoryHitlStore(), resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "run visible mixed peers", {
+      conversationId: "visible-mixed-peer-conv",
+    });
+
+    expect(result.status).toBe("waitingForHuman");
+    expect(normalBConversationSnapshots).toHaveLength(1);
+    expect(normalBConversationSnapshots[0]).toContain("normal-a-result");
     await runtime.close();
   });
 
@@ -542,6 +750,84 @@ describe("createHarness", () => {
       ]);
     });
 
+    await runtime.close();
+  });
+
+  it("keeps earlier HITL peer results visible while resuming later HITL peers", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn()
+        .mockResolvedValueOnce({
+          toolCalls: [
+            { toolCallId: "call-resume-visible-a", toolName: "resume_visible_hitl_a", args: {} },
+            { toolCallId: "call-resume-visible-b", toolName: "resume_visible_hitl_b", args: {} },
+          ],
+          finishReason: "tool-calls",
+        } satisfies LlmResponse)
+        .mockResolvedValue({
+          text: "resumed",
+          toolCalls: [],
+          finishReason: "stop",
+        } satisfies LlmResponse),
+    }));
+
+    const secondResumeSnapshots: string[] = [];
+    const middlewareExtension: Extension = {
+      name: "observe-resumed-peer-conversation",
+      register(api) {
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "resume_visible_hitl_b") {
+            secondResumeSnapshots.push(JSON.stringify(ctx.conversation.messages));
+          }
+          return next();
+        });
+      },
+    };
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          extensions: [middlewareExtension],
+          tools: [
+            {
+              name: "resume_visible_hitl_a",
+              description: "First approval",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "first-hitl-result" })),
+            },
+            {
+              name: "resume_visible_hitl_b",
+              description: "Second approval",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: vi.fn(async () => ({ type: "text" as const, text: "second-hitl-result" })),
+            },
+          ],
+        },
+      },
+      hitl: { store: new InMemoryHitlStore(), resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "run visible HITL peers", {
+      conversationId: "visible-hitl-peer-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+    const [firstRequestId, secondRequestId] = result.pendingHitlRequestIds!;
+    expect((await runtime.control.submitHitlResult({
+      requestId: firstRequestId,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    })).status).toBe("accepted");
+    expect((await runtime.control.submitHitlResult({
+      requestId: secondRequestId,
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    })).status).toBe("accepted");
+
+    await waitUntil(() => {
+      expect(secondResumeSnapshots).toHaveLength(1);
+      expect(secondResumeSnapshots[0]).toContain("first-hitl-result");
+    });
     await runtime.close();
   });
 
@@ -1109,6 +1395,76 @@ describe("createHarness", () => {
     });
     expect(next.status).toBe("completed");
     expect(next.text).toBe("not blocked by failed preparing batch");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("normal peer result");
+
+    await runtime.close();
+  });
+
+  it("does not expose peer tool results when HITL waiting marker fails", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-mark-normal", toolName: "mark_normal_tool", args: {} },
+          { toolCallId: "call-mark-hitl", toolName: "mark_hitl_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({
+        text: "not polluted by failed waiting marker",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new FailingOnceMarkWaitingStore();
+    const normal = vi.fn(async () => ({ type: "text" as const, text: "normal marker peer result" }));
+    const hitl = vi.fn(async () => ({ type: "text" as const, text: "hitl marker result" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [
+            {
+              name: "mark_normal_tool",
+              description: "Normal peer before waiting marker",
+              parameters: { type: "object", additionalProperties: false },
+              handler: normal,
+            },
+            {
+              name: "mark_hitl_tool",
+              description: "Requires approval",
+              parameters: { type: "object", additionalProperties: false },
+              hitl: { mode: "required", response: { type: "approval" } },
+              handler: hitl,
+            },
+          ],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const failed = await runtime.processTurn("default", "start marker failure", {
+      conversationId: "mark-failure-conv",
+    });
+    expect(failed.status).toBe("error");
+    expect(normal).toHaveBeenCalledOnce();
+    expect(hitl).not.toHaveBeenCalled();
+    const batches = await store.listRecoverableBatches({ conversationId: "mark-failure-conv" });
+    for (const batch of batches) {
+      const canceled = await runtime.control.cancelHitlBatch({
+        batchId: batch.batchId,
+        reason: "test clears unexposed marker failure",
+      });
+      expect(["canceled", "alreadyTerminal"]).toContain(canceled.status);
+    }
+
+    const next = await runtime.processTurn("default", "should not see marker peer", {
+      conversationId: "mark-failure-conv",
+    });
+    expect(next.status).toBe("completed");
+    expect(next.text).toBe("not polluted by failed waiting marker");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("normal marker peer result");
 
     await runtime.close();
   });
@@ -1273,7 +1629,7 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
-  it("queues ingress during approved HITL handler execution before the drain cutoff", async () => {
+  it("rejects ingress during approved HITL handler execution after the steer queue closes", async () => {
     const { createLlmClient } = await import("../models/index.js");
     const chat = vi.fn()
       .mockResolvedValueOnce({
@@ -1345,16 +1701,15 @@ describe("createHarness", () => {
     expect(submitted.status).toBe("accepted");
     await handlerStarted.promise;
 
-    const queued = await runtime.ingress.receive({
+    const rejected = await runtime.ingress.receive({
       connectionName: "handler-window",
       payload: { text: "queue while handler is running" },
     });
-    expect(queued).toHaveLength(1);
-    expect(queued[0].disposition).toBe("queuedForHitl");
+    expect(rejected).toHaveLength(0);
 
     handlerResult.resolve({ type: "text", text: "handler done" });
     await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
-    expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("queue while handler is running");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("queue while handler is running");
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
       expect(batch?.status).toBe("completed");
@@ -1540,6 +1895,74 @@ describe("createHarness", () => {
     expect(resumed.status).toBe("completed");
     expect(chat).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("queued before commit failure");
+
+    await runtime.close();
+  });
+
+  it("does not expose HITL resume append events when append commit fails", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { toolCallId: "call-commit-leak", toolName: "commit_leak_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({
+        text: "clean after commit cancel",
+        toolCalls: [],
+        finishReason: "stop",
+      } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const store = new FailingOnceCommitStore();
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved commit leak tool" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "commit_leak_tool",
+            description: "Requires approval before commit leak check",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "start commit leak HITL", {
+      conversationId: "commit-leak-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: firstPendingHitlRequestId(result),
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("failed");
+      expect(batch?.failure?.retryable).toBe(true);
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledTimes(1);
+
+    const canceled = await runtime.control.cancelHitlBatch({
+      batchId: result.pendingHitlBatchId!,
+      reason: "test cancels failed append commit before next turn",
+    });
+    expect(canceled.status).toBe("canceled");
+
+    const next = await runtime.processTurn("default", "after canceled commit failure", {
+      conversationId: "commit-leak-conv",
+    });
+    expect(next.status).toBe("completed");
+    expect(next.text).toBe("clean after commit cancel");
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).not.toContain("approved commit leak tool");
 
     await runtime.close();
   });
@@ -2449,6 +2872,174 @@ describe("createHarness", () => {
     await runtime2.close();
   });
 
+  it("runs approved HITL handlers through tool-call middleware", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [{ toolCallId: "call-hitl-middleware", toolName: "middleware_hitl_tool", args: { value: "original" } }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({ text: "continued", toolCalls: [], finishReason: "stop" } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const handler = vi.fn(async (args) => ({ type: "text" as const, text: String(args["value"]) }));
+    const middlewareOrder: string[] = [];
+    const middlewareExtension: Extension = {
+      name: "wrap-hitl-tool-result",
+      register(api) {
+        api.pipeline.register("toolCall", async (_ctx: ToolCallContext, next): Promise<ToolResult> => {
+          middlewareOrder.push("before");
+          const result = await next();
+          middlewareOrder.push("after");
+          return result.type === "text"
+            ? { type: "text", text: `wrapped:${result.text}` }
+            : result;
+        });
+      },
+    };
+
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          extensions: [middlewareExtension],
+          tools: [{
+            name: "middleware_hitl_tool",
+            description: "Requires approval and middleware",
+            parameters: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store: new InMemoryHitlStore(), resumeOnStartup: false },
+    });
+    const toolEvents: string[] = [];
+    const unsubscribeStart = runtime.events.on("tool.start", (event) => {
+      toolEvents.push(`start:${event.toolName}`);
+    });
+    const unsubscribeDone = runtime.events.on("tool.done", (event) => {
+      toolEvents.push(`done:${event.toolName}`);
+    });
+
+    const result = await runtime.processTurn("default", "run middleware HITL", {
+      conversationId: "hitl-middleware-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: firstPendingHitlRequestId(result),
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+
+    await waitUntil(() => expect(handler).toHaveBeenCalledOnce());
+    expect(handler.mock.calls[0]?.[0]).toEqual({ value: "original" });
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("completed");
+      expect(batch?.toolResults[0]?.result).toEqual({ type: "text", text: "wrapped:original" });
+    });
+    expect(middlewareOrder).toEqual(["before", "after"]);
+    expect(toolEvents).toEqual([
+      "start:middleware_hitl_tool",
+      "done:middleware_hitl_tool",
+    ]);
+    unsubscribeStart();
+    unsubscribeDone();
+    await runtime.close();
+  });
+
+  it("runs approved HITL continuations through turn middleware", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    const chat = vi.fn()
+      .mockResolvedValueOnce({
+        toolCalls: [{ toolCallId: "call-hitl-turn-middleware", toolName: "turn_middleware_hitl_tool", args: {} }],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse)
+      .mockResolvedValue({ text: "continued through turn middleware", toolCalls: [], finishReason: "stop" } satisfies LlmResponse);
+    vi.mocked(createLlmClient).mockImplementation(() => ({ chat }));
+
+    const turnMiddlewareEvents: string[] = [];
+    const turnMiddlewareExtension: Extension = {
+      name: "wrap-hitl-continuation-turn",
+      register(api) {
+        api.pipeline.register("turn", async (ctx, next) => {
+          turnMiddlewareEvents.push(`before:${ctx.input.name}`);
+          if (ctx.input.name === "hitl.resume") {
+            ctx.conversation.emit({
+              type: "appendSystem",
+              message: {
+                id: "hitl-resume-middleware-system",
+                data: { role: "system", content: "resume middleware system prompt" },
+                metadata: { __createdBy: "turn-middleware-test" },
+              },
+            });
+          }
+          const result = await next();
+          turnMiddlewareEvents.push(`after:${ctx.input.name}:${result.status}`);
+          if (ctx.input.name === "hitl.resume" && result.status === "completed") {
+            return { ...result, text: "middleware-mutated continuation" };
+          }
+          return result;
+        });
+      },
+    };
+
+    const handler = vi.fn(async () => ({ type: "text" as const, text: "approved continuation tool" }));
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          extensions: [turnMiddlewareExtension],
+          tools: [{
+            name: "turn_middleware_hitl_tool",
+            description: "Requires approval and continuation turn middleware",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler,
+          }],
+        },
+      },
+      hitl: { store: new InMemoryHitlStore(), resumeOnStartup: false },
+    });
+    const turnDoneTexts: string[] = [];
+    const unsubscribeTurnDone = runtime.events.on("turn.done", (event) => {
+      if (event.conversationId === "hitl-turn-middleware-conv" && event.result.status === "completed") {
+        turnDoneTexts.push(event.result.text ?? "");
+      }
+    });
+
+    const result = await runtime.processTurn("default", "run turn middleware HITL", {
+      conversationId: "hitl-turn-middleware-conv",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const submitted = await runtime.control.submitHitlResult({
+      requestId: firstPendingHitlRequestId(result),
+      result: { decision: "approve", submittedAt: new Date().toISOString() },
+    });
+    expect(submitted.status).toBe("accepted");
+
+    await waitUntil(() => expect(chat).toHaveBeenCalledTimes(2));
+    await waitUntil(async () => {
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("completed");
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(JSON.stringify(chat.mock.calls[1]?.[0])).toContain("resume middleware system prompt");
+    expect(turnMiddlewareEvents).toContain("before:hitl.resume");
+    expect(turnMiddlewareEvents).toContain("after:hitl.resume:completed");
+    expect(turnDoneTexts).toContain("middleware-mutated continuation");
+    unsubscribeTurnDone();
+    await runtime.close();
+  });
+
   it("HITL form result replaces tool args before resumed handler execution", async () => {
     const { createLlmClient } = await import("../models/index.js");
     vi.mocked(createLlmClient).mockImplementation(() => ({
@@ -2865,6 +3456,57 @@ describe("createHarness", () => {
     expect(canceled.status).toBe("error");
     expect((await store.get(requestId))?.status).toBe("pending");
     expect(tool.handler).not.toHaveBeenCalled();
+  });
+
+  it("returns structured cancel results while a HITL batch is resuming", async () => {
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue({
+        toolCalls: [
+          { toolCallId: "call-resuming-cancel-1", toolName: "resuming_cancel_tool", args: {} },
+        ],
+        finishReason: "tool-calls",
+      } satisfies LlmResponse),
+    }));
+
+    const store = new InMemoryHitlStore();
+    const runtime = await createHarness({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test-key" },
+          tools: [{
+            name: "resuming_cancel_tool",
+            description: "Requires approval",
+            parameters: { type: "object", additionalProperties: false },
+            hitl: { mode: "required", response: { type: "approval" } },
+            handler: vi.fn(async () => ({ type: "text" as const, text: "should not run" })),
+          }],
+        },
+      },
+      hitl: { store, resumeOnStartup: false },
+    });
+
+    const result = await runtime.processTurn("default", "create resuming cancel request", {
+      conversationId: "resuming-cancel-hitl-conv",
+    });
+    const batchId = result.pendingHitlBatchId!;
+    const requestId = firstPendingHitlRequestId(result);
+    await store.resolveRequest(requestId, { decision: "approve", submittedAt: new Date().toISOString() });
+    const lease = await store.acquireBatchLease(batchId, "external-resume-owner", 1000);
+    expect(lease.status).toBe("acquired");
+
+    const notCancelable = await runtime.control.cancelHitlBatch({ batchId });
+    expect(notCancelable.status).toBe("notCancelable");
+
+    const canceled = await runtime.control.cancelHitlBatch({
+      batchId,
+      abortContinuation: true,
+      reason: "operator stop",
+    });
+    expect(canceled.status).toBe("canceled");
+    expect((await store.getBatch(batchId))?.status).toBe("canceled");
+
+    await runtime.close();
   });
 
   it("marks unrecoverable HITL resume failures as non-retryable", async () => {

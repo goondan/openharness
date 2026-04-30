@@ -319,7 +319,6 @@ export class IngressPipeline implements IngressApi {
           agentName: result.agentName,
           conversationId: result.conversationId,
           eventName: result.eventName,
-          turnId: result.turnId,
           batchId: dispatchOutcome.batchId,
           pendingRequestIds: dispatchOutcome.pendingRequestIds,
           disposition: dispatchOutcome.disposition,

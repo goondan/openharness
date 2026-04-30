@@ -151,6 +151,17 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
     }
 
+    if (!config.hitl) {
+      const hitlTool = toolRegistry.list().find(
+        (tool) => tool.hitl && tool.hitl.mode !== "never",
+      );
+      if (hitlTool) {
+        throw new ConfigError(
+          `Tool "${hitlTool.name}" on agent "${agentName}" requires HITL but no hitl.store is configured`,
+        );
+      }
+    }
+
     agentDepsMap.set(agentName, {
       llmClient,
       toolRegistry,

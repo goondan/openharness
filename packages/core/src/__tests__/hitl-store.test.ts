@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { HitlBatchRecord, HitlBatchToolResult, HitlRequestRecord, ToolResult } from "@goondan/openharness-types";
+import type {
+  HitlBatchRecord,
+  HitlBatchToolResult,
+  HitlQueuedSteerInput,
+  HitlRequestRecord,
+  ToolResult,
+} from "@goondan/openharness-types";
 import { InMemoryHitlStore } from "../hitl/store.js";
 
 function requestRecord(overrides: Partial<HitlRequestRecord> = {}): HitlRequestRecord {
@@ -176,6 +182,19 @@ describe("InMemoryHitlStore", () => {
       ownerId: blockedLease.request.lease!.ownerId,
       token: blockedLease.request.lease!.token,
     }, now);
+    const blockedBatchId = (await store.get("blocked-request"))?.batchId;
+    if (!blockedBatchId) throw new Error("expected blocked batch id");
+    await store.failBatch(blockedBatchId, {
+      error: "side effect requires operator action",
+      retryable: false,
+      failedAt: now,
+    }, {
+      ownerId: blockedLease.request.lease!.ownerId,
+      token: blockedLease.request.lease!.token,
+    });
+    const canceledBlocked = await store.cancelBatch({ batchId: blockedBatchId, reason: "operator stop" });
+    expect(canceledBlocked.status).toBe("canceled");
+    expect((await store.get("blocked-request"))?.status).toBe("canceled");
     await store.create(requestRecord({ requestId: "non-retryable-failed-request" }));
     await store.resolve("non-retryable-failed-request", { decision: "approve", submittedAt: now });
     const failedLease = await store.acquireLease("non-retryable-failed-request", "owner-failed", 1000);
@@ -219,6 +238,51 @@ describe("InMemoryHitlStore", () => {
 
     expect(accepted.requestId).toBe("request-2");
     expect(accepted.status).toBe("resolved");
+  });
+
+  it("rejects reused idempotency keys with a different HITL result", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    const approval = { decision: "approve" as const, submittedAt: now };
+
+    await store.create(requestRecord({ requestId: "idempotent-request" }));
+    await store.resolve("idempotent-request", approval, "result-key-1");
+
+    const duplicate = await store.resolve("idempotent-request", approval, "result-key-1");
+    expect(duplicate.status).toBe("resolved");
+    await expect(
+      store.reject("idempotent-request", { decision: "reject", submittedAt: now }, "result-key-1"),
+    ).rejects.toThrow("Idempotency key was already used with a different HITL result");
+    expect((await store.get("idempotent-request"))?.status).toBe("resolved");
+  });
+
+  it("does not expose resuming batches as steer queues", async () => {
+    const store = new InMemoryHitlStore();
+    const now = new Date().toISOString();
+    const batchId = "resuming-batch";
+    const requestId = "resuming-request";
+
+    await store.create(requestRecord({
+      requestId,
+      batchId,
+      conversationId: "resuming-conversation",
+    }));
+    await store.resolve(requestId, { decision: "approve", submittedAt: now });
+    const lease = await store.acquireBatchLease(batchId, "resume-owner", 1000);
+    expect(lease.status).toBe("acquired");
+    if (lease.status !== "acquired") throw new Error("expected lease");
+
+    expect(await store.getOpenBatchByConversation("default", "resuming-conversation")).toBeNull();
+    const input: HitlQueuedSteerInput = {
+      source: "direct",
+      input: {
+        agentName: "default",
+        conversationId: "resuming-conversation",
+        content: "must not queue during resume",
+      },
+      receivedAt: now,
+    };
+    await expect(store.enqueueSteer(batchId, input)).rejects.toThrow("Cannot queue steer for HITL batch in resuming");
   });
 
   it("rejects stale lease guards after a new owner acquires the request", async () => {

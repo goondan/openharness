@@ -18,6 +18,7 @@ import { executeToolCall } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 import { createHitlBatchId, createHitlRequestId, toHitlBatchView, toHitlRequestView } from "../hitl/store.js";
 import { ChainedChildPrepFailureError } from "../hitl/errors.js";
+import { createConversationState } from "../conversation-state.js";
 
 interface CanonicalToolCall {
   toolCallId: string;
@@ -43,6 +44,33 @@ function toToolResultOutput(toolResult: ToolResult) {
     : toolResult.type === "json"
       ? { type: "json" as const, value: toolResult.data }
       : { type: "error-text" as const, value: toolResult.error };
+}
+
+function appendToolResultMessage(
+  conversation: StepContext["conversation"],
+  toolCall: Pick<CanonicalToolCall, "toolCallId" | "toolName">,
+  toolResult: ToolResult,
+): void {
+  conversation.emit({
+    type: "appendMessage",
+    message: {
+      id: `tool-result-${toolCall.toolCallId}`,
+      data: {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: toolCall.toolCallId,
+            toolName: toolCall.toolName,
+            output: toToolResultOutput(toolResult),
+          },
+        ],
+      } satisfies ToolModelMessage,
+      metadata: {
+        __createdBy: "core",
+      },
+    },
+  });
 }
 
 /**
@@ -287,6 +315,10 @@ export async function executeStep(
         // §8.1 step 6~8 / §8.5 step 12.1: child is now `preparing` (atomic spawn or createBatch).
         // Run non-HITL peer execution and `markBatchWaitingForHuman()` outside the spawn transaction.
         const spawnedFromParent = Boolean(parentHitlBatch);
+        const deferredToolResultMessages: Array<{ toolCall: CanonicalToolCall; result: ToolResult }> = [];
+        const peerConversation = createConversationState();
+        peerConversation.restore([...stepCtx.conversation.events]);
+        peerConversation._turnActive = true;
         let exposedForHuman = false;
         try {
           for (const tc of plannedToolCalls) {
@@ -299,7 +331,10 @@ export async function executeStep(
               continue;
             }
 
-            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
+            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, {
+              ...stepCtx,
+              conversation: peerConversation,
+            }, {
               toolRegistry,
               middlewareRegistry,
               eventBus,
@@ -340,6 +375,9 @@ export async function executeStep(
               recordedAt: new Date().toISOString(),
             });
 
+            appendToolResultMessage(peerConversation, tc, result);
+            deferredToolResultMessages.push({ toolCall: tc, result });
+
             toolCallResults.push({
               toolCallId: tc.toolCallId,
               toolName: tc.toolName,
@@ -350,6 +388,9 @@ export async function executeStep(
 
           const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
           exposedForHuman = true;
+          for (const item of deferredToolResultMessages) {
+            appendToolResultMessage(stepCtx.conversation, item.toolCall, item.result);
+          }
           const waitingRequests = await hitlStore.listBatchRequests(batchId);
           eventBus.emit("hitl.batch.requested", {
             type: "hitl.batch.requested",
@@ -380,6 +421,8 @@ export async function executeStep(
             throw new ChainedChildPrepFailureError(cause);
           }
           throw err;
+        } finally {
+          peerConversation._turnActive = false;
         }
       } else {
         for (const tc of plannedToolCalls) {
@@ -416,26 +459,7 @@ export async function executeStep(
             });
           }
 
-          stepCtx.conversation.emit({
-            type: "appendMessage",
-            message: {
-              id: `tool-result-${tc.toolCallId}`,
-              data: {
-                role: "tool",
-                content: [
-                  {
-                    type: "tool-result",
-                    toolCallId: tc.toolCallId,
-                    toolName: tc.toolName,
-                    output: toToolResultOutput(toolResult),
-                  },
-                ],
-              } satisfies ToolModelMessage,
-              metadata: {
-                __createdBy: "core",
-              },
-            },
-          });
+          appendToolResultMessage(stepCtx.conversation, tc, toolResult);
 
           toolCallResults.push({
             toolCallId: tc.toolCallId,
@@ -627,7 +651,6 @@ async function closeUnexposedHitlBatchAfterPreparationFailure(
       !batch.toolResults.some((result) => result.toolCallId === toolCall.toolCallId),
   );
   if (missingNonHitlResults.length === 0) {
-    await hitlStore.markBatchWaitingForHuman(batchId).catch(() => undefined);
     return;
   }
 

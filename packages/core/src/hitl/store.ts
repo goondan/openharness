@@ -38,7 +38,6 @@ const CONVERSATION_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
 const STEER_QUEUE_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
   "waitingForHuman",
   "ready",
-  "resuming",
 ]);
 
 export function createHitlBatchId(): string {
@@ -368,7 +367,7 @@ export class InMemoryHitlStore implements HitlStore {
     }
 
     for (const request of this.requests.values()) {
-      if (request.batchId === input.batchId && !isTerminalRequestStatus(request.status)) {
+      if (request.batchId === input.batchId && (!isTerminalRequestStatus(request.status) || request.status === "blocked")) {
         this.requests.set(
           request.requestId,
           touchRequest({
@@ -788,12 +787,13 @@ export class InMemoryHitlStore implements HitlStore {
       batch.status !== "ready" &&
       batch.status !== "blocked" &&
       !(batch.status === "failed" && batch.failure?.retryable === true) &&
-      !(batch.status === "continuing" && input.abortContinuation === true)
+      !(batch.status === "continuing" && input.abortContinuation === true) &&
+      !(batch.status === "resuming" && input.abortContinuation === true)
     ) {
       throw new HitlStoreError(`Cannot cancel HITL batch from ${batch.status}`);
     }
     for (const request of this.requests.values()) {
-      if (request.batchId === input.batchId && !isTerminalRequestStatus(request.status)) {
+      if (request.batchId === input.batchId && (!isTerminalRequestStatus(request.status) || request.status === "blocked")) {
         this.requests.set(
           request.requestId,
           touchRequest({
@@ -973,15 +973,21 @@ export class InMemoryHitlStore implements HitlStore {
   ): Promise<HitlRequestRecord> {
     const request = mustGetRequest(this.requests, requestId);
     const batch = mustGetBatch(this.batches, requireRequestBatchId(request));
-    if (batch.status !== "waitingForHuman") {
-      throw new HitlStoreError(`Cannot submit HITL result for batch in ${batch.status}`);
-    }
-
     if (idempotencyKey) {
       const existing = this.resultKeys.get(idempotencyKey);
       if (existing && existing.requestId !== requestId) {
         throw new HitlStoreError("Idempotency key belongs to another HITL request");
       }
+      if (existing && !jsonValuesEqual(existing.result, result)) {
+        throw new HitlStoreError("Idempotency key was already used with a different HITL result");
+      }
+      if (existing) {
+        return clone(request);
+      }
+    }
+
+    if (batch.status !== "waitingForHuman") {
+      throw new HitlStoreError(`Cannot submit HITL result for batch in ${batch.status}`);
     }
 
     if (request.status === status || request.status === "completed") {
@@ -1201,4 +1207,8 @@ function nowIso(): string {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

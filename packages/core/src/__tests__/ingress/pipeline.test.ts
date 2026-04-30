@@ -63,7 +63,9 @@ interface MakePipelineOptions {
     agentName: string,
     envelope: InboundEnvelope,
     conversationId: string,
-  ) => { turnId: string; disposition: IngressDisposition };
+  ) =>
+    | { turnId: string; disposition: IngressDisposition }
+    | { batchId: string; pendingRequestIds: string[]; disposition: "queuedForHitl" };
 }
 
 function makePipeline(opts: MakePipelineOptions = {}) {
@@ -335,6 +337,31 @@ describe("IngressPipeline", () => {
     expect(results[0].turnId).toMatch(/^active-turn-/);
     expect((accepted[0] as { disposition: string }).disposition).toBe("steered");
     expect((accepted[0] as { turnId: string }).turnId).toBe(results[0].turnId);
+  });
+
+  it("returns queuedForHitl disposition without a synthetic turnId", async () => {
+    const dispatchTurn = vi.fn(() => ({
+      batchId: "batch-queued-1",
+      pendingRequestIds: ["request-queued-1"],
+      disposition: "queuedForHitl" as const,
+    }));
+    const { pipeline, eventBus } = makePipeline({ dispatchTurn });
+    const accepted: unknown[] = [];
+    eventBus.on("ingress.accepted", (e) => accepted.push(e));
+
+    const results = await pipeline.receive({
+      connectionName: "conn1",
+      payload: { text: "queue for HITL" },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].disposition).toBe("queuedForHitl");
+    expect(results[0].batchId).toBe("batch-queued-1");
+    expect(results[0].pendingRequestIds).toEqual(["request-queued-1"]);
+    expect("turnId" in results[0]).toBe(false);
+    expect((accepted[0] as { disposition: string }).disposition).toBe("queuedForHitl");
+    expect((accepted[0] as { batchId: string }).batchId).toBe("batch-queued-1");
+    expect("turnId" in (accepted[0] as Record<string, unknown>)).toBe(false);
   });
 
   it("emits ingress.rejected when route fails (no matching rule)", async () => {

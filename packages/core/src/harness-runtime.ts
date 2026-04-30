@@ -11,6 +11,7 @@ import type {
   EventPayload,
   HitlBatchFilter,
   HitlBatchRecord,
+  HitlBatchToolResult,
   HitlBatchView,
   HitlContinuationOutcome,
   HitlFailure,
@@ -26,6 +27,7 @@ import type {
   SubmitHitlResultInput,
   HitlSubmitResume,
   ToolResult,
+  ToolCallContext,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
@@ -223,6 +225,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const activeTurn = this._activeTurnByConversation.get(conversationKey);
     if (activeTurn && activeTurn.steeringInbox.enqueue(envelope)) {
       return activeTurn.promise;
+    }
+    if (activeTurn) {
+      const postSteerHitlBarrier = await this._getHitlBarrierBatch(agentName, conversationId);
+      if (postSteerHitlBarrier && isPreSteerHitlBarrier(postSteerHitlBarrier)) {
+        return await this._createHitlBarrierTurnResult(postSteerHitlBarrier, agentName, conversationId, turnId);
+      }
     }
 
     if (preSteerHitlBarrier) {
@@ -463,6 +471,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           return { status: "error", requestId: input.requestId, request: toHitlRequestView(record), error: "Owning HITL batch not found" };
         }
         if (batch.status !== "waitingForHuman") {
+          const latest = await safeGetHitlRecord(hitlStore, input.requestId);
+          if (latest instanceof Error) {
+            return { status: "error", requestId: input.requestId, error: latest.message };
+          }
+          if (latest && latest.status !== "pending") {
+            return { status: "duplicate", request: toHitlRequestView(latest) };
+          }
           return { status: "invalid", requestId: input.requestId, error: `HITL batch is ${batch.status}` };
         }
         const validationError = validateHitlResult(record, input.result);
@@ -574,14 +589,28 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           }
           return { status: "alreadyTerminal", batch: view };
         }
-        if (batch.status === "continuing" && input.abortContinuation !== true) {
+        if ((batch.status === "continuing" || batch.status === "resuming") && input.abortContinuation !== true) {
           return { status: "notCancelable", batch: await this._toHitlBatchView(batch) };
         }
         const canceled = await hitlStore.cancelBatch(input);
-        if (input.abortContinuation === true) {
-          this._inFlightHitlResumes.get(input.batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
+        const view = await this._toHitlBatchView(canceled);
+        if (canceled.status === "canceled") {
+          if (input.abortContinuation === true) {
+            this._inFlightHitlResumes.get(input.batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
+          }
+          return { status: "canceled", batch: view };
         }
-        return { status: "canceled", batch: await this._toHitlBatchView(canceled) };
+        if (
+          canceled.status === "completed" ||
+          canceled.status === "expired" ||
+          (canceled.status === "failed" && canceled.failure?.retryable !== true)
+        ) {
+          return { status: "alreadyTerminal", batch: view };
+        }
+        if (canceled.status === "continuing" || canceled.status === "resuming") {
+          return { status: "notCancelable", batch: view };
+        }
+        return { status: "error", batchId: input.batchId, batch: view, error: `Cannot cancel HITL batch from ${canceled.status}` };
       },
       cancelHitl: async (input) => {
         if (this._closed) {
@@ -612,14 +641,28 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           }
           return { status: "alreadyTerminal", batch: view };
         }
-        if (batch.status === "continuing" && input.abortContinuation !== true) {
+        if ((batch.status === "continuing" || batch.status === "resuming") && input.abortContinuation !== true) {
           return { status: "notCancelable", batch: await this._toHitlBatchView(batch) };
         }
         const canceled = await hitlStore.cancelBatch({ batchId, reason: input.reason, abortContinuation: input.abortContinuation });
-        if (input.abortContinuation === true) {
-          this._inFlightHitlResumes.get(batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
+        const view = await this._toHitlBatchView(canceled);
+        if (canceled.status === "canceled") {
+          if (input.abortContinuation === true) {
+            this._inFlightHitlResumes.get(batchId)?.abortController.abort(input.reason ?? "HITL batch canceled");
+          }
+          return { status: "canceled", batch: view };
         }
-        return { status: "canceled", batch: await this._toHitlBatchView(canceled) };
+        if (
+          canceled.status === "completed" ||
+          canceled.status === "expired" ||
+          (canceled.status === "failed" && canceled.failure?.retryable !== true)
+        ) {
+          return { status: "alreadyTerminal", batch: view };
+        }
+        if (canceled.status === "continuing" || canceled.status === "resuming") {
+          return { status: "notCancelable", batch: view };
+        }
+        return { status: "error", batchId, requestId: input.requestId, batch: view, error: `Cannot cancel HITL batch from ${canceled.status}` };
       },
     };
   }
@@ -883,21 +926,23 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         if (!batch.appendCommit) {
           batch = await this._prepareBatchToolResults(batch, guard, abortSignal);
           try {
-            conversationState.restore(batch.conversationEvents);
-            conversationState._turnActive = true;
+            const appendConversationState = createConversationState();
+            appendConversationState.restore(batch.conversationEvents);
+            appendConversationState._turnActive = true;
             const appendedEvents: MessageEvent[] = [];
             for (const result of batch.toolResults.slice().sort((a, b) => a.toolCallIndex - b.toolCallIndex)) {
               const event = createToolResultEvent(batch.batchId, result);
-              emitAppendIfMissing(conversationState, event.message.id, event);
+              emitAppendIfMissing(appendConversationState, event.message.id, event);
               appendedEvents.push(event);
             }
 
             const drainedSteers = await this._hitlStore.drainQueuedSteers(batchId, guard);
             for (const steer of drainedSteers) {
               const event = createQueuedSteerEvent(steer);
-              emitAppendIfMissing(conversationState, event.message.id, event);
+              emitAppendIfMissing(appendConversationState, event.message.id, event);
               appendedEvents.push(event);
             }
+            appendConversationState._turnActive = false;
 
             batch = await this._hitlStore.commitBatchAppend(batchId, {
               committedAt: new Date().toISOString(),
@@ -912,8 +957,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             throw error instanceof HitlResumeError
               ? error
               : new HitlResumeError(error.message, true);
-          } finally {
-            conversationState._turnActive = false;
           }
         }
 
@@ -1051,6 +1094,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       throw new ConfigError("HITL store is not configured");
     }
     let current = batch;
+    let replayConversationEvents = batch.conversationEvents.slice();
     const requests = await this._hitlStore.listBatchRequests(batch.batchId);
     for (const toolCall of batch.toolCalls.slice().sort((a, b) => a.toolCallIndex - b.toolCallIndex)) {
       const storedResult = current.toolResults.find((result) => result.toolCallId === toolCall.toolCallId);
@@ -1084,6 +1128,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             });
           }
         }
+        replayConversationEvents = appendToolResultEventIfMissing(replayConversationEvents, batch.batchId, storedResult);
         continue;
       }
       if (!toolCall.requiresHitl) {
@@ -1093,20 +1138,26 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       if (!request) {
         throw new HitlResumeError(`HITL request not found for "${toolCall.toolCallId}"`, false);
       }
-      const { result, finalArgs, sideEffectStarted } = await this._executeHitlRequestTool(request, guard, abortSignal);
+      const { result, finalArgs, sideEffectStarted } = await this._executeHitlRequestTool(
+        request,
+        replayConversationEvents,
+        guard,
+        abortSignal,
+      );
+      const toolResult: HitlBatchToolResult = {
+        batchId: batch.batchId,
+        toolCallId: request.toolCallId,
+        toolCallIndex: requireHitlRequestToolCallIndex(request),
+        toolName: request.toolName,
+        result,
+        finalArgs,
+        recordedAt: new Date().toISOString(),
+      };
       try {
         const completed = await this._hitlStore.completeRequestWithToolResult({
           batchId: batch.batchId,
           requestId: request.requestId,
-          toolResult: {
-            batchId: batch.batchId,
-            toolCallId: request.toolCallId,
-            toolCallIndex: requireHitlRequestToolCallIndex(request),
-            toolName: request.toolName,
-            result,
-            finalArgs,
-            recordedAt: new Date().toISOString(),
-          },
+          toolResult,
           completion: {
             toolResult: result,
             finalArgs,
@@ -1121,6 +1172,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           ? error
           : new HitlResumeError(error.message, !sideEffectStarted);
       }
+      replayConversationEvents = appendToolResultEventIfMissing(replayConversationEvents, batch.batchId, toolResult);
       this._runtimeEvents.emit("tool.done", {
         type: "tool.done",
         turnId: request.turnId,
@@ -1147,6 +1199,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
   private async _executeHitlRequestTool(
     request: HitlRequestRecord,
+    conversationEvents: MessageEvent[],
     guard: HitlLeaseGuard,
     abortSignal?: AbortSignal,
   ): Promise<{ result: ToolResult; finalArgs: JsonObject; sideEffectStarted: boolean }> {
@@ -1182,33 +1235,97 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       throw new HitlResumeError("HITL resume aborted", true);
     }
     const finalArgs = mapped.args ?? request.originalArgs;
-    const validation = agentDeps.toolRegistry.validate(request.toolName, finalArgs);
-    if (!validation.valid) {
-      throw new HitlResumeError(`Invalid arguments: ${validation.errors}`, false);
-    }
     const batchId = requireHitlRequestBatchId(request);
-    await this._getHitlStore().startBatchToolExecution(batchId, {
-      batchId,
-      phase: "resume",
+    const resumeAbortSignal = abortSignal ?? new AbortController().signal;
+    const conversationState = createConversationState();
+    conversationState.restore(conversationEvents);
+    conversationState._turnActive = true;
+
+    this._runtimeEvents.emit("tool.start", {
+      type: "tool.start",
+      turnId: request.turnId,
+      agentName: request.agentName,
+      conversationId: request.conversationId,
+      stepNumber: request.stepNumber,
       toolCallId: request.toolCallId,
-      toolCallIndex: requireHitlRequestToolCallIndex(request),
       toolName: request.toolName,
-      requestId: request.requestId,
-      ownerId: guard.ownerId,
-      fencingToken: guard.token,
-      startedAt: new Date().toISOString(),
+      args: finalArgs,
     });
-    await this._getHitlStore().startRequestExecution(request.requestId, guard, new Date().toISOString());
-    try {
-      const result = await tool.handler(finalArgs, {
+
+    let sideEffectStarted = false;
+    const coreHandler = async (toolCtx: ToolCallContext): Promise<ToolResult> => {
+      const validation = agentDeps.toolRegistry.validate(request.toolName, toolCtx.toolArgs);
+      if (!validation.valid) {
+        throw new HitlResumeError(`Invalid arguments: ${validation.errors}`, false);
+      }
+      try {
+        await this._getHitlStore().startBatchToolExecution(batchId, {
+          batchId,
+          phase: "resume",
+          toolCallId: request.toolCallId,
+          toolCallIndex: requireHitlRequestToolCallIndex(request),
+          toolName: request.toolName,
+          requestId: request.requestId,
+          ownerId: guard.ownerId,
+          fencingToken: guard.token,
+          startedAt: new Date().toISOString(),
+        });
+        await this._getHitlStore().startRequestExecution(request.requestId, guard, new Date().toISOString());
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        throw new HitlResumeError(error.message, true);
+      }
+      sideEffectStarted = true;
+      return tool.handler(toolCtx.toolArgs, {
         agentName: request.agentName,
         conversationId: request.conversationId,
-        abortSignal: abortSignal ?? new AbortController().signal,
+        abortSignal: resumeAbortSignal,
       });
-      return { result, finalArgs, sideEffectStarted: true };
+    };
+
+    const chain = agentDeps.middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler);
+    try {
+      const result = await chain({
+        turnId: request.turnId,
+        agentName: request.agentName,
+        conversationId: request.conversationId,
+        conversation: conversationState,
+        abortSignal: resumeAbortSignal,
+        input: {
+          name: "hitl.resume",
+          content: [],
+          properties: {},
+          conversationId: request.conversationId,
+          source: {
+            connector: "hitl",
+            connectionName: "hitl",
+            receivedAt: new Date().toISOString(),
+          },
+        },
+        llm: agentDeps.llmClient,
+        stepNumber: request.stepNumber,
+        toolName: request.toolName,
+        toolArgs: finalArgs,
+      });
+      return { result, finalArgs, sideEffectStarted };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      throw new HitlResumeError(error.message, false);
+      this._runtimeEvents.emit("tool.error", {
+        type: "tool.error",
+        turnId: request.turnId,
+        agentName: request.agentName,
+        conversationId: request.conversationId,
+        stepNumber: request.stepNumber,
+        toolCallId: request.toolCallId,
+        toolName: request.toolName,
+        args: finalArgs,
+        error,
+      });
+      throw error instanceof HitlResumeError
+        ? error
+        : new HitlResumeError(error.message, !sideEffectStarted);
+    } finally {
+      conversationState._turnActive = false;
     }
   }
 
@@ -1504,9 +1621,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     if (!batch) {
       return null;
     }
+    await this._settleExpiredHitlBatches({ agentName, conversationId });
+    const latestBatch = await this._hitlStore.getOpenBatchByConversation(agentName, conversationId);
+    if (!latestBatch || latestBatch.batchId !== batch.batchId) {
+      return null;
+    }
     let queued: Awaited<ReturnType<HitlStore["enqueueSteer"]>>;
     try {
-      queued = await this._hitlStore.enqueueSteer(batch.batchId, {
+      queued = await this._hitlStore.enqueueSteer(latestBatch.batchId, {
         source: "direct",
         input: {
           agentName,
@@ -1524,17 +1646,17 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       }
       throw err;
     }
-    const pendingRequestIds = (await this._hitlStore.listBatchRequests(batch.batchId))
+    const pendingRequestIds = (await this._hitlStore.listBatchRequests(latestBatch.batchId))
       .filter((request) => request.status === "pending")
       .map((request) => request.requestId);
     this._runtimeEvents.emit("hitl.steer.queued", {
       type: "hitl.steer.queued",
-      batchId: batch.batchId,
+      batchId: latestBatch.batchId,
       conversationId,
       queuedInputId: queued.queuedInputId,
     });
     return {
-      batchId: batch.batchId,
+      batchId: latestBatch.batchId,
       pendingRequestIds,
       disposition: "queuedForHitl",
     };
@@ -1833,6 +1955,27 @@ function createToolResultEvent(batchId: string, result: {
       },
     },
   };
+}
+
+function appendToolResultEventIfMissing(
+  events: MessageEvent[],
+  batchId: string,
+  result: {
+    toolCallId: string;
+    toolName: string;
+    result: ToolResult;
+  },
+): MessageEvent[] {
+  const event = createToolResultEvent(batchId, result);
+  const messageId = event.message.id;
+  if (
+    events.some((candidate) =>
+      candidate.type === "appendMessage" && candidate.message.id === messageId
+    )
+  ) {
+    return events;
+  }
+  return [...events, event];
 }
 
 function createQueuedSteerEvent(steer: {

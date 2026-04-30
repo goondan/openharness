@@ -342,7 +342,7 @@ export async function executeTurn(
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
         await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, agentName, conversationId, steering);
-        return {
+        const waitingResult: TurnResult = {
           turnId,
           agentName,
           conversationId,
@@ -352,6 +352,7 @@ export async function executeTurn(
           pendingHitlRequestIds: lastStepResult.pendingHitlRequestIds,
           ...(totalUsage ? { totalUsage } : {}),
         };
+        return waitingResult;
       }
 
       const steeredInputCount = appendSteeredInputs(conversationState, steering);
@@ -522,19 +523,16 @@ export async function executeContinuationTurn(
     conversationId,
   });
 
-  const steps: StepSummary[] = [];
-  let lastStepResult: StepResult | undefined;
-  let totalUsage: LlmUsage | undefined;
-  let result: TurnResult;
-
-  try {
-    conversationState._turnActive = true;
+  const coreHandler = async (activeTurnCtx: TurnContext): Promise<TurnResult> => {
+    const steps: StepSummary[] = [];
+    let lastStepResult: StepResult | undefined;
+    let totalUsage: LlmUsage | undefined;
 
     for (let stepNumber = 1; stepNumber <= maxSteps; stepNumber++) {
       appendSteeredInputs(conversationState, steering);
 
-      if (turnCtx.abortSignal.aborted) {
-        result = {
+      if (activeTurnCtx.abortSignal.aborted) {
+        return {
           turnId,
           agentName,
           conversationId,
@@ -542,11 +540,9 @@ export async function executeContinuationTurn(
           steps,
           ...(totalUsage ? { totalUsage } : {}),
         };
-        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
-        return result;
       }
 
-      lastStepResult = await executeStep({ ...turnCtx, stepNumber }, {
+      lastStepResult = await executeStep({ ...activeTurnCtx, stepNumber }, {
         llmClient,
         toolRegistry,
         middlewareRegistry,
@@ -572,7 +568,7 @@ export async function executeContinuationTurn(
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
         await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, agentName, conversationId, steering);
-        result = {
+        return {
           turnId,
           agentName,
           conversationId,
@@ -582,8 +578,6 @@ export async function executeContinuationTurn(
           pendingHitlRequestIds: lastStepResult.pendingHitlRequestIds,
           ...(totalUsage ? { totalUsage } : {}),
         };
-        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
-        return result;
       }
 
       const steeredInputCount = appendSteeredInputs(conversationState, steering);
@@ -591,7 +585,7 @@ export async function executeContinuationTurn(
         if (steeredInputCount > 0) {
           continue;
         }
-        result = {
+        return {
           turnId,
           agentName,
           conversationId,
@@ -602,12 +596,10 @@ export async function executeContinuationTurn(
           steps,
           ...(totalUsage ? { totalUsage } : {}),
         };
-        eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
-        return result;
       }
     }
 
-    result = {
+    return {
       turnId,
       agentName,
       conversationId,
@@ -618,10 +610,26 @@ export async function executeContinuationTurn(
       steps,
       ...(totalUsage ? { totalUsage } : {}),
     };
-    eventBus.emit("turn.done", { type: "turn.done", turnId, agentName, conversationId, result });
+  };
+
+  const chain = middlewareRegistry.buildChain<TurnContext, TurnResult>("turn", coreHandler);
+  try {
+    conversationState._turnActive = true;
+    const result = await chain(turnCtx);
+    conversationState._turnActive = false;
+    closeSteering(steering);
+    eventBus.emit("turn.done", {
+      type: "turn.done",
+      turnId,
+      agentName,
+      conversationId,
+      result,
+    });
     return result;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
+    conversationState._turnActive = false;
+    closeSteering(steering);
     eventBus.emit("turn.error", {
       type: "turn.error",
       turnId,
@@ -635,11 +643,8 @@ export async function executeContinuationTurn(
       agentName,
       conversationId,
       status: turnCtx.abortSignal.aborted || error.name === "AbortError" ? "aborted" : "error",
-      steps,
+      steps: [],
       error,
     };
-  } finally {
-    conversationState._turnActive = false;
-    closeSteering(steering);
   }
 }
