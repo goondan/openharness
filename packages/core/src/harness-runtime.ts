@@ -8,6 +8,8 @@ import type {
   TurnResult,
   LlmClient,
   EventPayload,
+  DurableInboundStore,
+  HumanGateStore,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
@@ -15,9 +17,10 @@ import type { MiddlewareRegistry } from "./middleware-chain.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
-import { executeTurn, type TurnSteeringController } from "./execution/turn.js";
+import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
+import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
 
 const CLOSE_TIMEOUT_MS = 5000;
 
@@ -47,10 +50,15 @@ interface InFlightTurn {
 }
 
 class SteeringInbox implements TurnSteeringController {
-  private _queue: InboundEnvelope[] = [];
+  private _queue: Array<InboundEnvelope | TurnSteeredInput> = [];
   private _closed = false;
+  private _consume?: (input: TurnSteeredInput) => Promise<void> | void;
 
-  enqueue(input: InboundEnvelope): boolean {
+  constructor(consume?: (input: TurnSteeredInput) => Promise<void> | void) {
+    this._consume = consume;
+  }
+
+  enqueue(input: InboundEnvelope | TurnSteeredInput): boolean {
     if (this._closed) {
       return false;
     }
@@ -58,10 +66,14 @@ class SteeringInbox implements TurnSteeringController {
     return true;
   }
 
-  drain(): InboundEnvelope[] {
+  drain(): Array<InboundEnvelope | TurnSteeredInput> {
     const inputs = this._queue;
     this._queue = [];
     return inputs;
+  }
+
+  async consume(input: TurnSteeredInput): Promise<void> {
+    await this._consume?.(input);
   }
 
   close(): void {
@@ -93,14 +105,25 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _conversations: Map<string, ConversationStateImpl> = new Map();
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
   private readonly _activeTurnByConversation: Map<string, InFlightTurn> = new Map();
+  private readonly _turnResultByInboundItem: Map<string, TurnResult> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
   private readonly _runtimeEvents: EventBus;
+  private readonly _durableInboundStore?: DurableInboundStore;
+  private readonly _humanGateStore?: HumanGateStore;
   private _closed = false;
 
-  constructor(agents: Map<string, AgentDeps>, ingressPipeline: IngressPipeline, runtimeEvents: EventBus) {
+  constructor(
+    agents: Map<string, AgentDeps>,
+    ingressPipeline: IngressPipeline,
+    runtimeEvents: EventBus,
+    durableInboundStore?: DurableInboundStore,
+    humanGateStore?: HumanGateStore,
+  ) {
     this._agents = agents;
     this._ingressPipeline = ingressPipeline;
     this._runtimeEvents = runtimeEvents;
+    this._durableInboundStore = durableInboundStore;
+    this._humanGateStore = humanGateStore;
   }
 
   private _conversationKey(agentName: string, conversationId: string): string {
@@ -111,6 +134,10 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     agentName: string,
     input: string | InboundEnvelope,
     options?: (ProcessTurnOptions & { turnId?: string }),
+    durable?: {
+      item: any;
+      commitRef: string;
+    },
   ): Promise<TurnResult> {
     if (this._closed) {
       throw new HarnessError("Runtime is closed");
@@ -137,7 +164,22 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     const abortController = new AbortController();
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
-    const steeringInbox = new SteeringInbox();
+    const steeringInbox = new SteeringInbox(async (steered) => {
+      if (!this._durableInboundStore || !steered.inboundItem || !steered.commitRef) {
+        return;
+      }
+      await this._durableInboundStore.markConsumed({
+        id: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      } as any);
+      this._runtimeEvents.emit("inbound.consumed", {
+        type: "inbound.consumed",
+        inboundItemId: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      });
+    });
     const trackedTurn = createDeferred<TurnResult>();
 
     const inFlightTurn: InFlightTurn = {
@@ -162,6 +204,25 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         maxSteps: agentDeps.maxSteps,
         abortController,
         steering: steeringInbox,
+        humanGateStore: this._humanGateStore as any,
+        inboundItem: durable?.item,
+        inboundCommitRef: durable?.commitRef,
+        consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          await this._durableInboundStore.markConsumed({
+            id: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          } as any);
+          this._runtimeEvents.emit("inbound.consumed", {
+            type: "inbound.consumed",
+            inboundItemId: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          });
+        },
       });
       void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
     } catch (err) {
@@ -188,6 +249,116 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     input: string | InboundEnvelope,
     options?: ProcessTurnOptions,
   ): Promise<TurnResult> {
+    if (this._durableInboundStore) {
+      const conversationId =
+        options?.conversationId ??
+        (typeof input !== "string" && input.conversationId ? input.conversationId : randomUUID());
+      const envelope = typeof input === "string"
+        ? {
+            name: "text",
+            content: [{ type: "text" as const, text: input }],
+            properties: {},
+            conversationId,
+            source: {
+              connector: "programmatic",
+              connectionName: "programmatic",
+              receivedAt: options?.receivedAt ?? new Date().toISOString(),
+            },
+            metadata: options?.metadata,
+          }
+        : { ...input, conversationId };
+      const appended = await this._durableInboundStore.append({
+        agentName,
+        conversationId,
+        envelope,
+        source: {
+          kind: "direct",
+          receivedAt: options?.receivedAt ?? new Date().toISOString(),
+          metadata: options?.metadata,
+        },
+        idempotencyKey:
+          options?.idempotencyKey ??
+          `direct:${agentName}:${conversationId}:${JSON.stringify(envelope.content)}:${envelope.source.receivedAt}`,
+      });
+      this._runtimeEvents.emit(appended.duplicate ? "inbound.duplicate" : "inbound.appended", {
+        type: appended.duplicate ? "inbound.duplicate" : "inbound.appended",
+        inboundItemId: appended.item.id,
+        agentName,
+        conversationId,
+        sequence: appended.item.sequence,
+        idempotencyKey: appended.item.idempotencyKey,
+          status: appended.item.status,
+      } as any);
+      if (appended.duplicate && appended.item.status === "consumed") {
+        const cached = this._turnResultByInboundItem.get(appended.item.id);
+        if (cached) {
+          return cached;
+        }
+      }
+      if (appended.duplicate) {
+        if (appended.item.turnId) {
+          const active = this._inFlightTurns.get(appended.item.turnId);
+          if (active) {
+            return active.promise;
+          }
+        }
+        return {
+          turnId: appended.item.turnId ?? `turn-${randomUUID()}`,
+          agentName,
+          conversationId,
+          status: appended.item.status === "blocked" ? "waitingForHuman" : "waitingForHuman",
+          steps: [],
+        };
+      }
+      const blocker = await (this._humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+      if (blocker) {
+        const blocked = await this._durableInboundStore.markBlocked({
+          id: appended.item.id,
+          blockedBy: blocker,
+        } as any);
+        this._runtimeEvents.emit("inbound.blocked", {
+          type: "inbound.blocked",
+          inboundItemId: blocked.id,
+          blockedBy: blocker,
+        });
+        return {
+          turnId: `turn-${randomUUID()}`,
+          agentName,
+          conversationId,
+          status: "waitingForHuman",
+          steps: [],
+        };
+      }
+      const conversationKey = this._conversationKey(agentName, conversationId);
+      const activeTurn = this._activeTurnByConversation.get(conversationKey);
+      if (activeTurn) {
+        const delivered = await this._durableInboundStore.markDelivered({
+          id: appended.item.id,
+          turnId: activeTurn.turnId,
+        } as any);
+        const commitRef = inboundUserMessageCommitRef(delivered.id);
+        const steered = activeTurn.steeringInbox.enqueue({
+          envelope,
+          inboundItem: delivered as any,
+          commitRef,
+        });
+        if (steered) {
+          this._runtimeEvents.emit("inbound.delivered", {
+            type: "inbound.delivered",
+            inboundItemId: delivered.id,
+            turnId: activeTurn.turnId,
+            sequence: delivered.sequence,
+          });
+          return activeTurn.promise;
+        }
+      }
+      const result = await this._processTurnInternal(agentName, envelope, { ...options, conversationId }, {
+        item: appended.item,
+        commitRef: inboundUserMessageCommitRef(appended.item.id),
+      });
+      this._turnResultByInboundItem.set(appended.item.id, result);
+      return result;
+    }
     return this._processTurnInternal(agentName, input, options);
   }
 
@@ -195,13 +366,17 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     agentName: string,
     input: InboundEnvelope,
     options: { conversationId: string; turnId: string },
+    durable?: {
+      item: any;
+      commitRef: string;
+    },
   ): Promise<TurnResult> {
-    return this._processTurnInternal(agentName, input, options);
+    return this._processTurnInternal(agentName, input, options, durable);
   }
 
   steerTurn(
     agentName: string,
-    input: InboundEnvelope,
+    input: InboundEnvelope | TurnSteeredInput,
     conversationId: string,
   ): { turnId: string; disposition: "steered" } | null {
     const conversationKey = this._conversationKey(agentName, conversationId);
@@ -219,6 +394,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       turnId: activeTurn.turnId,
       disposition: "steered",
     };
+  }
+
+  getActiveTurn(agentName: string, conversationId: string): { turnId: string } | null {
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    return activeTurn ? { turnId: activeTurn.turnId } : null;
   }
 
   // -----------------------------------------------------------------------
@@ -265,6 +446,244 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           reason: input.reason,
         };
       },
+      listInboundItems: this._durableInboundStore
+        ? async (filter = {}) => this._durableInboundStore!.listInboundItems(filter)
+        : undefined,
+      retryInboundItem: this._durableInboundStore
+        ? async (id: string) => this._durableInboundStore!.retryInboundItem(id)
+        : undefined,
+      releaseInboundItem: this._durableInboundStore
+        ? async (input: any) => {
+            if (this._durableInboundStore!.releaseInboundItem) {
+              return this._durableInboundStore!.releaseInboundItem(
+                typeof input === "string" ? { id: input } : input,
+              );
+            }
+            return this._durableInboundStore!.retryInboundItem(typeof input === "string" ? input : input.id);
+          }
+        : undefined,
+      deadLetterInboundItem: this._durableInboundStore
+        ? async (input: any) => this._durableInboundStore!.deadLetterInboundItem(
+            typeof input === "string" ? { id: input, reason: "dead-lettered by operator" } : input,
+          )
+        : undefined,
+      listHumanTasks: this._humanGateStore
+        ? async (filter = {}) => this._humanGateStore!.listTasks(filter as any) as any
+        : undefined,
+      submitHumanResult: this._humanGateStore
+        ? async (input: any) => {
+            const result = await this._humanGateStore!.submitResult(input);
+            const status = (result as any).task?.status;
+            if ((result as any).status === "accepted" || (result as any).status === "duplicate" || (result as any).accepted) {
+              const task = (result as any).task;
+              const gate = (result as any).gate;
+              this._runtimeEvents.emit(status === "rejected" ? "humanTask.rejected" : "humanTask.resolved", {
+                type: status === "rejected" ? "humanTask.rejected" : "humanTask.resolved",
+                humanTaskId: task.id,
+                humanGateId: task.humanGateId,
+                idempotencyKey: input.idempotencyKey,
+              } as any);
+              if ((result as any).gateReady || gate?.status === "ready") {
+                this._runtimeEvents.emit("humanGate.ready", {
+                  type: "humanGate.ready",
+                  humanGateId: gate.id,
+                  taskIds: gate.taskIds,
+                } as any);
+              }
+            }
+            return result as any;
+          }
+        : undefined,
+      resumeHumanGate: this._humanGateStore
+        ? async (id: string) => {
+            const gate = await this._humanGateStore!.acquireGateForResume({
+              humanGateId: id,
+              leaseOwner: "runtime",
+              leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+            } as any);
+            if (!gate) {
+              const existing = await (this._humanGateStore as any).getGate?.(id);
+              return {
+                humanGateId: id,
+                status: existing?.status === "completed" ? "completed" : "blocked",
+                gate: existing,
+              } as any;
+            }
+            try {
+            const toolCall = (gate as any).toolCall;
+            const agentDeps = this._agents.get(toolCall.agentName);
+            if (!agentDeps) {
+              throw new ConfigError(`Unknown agent: "${toolCall.agentName}"`);
+            }
+            const conversationKey = this._conversationKey(toolCall.agentName, toolCall.conversationId);
+            let conversationState = this._conversations.get(conversationKey);
+            if (!conversationState) {
+              conversationState = createConversationState();
+              this._conversations.set(conversationKey, conversationState);
+            }
+
+            const taskIds: string[] = (gate as any).taskIds ?? [];
+            const tasks = await Promise.all(
+              taskIds.map((taskId) => (this._humanGateStore as any).getTask?.(taskId)),
+            );
+            const rejectedTask = tasks.find((task) => task?.status === "rejected" || task?.result?.type === "rejection");
+            const tool = agentDeps.toolRegistry.get(toolCall.toolName);
+            let toolResult: any;
+
+            if (rejectedTask) {
+              toolResult = {
+                type: "error",
+                error: rejectedTask.result?.reason ?? "Human rejected tool call",
+              };
+            } else {
+              if (!tool) {
+                toolResult = { type: "error", error: `Tool "${toolCall.toolName}" not found` };
+              } else {
+                const argsPatch = tasks.find((task) => task?.result?.type === "approval")?.result?.argsPatch;
+                const formData = tasks.find((task) => task?.result?.type === "form")?.result?.data;
+                const finalArgs = {
+                  ...toolCall.toolArgs,
+                  ...(argsPatch ?? {}),
+                  ...(formData ?? {}),
+                };
+                const validation = agentDeps.toolRegistry.validate(toolCall.toolName, finalArgs);
+                if (!validation.valid) {
+                  toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
+                } else {
+                  this._runtimeEvents.emit("tool.start", {
+                    type: "tool.start",
+                    turnId: toolCall.turnId,
+                    agentName: toolCall.agentName,
+                    conversationId: toolCall.conversationId,
+                    stepNumber: toolCall.stepNumber,
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    args: finalArgs,
+                  });
+                toolResult = await tool.handler(finalArgs, {
+                  agentName: toolCall.agentName,
+                  conversationId: toolCall.conversationId,
+                  abortSignal: new AbortController().signal,
+                });
+                  this._runtimeEvents.emit("tool.done", {
+                    type: "tool.done",
+                    turnId: toolCall.turnId,
+                    agentName: toolCall.agentName,
+                    conversationId: toolCall.conversationId,
+                    stepNumber: toolCall.stepNumber,
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    args: finalArgs,
+                    result: toolResult,
+                  });
+                }
+              }
+            }
+
+            conversationState._turnActive = true;
+            try {
+              conversationState.emit({
+                type: "appendMessage",
+                message: {
+                  id: `tool-result-${toolCall.toolCallId}`,
+                  data: {
+                    role: "tool",
+                    content: [
+                      {
+                        type: "tool-result",
+                        toolCallId: toolCall.toolCallId,
+                        toolName: toolCall.toolName,
+                        output: toolResult.type === "text"
+                          ? { type: "text", value: toolResult.text }
+                          : toolResult.type === "json"
+                            ? { type: "json", value: toolResult.data }
+                            : { type: "error-text", value: toolResult.error },
+                      },
+                    ],
+                  },
+                  metadata: {
+                    __createdBy: "core",
+                    __humanGateId: id,
+                  },
+                },
+              });
+
+              const blockedItems = this._durableInboundStore
+                ? await this._durableInboundStore.listInboundItems({
+                    agentName: toolCall.agentName,
+                    conversationId: toolCall.conversationId,
+                    status: ["blocked"],
+                    statuses: ["blocked"],
+                    blockedBy: (gate as any).blocker,
+                  } as any)
+                : [];
+              for (const item of blockedItems.sort((a: any, b: any) => a.sequence - b.sequence)) {
+                const commitRef = inboundUserMessageCommitRef(item.id);
+                const exists = conversationState.messages.some(
+                  (message) => message.metadata?.__inboundCommitRef === commitRef,
+                );
+                if (!exists) {
+                  const text = item.envelope.content
+                    .filter((part: any) => part.type === "text")
+                    .map((part: any) => part.text)
+                    .join("\n");
+                  conversationState.emit({
+                    type: "appendMessage",
+                    message: {
+                      id: `msg-${item.id}`,
+                      data: { role: "user", content: text },
+                      metadata: {
+                        __createdBy: "core",
+                        __inboundItemId: item.id,
+                        __inboundCommitRef: commitRef,
+                        __blockedBy: (gate as any).blocker,
+                      },
+                    },
+                  });
+                }
+                await this._durableInboundStore?.markConsumed({
+                  id: item.id,
+                  turnId: toolCall.turnId,
+                  commitRef,
+                } as any);
+              }
+            } finally {
+              conversationState._turnActive = false;
+            }
+
+            const completed = await this._humanGateStore!.markGateCompleted({
+              humanGateId: id,
+              turnId: toolCall.turnId,
+            } as any);
+            this._runtimeEvents.emit("humanGate.completed", {
+              type: "humanGate.completed",
+              humanGateId: id,
+              turnId: toolCall.turnId,
+              blockedInboundItemIds: (completed as any).blockedInboundItemIds ?? [],
+            } as any);
+            return { humanGateId: id, status: "completed", gate: completed } as any;
+            } catch (err) {
+              const error = err instanceof Error ? err : new Error(String(err));
+              const failed = await this._humanGateStore!.markGateFailed({
+                humanGateId: id,
+                reason: error.message,
+                retryable: false,
+              } as any);
+              this._runtimeEvents.emit("humanGate.failed", {
+                type: "humanGate.failed",
+                humanGateId: id,
+                retryable: false,
+                reason: error.message,
+              } as any);
+              return { humanGateId: id, status: "failed", gate: failed } as any;
+            }
+          }
+        : undefined,
+      cancelHumanGate: this._humanGateStore
+        ? async (input: any) => this._humanGateStore!.cancelGate(
+            typeof input === "string" ? { humanGateId: input } : input,
+          ) as any
+        : undefined,
     };
   }
 

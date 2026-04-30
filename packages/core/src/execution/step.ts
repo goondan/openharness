@@ -9,6 +9,7 @@ import type {
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { HumanGateReferenceStore } from "../hitl/types.js";
 import { executeToolCall } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 
@@ -44,9 +45,10 @@ export async function executeStep(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    humanGateStore?: HumanGateReferenceStore;
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus } = deps;
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, humanGateStore } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -178,6 +180,7 @@ export async function executeStep(
             toolRegistry,
             middlewareRegistry,
             eventBus,
+            humanGateStore,
           }));
 
         if (tc.malformedResult) {

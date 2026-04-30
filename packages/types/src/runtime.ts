@@ -1,7 +1,23 @@
 import type { TurnResult } from "./middleware.js";
-import type { InboundEnvelope, IngressApi } from "./ingress.js";
+import type {
+  DeadLetterInboundInput,
+  DurableInboundItem,
+  InboundEnvelope,
+  InboundItemFilter,
+  IngressAcceptResult,
+  IngressApi,
+  ReleaseInboundItemInput,
+} from "./ingress.js";
 import type { ProcessTurnOptions } from "./config.js";
 import type { EventPayload } from "./events.js";
+import type {
+  CancelHumanGateInput,
+  HumanGateRecord,
+  HumanTaskFilter,
+  HumanTaskView,
+  SubmitHumanResult,
+  SubmitHumanResultInput,
+} from "./tool.js";
 
 // -----------------------------------------------------------------------
 // ControlApi
@@ -19,6 +35,35 @@ export interface ControlApi {
     agentName?: string;
     reason?: string;
   }): Promise<AbortResult>;
+
+  listInboundItems?(filter?: InboundItemFilter): Promise<DurableInboundItem[]>;
+  retryInboundItem?(id: string): Promise<DurableInboundItem>;
+  releaseInboundItem?(input: string | ReleaseInboundItemInput): Promise<DurableInboundItem>;
+  deadLetterInboundItem?(input: string | DeadLetterInboundInput): Promise<DurableInboundItem>;
+
+  listHumanTasks?(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
+  submitHumanResult?(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
+  resumeHumanGate?(id: string): Promise<HumanGateResumeResult>;
+  cancelHumanGate?(input: string | CancelHumanGateInput): Promise<HumanGateRecord>;
+}
+
+export interface DurableControlApi extends ControlApi {
+  listInboundItems(filter?: InboundItemFilter): Promise<DurableInboundItem[]>;
+  retryInboundItem(id: string): Promise<DurableInboundItem>;
+  releaseInboundItem(input: string | ReleaseInboundItemInput): Promise<DurableInboundItem>;
+  deadLetterInboundItem(input: string | DeadLetterInboundInput): Promise<DurableInboundItem>;
+
+  listHumanTasks(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
+  submitHumanResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
+  resumeHumanGate(id: string): Promise<HumanGateResumeResult>;
+  cancelHumanGate(input: string | CancelHumanGateInput): Promise<HumanGateRecord>;
+}
+
+export interface HumanGateResumeResult {
+  humanGateId: string;
+  status: "completed" | "blocked" | "failed";
+  gate: HumanGateRecord;
+  continuation?: TurnResult;
 }
 
 export type RuntimeEventType = EventPayload["type"];
@@ -47,4 +92,8 @@ export interface HarnessRuntime {
   events: RuntimeEventsApi;
   control: ControlApi;
   close(): Promise<void>;
+}
+
+export interface DurableHarnessRuntime extends Omit<HarnessRuntime, "control"> {
+  control: DurableControlApi;
 }

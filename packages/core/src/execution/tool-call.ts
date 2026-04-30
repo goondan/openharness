@@ -2,7 +2,24 @@ import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharn
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { HumanGateReferenceStore } from "../hitl/types.js";
 import { normalizeToolArgs } from "../tool-args.js";
+
+export class HumanGatePendingError extends Error {
+  readonly humanGateId: string;
+
+  constructor(humanGateId: string) {
+    super(`Human Gate is waiting for human input: ${humanGateId}`);
+    this.name = "HumanGatePendingError";
+    this.humanGateId = humanGateId;
+  }
+}
+
+export function isHumanGatePendingError(error: unknown): error is HumanGatePendingError {
+  return error instanceof HumanGatePendingError || (
+    error instanceof Error && error.name === "HumanGatePendingError"
+  );
+}
 
 /**
  * Execute a single tool call with full middleware chain, validation, event emission.
@@ -21,9 +38,10 @@ export async function executeToolCall(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    humanGateStore?: HumanGateReferenceStore;
   }
 ): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanGateStore } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -52,6 +70,68 @@ export async function executeToolCall(
     const validation = toolRegistry.validate(toolName, normalizedToolArgs);
     if (!validation.valid) {
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
+    }
+
+    if (tool.humanGate && tool.humanGate.required !== false) {
+      if (!humanGateStore) {
+        return { type: "error", error: `Tool "${toolName}" requires a Human Gate store` };
+      }
+
+      const created = await humanGateStore.createGate({
+        id: `${turnId}:${toolCallId}:humanGate`,
+        humanGateId: `${turnId}:${toolCallId}:humanGate`,
+        toolCall: {
+          turnId,
+          agentName,
+          conversationId,
+          stepNumber,
+          toolCallId,
+          toolName,
+          toolArgs: normalizedToolArgs,
+        },
+        policy: tool.humanGate,
+        prompt: tool.humanGate?.prompt,
+        expectedResultSchema: tool.humanGate?.responseSchema,
+        tasks: (tool.humanGate?.tasks?.length
+          ? tool.humanGate.tasks.map((task, index) => ({
+              humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
+              type: task.type,
+              taskType: task.type,
+              title: task.title,
+              prompt: task.prompt ?? tool.humanGate?.prompt,
+              required: task.required,
+              responseSchema: task.responseSchema,
+            }))
+          : [{
+              humanTaskId: `${turnId}:${toolCallId}:task:1`,
+              type: "approval" as const,
+              taskType: "approval" as const,
+              prompt: tool.humanGate?.prompt,
+              required: true,
+              responseSchema: tool.humanGate?.responseSchema,
+            }]),
+      });
+
+      eventBus.emit("humanGate.created", {
+        type: "humanGate.created",
+        humanGateId: created.gate.id,
+        agentName,
+        conversationId,
+        turnId,
+        toolCallId,
+      });
+      for (const task of created.tasks) {
+        eventBus.emit("humanTask.created", {
+          type: "humanTask.created",
+          humanGateId: created.gate.id,
+          humanTaskId: task.id,
+          taskType: task.taskType as "approval" | "text" | "form",
+          agentName,
+          conversationId,
+        });
+      }
+
+      throw new HumanGatePendingError(created.gate.id);
     }
 
     // Build the simpler ToolContext that the handler receives
@@ -87,6 +167,9 @@ export async function executeToolCall(
 
     return result;
   } catch (err) {
+    if (isHumanGatePendingError(err)) {
+      throw err;
+    }
     const error = err instanceof Error ? err : new Error(String(err));
 
     // Emit tool.error on failure

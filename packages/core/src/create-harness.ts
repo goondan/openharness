@@ -12,6 +12,8 @@ import type {
   ExtensionInfo,
   ModelConfig,
   EventPayload,
+  DurableInboundStore,
+  HumanGateStore,
 } from "@goondan/openharness-types";
 import { resolveEnvDeep } from "./env.js";
 import { ConfigError } from "./errors.js";
@@ -23,6 +25,7 @@ import { registerExtensions, createExtensionApi } from "./extension-registry.js"
 import { IngressPipeline } from "./ingress/pipeline.js";
 import { HarnessRuntimeImpl, type AgentDeps } from "./harness-runtime.js";
 import { createConversationState } from "./conversation-state.js";
+import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
 
 const DEFAULT_MAX_STEPS = 25;
 
@@ -193,6 +196,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   }
 
   const registeredAgents = new Set(Object.keys(config.agents));
+  const durableInboundStore = config.durableInbound?.enabled === false
+    ? undefined
+    : config.durableInbound?.store;
+  const humanGateStore = config.humanGate?.store;
 
   // Create the runtime first (we need a reference for dispatchTurn)
   // Build the runtime so dispatchTurn can call processTurn
@@ -210,9 +217,124 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     ),
     registeredAgents,
     eventBus: ingressEventBus,
-    dispatchTurn: (turnId, agentName, envelope, conversationId) => {
+    dispatchTurn: async (turnId, agentName, envelope, conversationId) => {
       if (!runtimeRef) {
         throw new ConfigError("Runtime not yet initialized");
+      }
+
+      if (durableInboundStore) {
+        const appended = await durableInboundStore.append({
+          agentName,
+          conversationId,
+          envelope,
+          source: {
+            kind: "ingress",
+            connectionName: envelope.source.connectionName,
+            receivedAt: envelope.source.receivedAt,
+            externalId: typeof envelope.properties["id"] === "string"
+              ? envelope.properties["id"]
+              : undefined,
+          },
+          idempotencyKey: [
+            "ingress",
+            envelope.source.connectionName,
+            agentName,
+            conversationId,
+            envelope.name,
+            typeof envelope.properties["id"] === "string"
+              ? envelope.properties["id"]
+              : JSON.stringify(envelope.content),
+          ].join(":"),
+        });
+        ingressEventBus.emit(appended.duplicate ? "inbound.duplicate" : "inbound.appended", {
+          type: appended.duplicate ? "inbound.duplicate" : "inbound.appended",
+          inboundItemId: appended.item.id,
+          agentName,
+          conversationId,
+          sequence: appended.item.sequence,
+          idempotencyKey: appended.item.idempotencyKey,
+          status: appended.item.status,
+        } as EventPayload);
+
+        if (appended.duplicate) {
+          return {
+            turnId: appended.item.turnId,
+            disposition: "duplicate" as const,
+            inboundItemId: appended.item.id,
+            blocker: appended.item.blockedBy,
+          };
+        }
+
+        const blocker = await (humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+        if (blocker) {
+          const blocked = await durableInboundStore.markBlocked({
+            id: appended.item.id,
+            blockedBy: blocker,
+          });
+          ingressEventBus.emit("inbound.blocked", {
+            type: "inbound.blocked",
+            inboundItemId: blocked.id,
+            blockedBy: blocker,
+          });
+          return {
+            disposition: "blocked" as const,
+            inboundItemId: blocked.id,
+            blocker,
+          };
+        }
+
+        const activeTurn = runtimeRef.getActiveTurn(agentName, conversationId);
+        if (activeTurn) {
+          const delivered = await durableInboundStore.markDelivered({
+            id: appended.item.id,
+            turnId: activeTurn.turnId,
+          });
+          const commitRef = inboundUserMessageCommitRef(delivered.id);
+          const steered = runtimeRef.steerTurn(agentName, {
+            envelope,
+            inboundItem: delivered as any,
+            commitRef,
+          }, conversationId);
+          if (steered) {
+            ingressEventBus.emit("inbound.delivered", {
+              type: "inbound.delivered",
+              inboundItemId: delivered.id,
+              turnId: activeTurn.turnId,
+              sequence: delivered.sequence,
+            });
+            return {
+              turnId: activeTurn.turnId,
+              disposition: "delivered" as const,
+              inboundItemId: delivered.id,
+            };
+          }
+          await durableInboundStore.retryInboundItem(delivered.id);
+        }
+
+        runtimeRef
+          .dispatchTurn(agentName, envelope, { conversationId, turnId }, {
+            item: appended.item,
+            commitRef: inboundUserMessageCommitRef(appended.item.id),
+          } as any)
+          .catch((err) => {
+            ingressEventBus.emit("turn.error", {
+              type: "turn.error",
+              turnId,
+              agentName,
+              conversationId,
+              status: "error",
+              error: err instanceof Error ? err : new Error(String(err)),
+            });
+          });
+        return { turnId, disposition: "started" as const, inboundItemId: appended.item.id };
+      }
+
+      const blocker = await (humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+      if (blocker) {
+        return {
+          disposition: "blocked" as const,
+          blocker,
+        };
       }
 
       const steered = runtimeRef.steerTurn(agentName, envelope, conversationId);
@@ -237,7 +359,13 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     },
   });
 
-  const runtime = new HarnessRuntimeImpl(agentDepsMap, ingressPipeline, runtimeEventBus);
+  const runtime = new HarnessRuntimeImpl(
+    agentDepsMap,
+    ingressPipeline,
+    runtimeEventBus,
+    durableInboundStore as DurableInboundStore | undefined,
+    humanGateStore as HumanGateStore | undefined,
+  );
   runtimeRef = runtime;
 
   return runtime;

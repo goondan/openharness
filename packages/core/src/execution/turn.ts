@@ -13,13 +13,23 @@ import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
+import type { DurableInboundItem } from "../inbound/types.js";
+import type { HumanGateReferenceStore } from "../hitl/types.js";
+import { isHumanGatePendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
 
 type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
+export interface TurnSteeredInput {
+  envelope: InboundEnvelope;
+  inboundItem?: DurableInboundItem;
+  commitRef?: string;
+}
+
 export interface TurnSteeringController {
-  drain(): InboundEnvelope[];
+  drain(): Array<InboundEnvelope | TurnSteeredInput>;
+  consume?(input: TurnSteeredInput): Promise<void> | void;
   close?(): void;
 }
 
@@ -50,6 +60,16 @@ function appendEnvelopeAsUserMessage(
   envelope: InboundEnvelope,
   metadata?: Record<string, unknown>,
 ): void {
+  const commitRef = metadata?.__inboundCommitRef;
+  if (typeof commitRef === "string") {
+    const alreadyAppended = conversationState.messages.some(
+      (message) => message.metadata?.__inboundCommitRef === commitRef,
+    );
+    if (alreadyAppended) {
+      return;
+    }
+  }
+
   const text = extractText(envelope);
   conversationState.emit({
     type: "appendMessage",
@@ -61,26 +81,37 @@ function appendEnvelopeAsUserMessage(
       },
       metadata: {
         __createdBy: "core",
+        ...envelope.metadata,
         ...metadata,
       },
     },
   });
 }
 
-function appendSteeredInputs(
+async function appendSteeredInputs(
   conversationState: ConversationStateImpl,
   steering: TurnSteeringController | undefined,
-): number {
+): Promise<number> {
   if (!steering) {
     return 0;
   }
 
   const inputs = steering.drain();
-  for (const input of inputs) {
-    appendEnvelopeAsUserMessage(conversationState, input, {
+  for (const drained of inputs) {
+    const input = "envelope" in drained ? drained : { envelope: drained };
+    appendEnvelopeAsUserMessage(conversationState, input.envelope, {
       __steered: true,
-      __eventName: input.name,
+      __eventName: input.envelope.name,
+      ...(input.inboundItem
+        ? {
+            __inboundItemId: input.inboundItem.id,
+            __inboundCommitRef: input.commitRef,
+          }
+        : {}),
     });
+    if ("inboundItem" in input && input.inboundItem) {
+      await steering.consume?.(input as TurnSteeredInput);
+    }
   }
   return inputs.length;
 }
@@ -169,9 +200,29 @@ export async function executeTurn(
     maxSteps: number;
     abortController?: AbortController;
     steering?: TurnSteeringController;
+    humanGateStore?: HumanGateReferenceStore;
+    inboundItem?: DurableInboundItem;
+    inboundCommitRef?: string;
+    consumeInboundItem?: (input: {
+      item: DurableInboundItem;
+      turnId: string;
+      commitRef: string;
+    }) => Promise<void> | void;
   }
 ): Promise<TurnResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, steering } =
+  const {
+    llmClient,
+    toolRegistry,
+    middlewareRegistry,
+    eventBus,
+    conversationState,
+    maxSteps,
+    steering,
+    humanGateStore,
+    inboundItem,
+    inboundCommitRef,
+    consumeInboundItem,
+  } =
     deps;
 
   // 1. Generate unique turnId
@@ -210,6 +261,8 @@ export async function executeTurn(
     conversation: conversationState,
     abortSignal: abortController.signal,
     input: envelope,
+    inboundItemId: inboundItem?.id,
+    inboundCommitRef,
     llm: llmClient,
   };
 
@@ -228,7 +281,7 @@ export async function executeTurn(
     let totalUsage: LlmUsage | undefined;
 
     for (let stepNumber = 1; stepNumber <= maxSteps; stepNumber++) {
-      appendSteeredInputs(conversationState, steering);
+      await appendSteeredInputs(conversationState, steering);
 
       // Check abortSignal before each step
       if (ctx.abortSignal.aborted) {
@@ -252,6 +305,7 @@ export async function executeTurn(
         toolRegistry,
         middlewareRegistry,
         eventBus,
+        humanGateStore,
       });
 
       const stepSummary: StepSummary = {
@@ -268,7 +322,7 @@ export async function executeTurn(
       };
       steps.push(stepSummary);
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
-      const steeredInputCount = appendSteeredInputs(conversationState, steering);
+      const steeredInputCount = await appendSteeredInputs(conversationState, steering);
 
       // If no tool calls → turn is done (text response)
       if (!lastStepResult.toolCalls || lastStepResult.toolCalls.length === 0) {
@@ -316,7 +370,15 @@ export async function executeTurn(
     conversationState._turnActive = true;
 
     // 5. FR-CORE-007: Record inbound message as a non-system conversation event
-    appendEnvelopeAsUserMessage(conversationState, envelope);
+    appendEnvelopeAsUserMessage(conversationState, envelope, inboundItem && inboundCommitRef
+      ? {
+          __inboundItemId: inboundItem.id,
+          __inboundCommitRef: inboundCommitRef,
+        }
+      : undefined);
+    if (inboundItem && inboundCommitRef) {
+      await consumeInboundItem?.({ item: inboundItem, turnId, commitRef: inboundCommitRef });
+    }
 
     result = await chain(turnCtx);
   } catch (err) {
@@ -342,6 +404,31 @@ export async function executeTurn(
         agentName,
         conversationId,
         status: "aborted",
+        steps: [],
+      };
+    }
+
+    if (isHumanGatePendingError(error)) {
+      closeSteering(steering);
+      eventBus.emit("turn.done", {
+        type: "turn.done",
+        turnId,
+        agentName,
+        conversationId,
+        result: {
+          turnId,
+          agentName,
+          conversationId,
+          status: "waitingForHuman",
+          steps: [],
+        },
+      });
+
+      return {
+        turnId,
+        agentName,
+        conversationId,
+        status: "waitingForHuman",
         steps: [],
       };
     }

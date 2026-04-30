@@ -1,6 +1,10 @@
 import type { TurnResult, StepResult, StepSummary } from "./middleware.js";
 import type { ToolResult, JsonObject } from "./tool.js";
-import type { IngressDisposition } from "./ingress.js";
+import type {
+  ConversationBlockerRef,
+  InboundItemStatus,
+  IngressDisposition,
+} from "./ingress.js";
 
 // -----------------------------------------------------------------------
 // Core execution event payloads
@@ -131,14 +135,149 @@ export interface IngressAcceptedPayload {
   connectionName: string;
   agentName: string;
   conversationId: string;
-  turnId: string;
+  eventName?: string;
+  turnId?: string;
   disposition: IngressDisposition;
+  inboundItemId?: string;
+  blocker?: ConversationBlockerRef;
 }
 
 export interface IngressRejectedPayload {
   type: "ingress.rejected";
   connectionName: string;
   reason: string;
+}
+
+// -----------------------------------------------------------------------
+// Durable inbound event payloads
+// -----------------------------------------------------------------------
+
+export interface InboundAppendedPayload {
+  type: "inbound.appended";
+  inboundItemId: string;
+  agentName: string;
+  conversationId: string;
+  sequence: number;
+  idempotencyKey: string;
+}
+
+export interface InboundDuplicatePayload {
+  type: "inbound.duplicate";
+  inboundItemId: string;
+  agentName: string;
+  conversationId: string;
+  idempotencyKey: string;
+  status: InboundItemStatus;
+}
+
+export interface InboundLeasedPayload {
+  type: "inbound.leased";
+  inboundItemId: string;
+  leaseOwner: string;
+  leaseExpiresAt: string;
+}
+
+export interface InboundDeliveredPayload {
+  type: "inbound.delivered";
+  inboundItemId: string;
+  turnId: string;
+  sequence: number;
+}
+
+export interface InboundBlockedPayload {
+  type: "inbound.blocked";
+  inboundItemId: string;
+  blockedBy: ConversationBlockerRef;
+}
+
+export interface InboundConsumedPayload {
+  type: "inbound.consumed";
+  inboundItemId: string;
+  turnId: string;
+  commitRef: string;
+}
+
+export interface InboundFailedPayload {
+  type: "inbound.failed";
+  inboundItemId: string;
+  attempt: number;
+  retryable: boolean;
+  reason: string;
+}
+
+export interface InboundDeadLetteredPayload {
+  type: "inbound.deadLettered";
+  inboundItemId: string;
+  reason: string;
+}
+
+// -----------------------------------------------------------------------
+// Human Gate event payloads
+// -----------------------------------------------------------------------
+
+export interface HumanGateCreatedPayload {
+  type: "humanGate.created";
+  humanGateId: string;
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  toolCallId: string;
+}
+
+export interface HumanTaskCreatedPayload {
+  type: "humanTask.created";
+  humanGateId: string;
+  humanTaskId: string;
+  taskType: "approval" | "text" | "form";
+  agentName: string;
+  conversationId: string;
+}
+
+export interface HumanTaskResolvedPayload {
+  type: "humanTask.resolved";
+  humanTaskId: string;
+  humanGateId: string;
+  idempotencyKey: string;
+}
+
+export interface HumanTaskRejectedPayload {
+  type: "humanTask.rejected";
+  humanTaskId: string;
+  humanGateId: string;
+  idempotencyKey: string;
+}
+
+export interface HumanGateReadyPayload {
+  type: "humanGate.ready";
+  humanGateId: string;
+  taskIds: string[];
+}
+
+export interface HumanGateResumingPayload {
+  type: "humanGate.resuming";
+  humanGateId: string;
+  leaseOwner: string;
+  turnId: string;
+}
+
+export interface HumanGateCompletedPayload {
+  type: "humanGate.completed";
+  humanGateId: string;
+  turnId: string;
+  blockedInboundItemIds: string[];
+}
+
+export interface HumanGateFailedPayload {
+  type: "humanGate.failed";
+  humanGateId: string;
+  retryable: boolean;
+  reason: string;
+}
+
+export interface HumanGateCanceledPayload {
+  type: "humanGate.canceled";
+  humanGateId: string;
+  reason?: string;
 }
 
 // -----------------------------------------------------------------------
@@ -159,4 +298,21 @@ export type EventPayload =
   | ToolErrorPayload
   | IngressReceivedPayload
   | IngressAcceptedPayload
-  | IngressRejectedPayload;
+  | IngressRejectedPayload
+  | InboundAppendedPayload
+  | InboundDuplicatePayload
+  | InboundLeasedPayload
+  | InboundDeliveredPayload
+  | InboundBlockedPayload
+  | InboundConsumedPayload
+  | InboundFailedPayload
+  | InboundDeadLetteredPayload
+  | HumanGateCreatedPayload
+  | HumanTaskCreatedPayload
+  | HumanTaskResolvedPayload
+  | HumanTaskRejectedPayload
+  | HumanGateReadyPayload
+  | HumanGateResumingPayload
+  | HumanGateCompletedPayload
+  | HumanGateFailedPayload
+  | HumanGateCanceledPayload;
