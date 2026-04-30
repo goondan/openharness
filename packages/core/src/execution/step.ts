@@ -237,7 +237,7 @@ export async function executeStep(
 
         const childBatch = {
           batchId,
-          status: parentHitlBatch ? "waitingForHuman" as const : "preparing" as const,
+          status: "preparing" as const,
           agentName,
           conversationId,
           turnId,
@@ -259,18 +259,7 @@ export async function executeStep(
         };
 
         if (parentHitlBatch) {
-          const nonHitlPeer = plannedToolCalls.find((tc) => !tc.requiresHitl);
-          if (nonHitlPeer) {
-            throw new Error("Chained HITL steps cannot mix HITL requests with non-HITL peer tool calls");
-          }
-          for (const tc of plannedToolCalls) {
-            toolCallResults.push({
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: tc.args,
-            });
-          }
-          const { child: waitingBatch } = await hitlStore.spawnChildBatch({
+          await hitlStore.spawnChildBatch({
             parentBatchId: parentHitlBatch.batchId,
             parentCompletion: {
               completedAt: now,
@@ -282,16 +271,6 @@ export async function executeStep(
             childRequests: requests,
             guard: parentHitlBatch.guard,
           });
-          eventBus.emit("hitl.batch.requested", {
-            type: "hitl.batch.requested",
-            batch: toHitlBatchView(waitingBatch, requests),
-          });
-          for (const request of requests) {
-            eventBus.emit("hitl.requested", {
-              type: "hitl.requested",
-              request: toHitlRequestView(request),
-            });
-          }
         } else {
           const created = await hitlStore.createBatch({
             batch: childBatch,
@@ -300,62 +279,80 @@ export async function executeStep(
           if (created.status === "conflict") {
             throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
           }
-          let exposedForHuman = false;
-          try {
-            for (const tc of plannedToolCalls) {
-              if (tc.requiresHitl) {
-                toolCallResults.push({
-                  toolCallId: tc.toolCallId,
-                  toolName: tc.toolName,
-                  args: tc.args,
-                });
-                continue;
-              }
+        }
 
-              const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
-                toolRegistry,
-                middlewareRegistry,
-                eventBus,
-                hitlStore,
-                batchId,
-              }));
-
-              await hitlStore.recordBatchToolResult(batchId, {
-                batchId,
-                toolCallId: tc.toolCallId,
-                toolCallIndex: tc.toolCallIndex,
-                toolName: tc.toolName,
-                result,
-                recordedAt: new Date().toISOString(),
-              });
-
+        // §8.1 step 6~8 / §8.5 step 12.1: child is now `preparing` (atomic spawn or createBatch).
+        // Run non-HITL peer execution and `markBatchWaitingForHuman()` outside the spawn transaction.
+        const spawnedFromParent = Boolean(parentHitlBatch);
+        let exposedForHuman = false;
+        try {
+          for (const tc of plannedToolCalls) {
+            if (tc.requiresHitl) {
               toolCallResults.push({
                 toolCallId: tc.toolCallId,
                 toolName: tc.toolName,
                 args: tc.args,
-                result,
               });
+              continue;
             }
 
-            const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
-            exposedForHuman = true;
-            const waitingRequests = await hitlStore.listBatchRequests(batchId);
-            eventBus.emit("hitl.batch.requested", {
-              type: "hitl.batch.requested",
-              batch: toHitlBatchView(waitingBatch, waitingRequests),
+            const result = tc.malformedResult ?? (await executeNonHitlToolCall(tc, stepCtx, {
+              toolRegistry,
+              middlewareRegistry,
+              eventBus,
+              hitlStore,
+              batchId,
+            }));
+
+            await hitlStore.recordBatchToolResult(batchId, {
+              batchId,
+              toolCallId: tc.toolCallId,
+              toolCallIndex: tc.toolCallIndex,
+              toolName: tc.toolName,
+              result,
+              recordedAt: new Date().toISOString(),
             });
-            for (const request of waitingRequests) {
-              eventBus.emit("hitl.requested", {
-                type: "hitl.requested",
-                request: toHitlRequestView(request),
-              });
-            }
-          } catch (err) {
-            if (!exposedForHuman) {
-              await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
-            }
-            throw err;
+
+            toolCallResults.push({
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+              result,
+            });
           }
+
+          const waitingBatch = await hitlStore.markBatchWaitingForHuman(batchId);
+          exposedForHuman = true;
+          const waitingRequests = await hitlStore.listBatchRequests(batchId);
+          eventBus.emit("hitl.batch.requested", {
+            type: "hitl.batch.requested",
+            batch: toHitlBatchView(waitingBatch, waitingRequests),
+          });
+          for (const request of waitingRequests) {
+            eventBus.emit("hitl.requested", {
+              type: "hitl.requested",
+              request: toHitlRequestView(request),
+            });
+          }
+        } catch (err) {
+          if (!exposedForHuman) {
+            await closeUnexposedHitlBatchAfterPreparationFailure(hitlStore, batchId, err);
+          }
+          // Per spec §8.5 step 12.1, after a successful `spawnChildBatch()` the parent is
+          // atomically `completed(spawnedChild)` (lease released) and child peer execution runs
+          // *outside* the spawn transaction. If peer execution fails post-spawn, the child has
+          // been closed terminally above; the outer resume layer must observe this and not
+          // attempt to re-fail the already-completed parent. We rely on
+          // `_recordHitlBatchFailure()` re-reading the parent's state and short-circuiting on
+          // post-spawn terminal completion. The `spawnedFromParent` flag is preserved on the
+          // wrapped error so observers can tell the failure was a child-prep failure rather
+          // than a parent-side error.
+          if (spawnedFromParent) {
+            const wrapped = err instanceof Error ? err : new Error(String(err));
+            (wrapped as Error & { __chainedChildPrepFailure?: boolean }).__chainedChildPrepFailure = true;
+            throw wrapped;
+          }
+          throw err;
         }
       } else {
         for (const tc of plannedToolCalls) {

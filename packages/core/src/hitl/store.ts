@@ -635,8 +635,8 @@ export class InMemoryHitlStore implements HitlStore {
       }
     }
     const now = nowIso();
-    if (input.childBatch.status !== "preparing" && input.childBatch.status !== "waitingForHuman") {
-      throw new HitlStoreError("Child HITL batch must start preparing or waitingForHuman");
+    if (input.childBatch.status !== "preparing") {
+      throw new HitlStoreError("Child HITL batch must start in preparing state");
     }
     const continuationOutcome: HitlContinuationOutcome = {
       outcome: "spawnedChild",
@@ -654,7 +654,7 @@ export class InMemoryHitlStore implements HitlStore {
     });
     const child = touchBatch({
       ...clone(input.childBatch),
-      status: input.childBatch.status,
+      status: "preparing",
       parentBatchId: parent.batchId,
       childBatchId: undefined,
       toolResults: input.childBatch.toolResults.map(clone),
@@ -962,10 +962,11 @@ export class InMemoryHitlStore implements HitlStore {
 }
 
 function isResumableBatch(batch: HitlBatchRecord): boolean {
+  // Per spec §7.1 transition map: `blocked -> canceled` is the only outbound from blocked.
+  // Lease acquisition (which forces -> resuming) must never occur on blocked batches.
   return (
     batch.status === "ready" ||
     batch.status === "resuming" ||
-    batch.status === "blocked" ||
     (batch.status === "continuing" && Boolean(batch.continuationOutcome)) ||
     (batch.status === "failed" && batch.failure?.retryable === true)
   );

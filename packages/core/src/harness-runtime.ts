@@ -642,7 +642,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         recovered.status === "ready" ||
         recovered.status === "resuming" ||
         (recovered.status === "continuing" && Boolean(recovered.continuationOutcome)) ||
-        (recovered.status === "blocked" && Boolean(recovered.continuationOutcome)) ||
+        // Per spec §8.6 step 10, `blocked` batches are conversation barriers and must NOT be
+        // auto-resumed. Per §8.5 step 14, the stuck state for partially-applied close is
+        // `continuing` (handled above via §8.6 step 9.1), not `blocked`. A `blocked` batch
+        // that carries a continuation outcome marker has already settled via the canonical
+        // record-then-close path; there is nothing for recovery to retry.
         (recovered.status === "failed" && recovered.failure?.retryable)
       ) {
         queuedForResume++;
@@ -776,6 +780,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     ) {
       return { status: "alreadyTerminal", batch: await this._toHitlBatchView(initial) };
     }
+    // Per spec §7.1, `blocked` is an operator-cancel barrier with `blocked -> canceled` as the
+    // only outbound transition. Resume must never silently transition `blocked -> resuming`.
+    // Surface the blocked status before any lease acquisition can mutate the record.
+    if (initial.status === "blocked") {
+      return { status: "blocked", batch: await this._toHitlBatchView(initial) };
+    }
     if (initial.status === "continuing" && !initial.continuationOutcome) {
       return {
         status: "notReady",
@@ -795,14 +805,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         batch: await this._toHitlBatchView(initial),
         pendingRequestIds: pendingRequests.map((request) => request.requestId),
       };
-    }
-    if (initial.status === "blocked" && !initial.appendCommit) {
-      const missingHitlResults = initial.toolCalls.filter(
-        (toolCall) => toolCall.requiresHitl && !initial.toolResults.some((result) => result.toolCallId === toolCall.toolCallId),
-      );
-      if (missingHitlResults.length > 0) {
-        return { status: "blocked", batch: await this._toHitlBatchView(initial) };
-      }
     }
     if (blockedRequestsWithoutStoredResult.length > 0 && !initial.appendCommit) {
       return {
@@ -1210,6 +1212,48 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   ): Promise<ResumeHitlResult> {
     if (!this._hitlStore) {
       throw new ConfigError("HITL store is not configured");
+    }
+    // Per spec §8.5 step 12.1, after a chained `spawnChildBatch()` commits, the parent is
+    // atomically `completed(spawnedChild)` with its lease released. If the post-spawn child
+    // preparation fails, the child has already been closed terminally by step.ts and step.ts
+    // tags the thrown error with `__chainedChildPrepFailure`. The parent must NOT be re-failed
+    // (its lease is gone and its terminal state is correct). Surface the child's current
+    // terminal state instead so the operator sees the real handoff outcome. We require BOTH
+    // the spec-defined parent state AND the explicit step.ts marker so unrelated post-spawn
+    // resume errors (e.g., `eventBus.emit` listener throwing) are NOT silently swallowed.
+    const isChainedChildPrepFailure = Boolean(
+      (error as Error & { __chainedChildPrepFailure?: boolean }).__chainedChildPrepFailure,
+    );
+    if (isChainedChildPrepFailure) {
+      const latestParent = await this._hitlStore.getBatch(batch.batchId).catch(() => null);
+      if (
+        latestParent?.status === "completed" &&
+        latestParent.completion?.outcome === "spawnedChild" &&
+        latestParent.childBatchId
+      ) {
+        const child = await this._hitlStore.getBatch(latestParent.childBatchId).catch(() => null);
+        if (child) {
+          if (child.status === "blocked") {
+            return { status: "blocked", batch: await this._toHitlBatchView(child) };
+          }
+          if (child.status === "canceled" || child.status === "expired" || child.status === "failed") {
+            return {
+              status: child.status === "failed" && child.failure?.retryable === true ? "failed" : "alreadyTerminal",
+              batch: await this._toHitlBatchView(child),
+              ...(child.status === "failed" ? { error: child.failure?.error ?? error.message } : {}),
+            } as ResumeHitlResult;
+          }
+          if (child.status === "waitingForHuman" || child.status === "preparing") {
+            return {
+              status: "notReady",
+              batch: await this._toHitlBatchView(child),
+              pendingRequestIds: (await this._hitlStore.listBatchRequests(child.batchId))
+                .filter((request) => request.status === "pending")
+                .map((request) => request.requestId),
+            };
+          }
+        }
+      }
     }
     const failure: HitlFailure = {
       error: error.message,

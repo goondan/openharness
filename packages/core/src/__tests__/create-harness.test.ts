@@ -1885,10 +1885,15 @@ describe("createHarness", () => {
 
     const store = new InMemoryHitlStore();
     const markBatchWaitingForHuman = store.markBatchWaitingForHuman.bind(store);
+    const markedChildBatchIds: string[] = [];
     vi.spyOn(store, "markBatchWaitingForHuman").mockImplementation(async (batchId) => {
+      // Per spec §8.5 step 12.1, chained child batches are spawned in `preparing` and the
+      // runtime must run §8.1 step 6~8 (peer execution + markBatchWaitingForHuman) outside the
+      // spawn transaction. Track child invocations so the assertion below proves the child
+      // followed the same exposure path as a non-chained batch.
       const batch = await store.getBatch(batchId);
       if (batch?.parentBatchId) {
-        throw new Error("spawned child HITL batch should already be exposed atomically");
+        markedChildBatchIds.push(batchId);
       }
       return markBatchWaitingForHuman(batchId);
     });
@@ -1937,6 +1942,9 @@ describe("createHarness", () => {
     });
     expect(firstHandler).toHaveBeenCalledOnce();
     expect(secondHandler).not.toHaveBeenCalled();
+    // Child batch must traverse §8.1 step 6~8 outside the spawn transaction (markBatchWaitingForHuman
+    // called exactly once for the chained child).
+    expect(markedChildBatchIds).toHaveLength(1);
 
     await runtime.close();
   });
