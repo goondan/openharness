@@ -9,7 +9,7 @@ OpenHarness runtime은 외부 ingress와 direct input을 처리 전 durable inbo
 ## 2. 상위 스펙 연결 (Traceability)
 
 - Related Goals: `G-1`, `G-3`, `G-5`, `G-8`, `G-9`
-- Related Requirements: `FR-INGRESS-010`, `FR-INGRESS-011`, `FR-INGRESS-012`, `FR-INGRESS-013`, `FR-DIR-001`, `FR-DIR-002`, `FR-DIR-003`, `FR-DIR-004`, `FR-DIR-005`, `FR-DIR-006`, `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-ACTIVE-001`, `FR-ACTIVE-002`, `FR-DIRECT-001`, `FR-DIRECT-002`, `FR-OBS-001`, `FR-HG-004`, `FR-HG-005`, `FR-HG-010`, `NFR-DIR-001` ~ `NFR-DIR-009`
+- Related Requirements: `FR-INGRESS-010`, `FR-INGRESS-011`, `FR-INGRESS-012`, `FR-INGRESS-013`, `FR-DIR-001`, `FR-DIR-002`, `FR-DIR-003`, `FR-DIR-004`, `FR-DIR-005`, `FR-DIR-006`, `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-ACTIVE-001`, `FR-ACTIVE-002`, `FR-DIRECT-001`, `FR-DIRECT-002`, `FR-OBS-001`, `FR-HA-004`, `FR-HA-005`, `FR-HA-010`, `NFR-DIR-001` ~ `NFR-DIR-009`
 - Related AC: `AC-04`, `AC-04b`, `AC-04c`, `AC-DIR-001` ~ `AC-DIR-010`
 
 ---
@@ -94,7 +94,7 @@ OpenHarness runtime은 외부 ingress와 direct input을 처리 전 durable inbo
 - Trigger: active Turn이 있는 conversation에 pending item이 생긴다.
 - Preconditions:
   - active Turn이 steer 가능한 상태다.
-  - human gate/operator hold blocker가 없다.
+  - human approval/operator hold blocker가 없다.
 - Main Flow:
   1. scheduler는 pending item을 active Turn delivery 대상으로 mark 한다.
   2. in-memory steering inbox는 active Turn wake-up/cache로만 사용한다.
@@ -113,11 +113,11 @@ OpenHarness runtime은 외부 ingress와 direct input을 처리 전 durable inbo
 - Actor: conversation scheduler
 - Trigger: blocker가 있는 conversation에 pending item이 생긴다.
 - Preconditions:
-  - conversation에 `humanGate` 또는 `operatorHold` blocker가 있다.
+  - conversation에 `humanApproval` 또는 `operatorHold` blocker가 있다.
 - Main Flow:
   1. scheduler는 새 Turn을 시작하지 않는다.
   2. scheduler는 inbound item을 `blocked`로 표시하고 `blockedBy` metadata를 저장한다.
-  3. Human Gate blocker인 경우 blocker 유지 상태에서 `HG-RESUME-01`이 tool result append 후 blocked item을 sequence order로 consume한다.
+  3. Human Approval blocker인 경우 blocker 유지 상태에서 `HA-RESUME-01`이 tool result append 후 blocked item을 sequence order로 consume한다.
   4. operator hold blocker인 경우 blocker 해제 후 blocked item은 sequence order에 따라 pending 대상으로 전환된다.
 - Outputs:
   - disposition `blocked`, blocker metadata, `inboundItemId`
@@ -270,7 +270,7 @@ interface DurableInboundStore {
   - `packages/core/src/execution`: active Turn durable drain integration.
 - Data Ownership:
   - `DurableInboundStore` owns inbound item state, idempotency, sequence, leases, and blocker references.
-  - `HumanGateStore` or operator hold store is the canonical owner of blocker lifecycle.
+  - `HumanApprovalStore` or operator hold store is the canonical owner of blocker lifecycle.
   - conversation state owns message/event append. inbound item stores only commit references, not the canonical conversation log.
 - Commit Reference:
   - runtime generates a deterministic commit reference before appending a user message from an inbound item: `inbound:<inboundItemId>:user-message`.
@@ -279,8 +279,8 @@ interface DurableInboundStore {
   - `DurableInboundStore.markConsumed()` stores the same commit reference. If recovery sees an existing commit reference before `consumed`, it marks the item consumed with that reference instead of appending another message.
 - State Model:
   - `pending -> leased -> delivered -> consumed`
-  - `pending -> delivered -> blocked` when an active Turn pauses for a Human Gate before consuming steered durable input
-  - `pending -> blocked -> consumed` for Human Gate resume drain
+  - `pending -> delivered -> blocked` when an active Turn pauses for a Human Approval before consuming steered durable input
+  - `pending -> blocked -> consumed` for Human Approval resume drain
   - `pending -> blocked -> pending` for operator hold release
   - `leased -> pending`
   - `leased -> failed -> pending|deadLetter`
@@ -303,14 +303,14 @@ interface DurableInboundStore {
 - Migration / Rollback:
   - durable mode is opt-in.
   - existing `steered` disposition is accepted as migration alias for canonical `delivered`.
-  - if Human Gate blockers are used, durable inbound storage is required to preserve blocked envelopes and direct inputs; non-durable runtime creation must fail explicitly instead of accepting untracked Human Gate blockers.
+  - if Human Approval blockers are used, durable inbound storage is required to preserve blocked envelopes and direct inputs; non-durable runtime creation must fail explicitly instead of accepting untracked Human Approval blockers.
 
 ---
 
 ## 7. Dependency Map
 
 - Depends On: `core/conversation-state`, `core/execution-loop`, `ingress/ingress-pipeline`
-- Blocks: `core/hitl` human gate blocker integration, production durable adapters
+- Blocks: `core/hitl` human approval blocker integration, production durable adapters
 - Parallelizable With: event type expansion, in-memory store contract tests, control API typing
 
 ---
@@ -324,12 +324,12 @@ interface DurableInboundStore {
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item이 append된다, Then item은 durable store에 남고 active Turn은 Step 경계에서 그 item을 user message로 반영한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item을 deliver한다, Then runtime은 `markDelivered()` 성공 이후에만 active Turn memory steering inbox에 notify한다.
 - Given active Turn delivery가 `markDelivered()` 이후 consume 전에 crash된다, When operator/recovery가 `retryInboundItem()` 또는 `releaseInboundItem()`을 호출한다, Then item은 `pending`으로 돌아가 다시 처리 가능하다.
-- Given conversation이 human gate로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanGate` metadata와 함께 `blocked`가 된다.
-- Given human gate가 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.
+- Given conversation이 human approval로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanApproval` metadata와 함께 `blocked`가 된다.
+- Given human approval이 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.
 - Given 두 worker가 같은 conversation pending item을 동시에 schedule한다, When 둘 다 lease를 시도한다, Then 하나만 lease를 얻고 다른 worker는 no-op/conflict result로 수렴한다.
 - Given inbound item이 conversation에 이미 append되었지만 consume marking 전 crash가 발생했다, When recovery가 같은 item을 다시 처리한다, Then 같은 inbound item id의 user message가 중복 append되지 않는다.
 - Given durable inbound mode가 꺼져 있다, When 기존 ingress/processTurn 테스트가 실행된다, Then 기존 started/steered 동작이 유지된다.
 - Given inbound item이 `delivered` 상태다, When lease expiry recovery가 실행된다, Then item은 자동으로 `pending`이 되지 않는다.
 - Given durable direct input이 duplicate이고 기존 item이 `delivered` 또는 `failed` 상태다, When `processTurn()`이 호출된다, Then runtime은 성공 완료로 보고하지 않는다.
-- Given durable inbound mode가 꺼져 있고 conversation이 human gate로 blocked 상태다, When ingress event가 들어온다, Then runtime은 envelope를 drop하지 않고 명시적 오류를 반환한다.
-- Given active Turn으로 delivered 된 item이 consume 되기 전에 Human Gate가 생성된다, When Turn이 waiting 상태로 전환된다, Then delivered item은 `blockedBy=humanGate`로 재분류되어 resume drain 대상이 된다.
+- Given durable inbound mode가 꺼져 있고 conversation이 human approval로 blocked 상태다, When ingress event가 들어온다, Then runtime은 envelope를 drop하지 않고 명시적 오류를 반환한다.
+- Given active Turn으로 delivered 된 item이 consume 되기 전에 Human Approval이 생성된다, When Turn이 waiting 상태로 전환된다, Then delivered item은 `blockedBy=humanApproval`로 재분류되어 resume drain 대상이 된다.

@@ -3,7 +3,7 @@ import { executeToolCall } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
-import { createInMemoryHumanGateStore } from "../../hitl/memory-store.js";
+import { createInMemoryHumanApprovalStore } from "../../hitl/memory-store.js";
 import type {
   ToolCallContext,
   ToolResult,
@@ -326,24 +326,24 @@ describe("executeToolCall", () => {
     expect(donePayload.result).toEqual(result);
   });
 
-  it("does not re-emit human gate created events for duplicate gate creation", async () => {
+  it("does not re-emit human approval created events for duplicate gate creation", async () => {
     const toolRegistry = new ToolRegistry();
     toolRegistry.register({
       ...makeTool("my_tool"),
       humanApproval: { required: true, prompt: "Approve?" },
     });
-    const humanGateStore = createInMemoryHumanGateStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const eventBus = new EventBus();
     const gateCreated = vi.fn();
     const taskCreated = vi.fn();
-    eventBus.on("humanGate.created", gateCreated);
+    eventBus.on("humanApproval.created", gateCreated);
     eventBus.on("humanTask.created", taskCreated);
 
     const ctx = makeToolCallContext({ toolName: "my_tool", toolArgs: { value: "hello" } });
-    const deps = { ...makeDeps({ toolRegistry, eventBus }), humanGateStore };
+    const deps = { ...makeDeps({ toolRegistry, eventBus }), humanApprovalStore };
 
-    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Gate/);
-    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Gate/);
+    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Approval/);
+    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Approval/);
 
     expect(gateCreated).toHaveBeenCalledOnce();
     expect(taskCreated).toHaveBeenCalledOnce();

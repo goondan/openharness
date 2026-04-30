@@ -11,8 +11,8 @@ import type {
 import type { ProcessTurnOptions } from "./config.js";
 import type { EventPayload } from "./events.js";
 import type {
-  CancelHumanGateInput,
-  HumanGateRecord,
+  CancelHumanApprovalInput,
+  HumanApprovalRecord,
   HumanTaskFilter,
   HumanTaskView,
   SubmitHumanResult,
@@ -43,8 +43,8 @@ export interface ControlApi {
 
   listHumanTasks?(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitHumanResult?(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  resumeHumanGate?(id: string): Promise<HumanGateResumeResult>;
-  cancelHumanGate?(input: string | CancelHumanGateInput): Promise<HumanGateRecord>;
+  resumeHumanApproval?(id: string): Promise<HumanApprovalResumeResult>;
+  cancelHumanApproval?(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
 }
 
 export interface DurableControlApi extends ControlApi {
@@ -55,14 +55,14 @@ export interface DurableControlApi extends ControlApi {
 
   listHumanTasks(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitHumanResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  resumeHumanGate(id: string): Promise<HumanGateResumeResult>;
-  cancelHumanGate(input: string | CancelHumanGateInput): Promise<HumanGateRecord>;
+  resumeHumanApproval(id: string): Promise<HumanApprovalResumeResult>;
+  cancelHumanApproval(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
 }
 
-export interface HumanGateResumeResult {
-  humanGateId: string;
+export interface HumanApprovalResumeResult {
+  humanApprovalId: string;
   status: "completed" | "blocked" | "failed";
-  gate: HumanGateRecord;
+  approval: HumanApprovalRecord;
   continuation?: TurnResult;
 }
 

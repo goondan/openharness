@@ -66,7 +66,7 @@ export type IngressDisposition =
   | "duplicate"
   | "steered";
 
-export type ConversationBlockerType = "humanGate" | "operatorHold";
+export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
 export interface ConversationBlockerRef {
   type: ConversationBlockerType;

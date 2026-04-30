@@ -1,7 +1,7 @@
 import type { JsonObject, JsonSchema } from "@goondan/openharness-types";
 import type { ConversationBlockerRef, LeaseInfo } from "../inbound/types.js";
 
-export type HumanGateStatus =
+export type HumanApprovalStatus =
   | "preparing"
   | "waitingForHuman"
   | "ready"
@@ -27,7 +27,7 @@ export type HumanResult =
   | { type: "text"; text: string }
   | { type: "form"; data: JsonObject };
 
-export interface HumanGateToolCallSnapshot {
+export interface HumanApprovalToolCallSnapshot {
   turnId: string;
   agentName: string;
   conversationId: string;
@@ -50,7 +50,7 @@ export interface HumanTaskCreateInput {
 
 export interface HumanTaskRecord {
   id: string;
-  humanGateId: string;
+  humanApprovalId: string;
   taskType: HumanTaskType;
   status: HumanTaskStatus;
   prompt?: string;
@@ -73,10 +73,10 @@ export interface HumanTaskView extends HumanTaskRecord {
   toolName: string;
 }
 
-export interface HumanGateRecord {
+export interface HumanApprovalRecord {
   id: string;
-  status: HumanGateStatus;
-  toolCall: HumanGateToolCallSnapshot;
+  status: HumanApprovalStatus;
+  toolCall: HumanApprovalToolCallSnapshot;
   prompt?: string;
   expectedResultSchema?: JsonSchema;
   conversationCursor?: string;
@@ -86,23 +86,23 @@ export interface HumanGateRecord {
   blockedInboundItemIds?: string[];
   handlerStartedAt?: string;
   lease?: LeaseInfo;
-  failure?: HumanGateFailureInfo;
+  failure?: HumanApprovalFailureInfo;
   completedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface HumanGateFailureInfo {
+export interface HumanApprovalFailureInfo {
   reason: string;
   retryable: boolean;
   failedAt: string;
 }
 
-export interface CreateHumanGateInput {
+export interface CreateHumanApprovalInput {
   id?: string;
-  humanGateId?: string;
+  humanApprovalId?: string;
   policy?: unknown;
-  toolCall: HumanGateToolCallSnapshot;
+  toolCall: HumanApprovalToolCallSnapshot;
   prompt?: string;
   expectedResultSchema?: JsonSchema;
   conversationCursor?: string;
@@ -111,8 +111,8 @@ export interface CreateHumanGateInput {
   now?: string;
 }
 
-export interface CreateHumanGateResult {
-  gate: HumanGateRecord;
+export interface CreateHumanApprovalResult {
+  approval: HumanApprovalRecord;
   tasks: HumanTaskRecord[];
   blocker: ConversationBlockerRef;
   created: boolean;
@@ -122,7 +122,7 @@ export interface CreateHumanGateResult {
 export interface HumanTaskFilter {
   agentName?: string;
   conversationId?: string;
-  humanGateId?: string;
+  humanApprovalId?: string;
   status?: HumanTaskStatus | HumanTaskStatus[];
   statuses?: HumanTaskStatus[];
   taskTypes?: HumanTaskType[];
@@ -143,70 +143,70 @@ export type SubmitHumanResult =
   | {
       status: "accepted" | "duplicate";
       task: HumanTaskRecord;
-      gate: HumanGateRecord;
-      gateReady: boolean;
+      approval: HumanApprovalRecord;
+      approvalReady: boolean;
     }
   | {
       status: "notFound" | "invalid";
       reason: string;
     };
 
-export interface AcquireHumanGateInput {
-  humanGateId: string;
+export interface AcquireHumanApprovalInput {
+  humanApprovalId: string;
   leaseOwner: string;
   leaseTtlMs?: number;
   now?: string;
 }
 
-export interface CompleteHumanGateInput {
-  humanGateId: string;
+export interface CompleteHumanApprovalInput {
+  humanApprovalId: string;
   leaseOwner?: string;
   blockedInboundItemIds?: string[];
   now?: string;
 }
 
-export interface MarkHumanGateHandlerStartedInput {
-  humanGateId: string;
+export interface MarkHumanApprovalHandlerStartedInput {
+  humanApprovalId: string;
   leaseOwner?: string;
   now?: string;
 }
 
-export interface FailHumanGateInput {
-  humanGateId: string;
+export interface FailHumanApprovalInput {
+  humanApprovalId: string;
   reason: string;
   retryable: boolean;
   leaseOwner?: string;
   now?: string;
 }
 
-export interface CancelHumanGateInput {
-  humanGateId: string;
+export interface CancelHumanApprovalInput {
+  humanApprovalId: string;
   reason?: string;
-  status?: Extract<HumanGateStatus, "canceled" | "expired">;
+  status?: Extract<HumanApprovalStatus, "canceled" | "expired">;
   now?: string;
 }
 
-export interface HumanGateRecoveryFilter {
+export interface HumanApprovalRecoveryFilter {
   agentName?: string;
   conversationId?: string;
   includeFailed?: boolean;
   limit?: number;
 }
 
-export interface HumanGateStore {
-  createGate(input: CreateHumanGateInput): Promise<CreateHumanGateResult>;
+export interface HumanApprovalStore {
+  createApproval(input: CreateHumanApprovalInput): Promise<CreateHumanApprovalResult>;
   listTasks(filter: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  acquireGateForResume(input: AcquireHumanGateInput): Promise<HumanGateRecord | null>;
-  markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord>;
-  markGateCompleted(input: CompleteHumanGateInput): Promise<HumanGateRecord>;
-  markGateFailed(input: FailHumanGateInput): Promise<HumanGateRecord>;
-  cancelGate(input: CancelHumanGateInput): Promise<HumanGateRecord>;
-  listRecoverableGates(filter?: HumanGateRecoveryFilter): Promise<HumanGateRecord[]>;
+  acquireApprovalForResume(input: AcquireHumanApprovalInput): Promise<HumanApprovalRecord | null>;
+  markApprovalHandlerStarted(input: MarkHumanApprovalHandlerStartedInput): Promise<HumanApprovalRecord>;
+  markApprovalCompleted(input: CompleteHumanApprovalInput): Promise<HumanApprovalRecord>;
+  markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord>;
+  cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
+  listRecoverableApprovals(filter?: HumanApprovalRecoveryFilter): Promise<HumanApprovalRecord[]>;
 }
 
-export interface HumanGateReferenceStore extends HumanGateStore {
-  getGate(id: string): Promise<HumanGateRecord | null>;
+export interface HumanApprovalReferenceStore extends HumanApprovalStore {
+  getApproval(id: string): Promise<HumanApprovalRecord | null>;
   getTask(id: string): Promise<HumanTaskRecord | null>;
   getConversationBlocker(input: {
     agentName: string;

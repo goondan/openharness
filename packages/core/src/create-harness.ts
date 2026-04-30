@@ -13,7 +13,7 @@ import type {
   ModelConfig,
   EventPayload,
   DurableInboundStore,
-  HumanGateStore,
+  HumanApprovalStore,
 } from "@goondan/openharness-types";
 import { resolveEnvDeep } from "./env.js";
 import { ConfigError } from "./errors.js";
@@ -199,8 +199,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   const durableInboundStore = config.durableInbound?.enabled === false
     ? undefined
     : config.durableInbound?.store;
-  const humanGateStore = config.humanApproval?.store ?? config.humanGate?.store;
-  if (humanGateStore && !durableInboundStore) {
+  const humanApprovalStore = config.humanApproval?.store;
+  if (humanApprovalStore && !durableInboundStore) {
     throw new ConfigError("humanApproval requires durableInbound.store.");
   }
 
@@ -268,7 +268,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           };
         }
 
-        const blocker = await (humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+        const blocker = await (humanApprovalStore as any)?.getConversationBlocker?.({ agentName, conversationId });
         if (blocker) {
           const blocked = await durableInboundStore.markBlocked({
             id: appended.item.id,
@@ -321,10 +321,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
         return { turnId, disposition: "started" as const, inboundItemId: appended.item.id };
       }
 
-      const blocker = await (humanGateStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+      const blocker = await (humanApprovalStore as any)?.getConversationBlocker?.({ agentName, conversationId });
       if (blocker) {
         throw new ConfigError(
-          "Human Gate blocked ingress requires durableInbound.store so blocked envelopes are preserved.",
+          "Human Approval blocked ingress requires durableInbound.store so blocked envelopes are preserved.",
         );
       }
 
@@ -355,7 +355,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     ingressPipeline,
     runtimeEventBus,
     durableInboundStore as DurableInboundStore | undefined,
-    humanGateStore as HumanGateStore | undefined,
+    humanApprovalStore as HumanApprovalStore | undefined,
   );
   runtimeRef = runtime;
 

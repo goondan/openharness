@@ -1,50 +1,50 @@
 import type {
-  AcquireHumanGateInput,
-  CancelHumanGateInput,
-  CompleteHumanGateInput,
-  CreateHumanGateInput,
-  CreateHumanGateResult,
-  FailHumanGateInput,
-  HumanGateRecord,
-  HumanGateRecoveryFilter,
-  HumanGateReferenceStore,
-  HumanGateStatus,
+  AcquireHumanApprovalInput,
+  CancelHumanApprovalInput,
+  CompleteHumanApprovalInput,
+  CreateHumanApprovalInput,
+  CreateHumanApprovalResult,
+  FailHumanApprovalInput,
+  HumanApprovalRecord,
+  HumanApprovalRecoveryFilter,
+  HumanApprovalReferenceStore,
+  HumanApprovalStatus,
   HumanResult,
   HumanTaskFilter,
   HumanTaskRecord,
   HumanTaskStatus,
   HumanTaskView,
-  MarkHumanGateHandlerStartedInput,
+  MarkHumanApprovalHandlerStartedInput,
   SubmitHumanResult,
   SubmitHumanResultInput,
 } from "./types.js";
 import type { ConversationBlockerRef } from "../inbound/types.js";
 
-export interface InMemoryHumanGateStoreOptions {
+export interface InMemoryHumanApprovalStoreOptions {
   defaultLeaseTtlMs?: number;
   now?: () => string;
 }
 
-export class InMemoryHumanGateStore implements HumanGateReferenceStore {
-  private readonly _gates = new Map<string, HumanGateRecord>();
+export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
+  private readonly _gates = new Map<string, HumanApprovalRecord>();
   private readonly _tasks = new Map<string, HumanTaskRecord>();
   private readonly _gateIdByToolCall = new Map<string, string>();
   private readonly _blockerByConversation = new Map<string, ConversationBlockerRef>();
   private readonly _defaultLeaseTtlMs: number;
   private readonly _now: () => string;
 
-  constructor(options: InMemoryHumanGateStoreOptions = {}) {
+  constructor(options: InMemoryHumanApprovalStoreOptions = {}) {
     this._defaultLeaseTtlMs = options.defaultLeaseTtlMs ?? 30_000;
     this._now = options.now ?? (() => new Date().toISOString());
   }
 
-  async createGate(input: CreateHumanGateInput): Promise<CreateHumanGateResult> {
+  async createApproval(input: CreateHumanApprovalInput): Promise<CreateHumanApprovalResult> {
     if (input.tasks.length === 0) {
-      throw new Error("Human gate requires at least one human task.");
+      throw new Error("Human approval requires at least one human task.");
     }
 
-    const gateId = input.humanGateId ?? input.id ?? defaultHumanGateId(input);
-    const toolCallKey = humanGateToolCallKey(input);
+    const gateId = input.humanApprovalId ?? input.id ?? defaultHumanApprovalId(input);
+    const toolCallKey = humanApprovalToolCallKey(input);
     const duplicateGateId = this._gates.has(gateId)
       ? gateId
       : this._gateIdByToolCall.get(toolCallKey);
@@ -53,7 +53,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       const gate = this._mustGetGate(duplicateGateId);
       const tasks = gate.taskIds.map((taskId) => this._mustGetTask(taskId));
       return {
-        gate: cloneValue(gate),
+        approval: cloneValue(gate),
         tasks: tasks.map(cloneValue),
         blocker: cloneValue(gate.blocker),
         created: false,
@@ -62,9 +62,9 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     }
 
     const now = input.now ?? this._now();
-    const blocker: ConversationBlockerRef = createHumanGateBlockerRef(gateId);
+    const blocker: ConversationBlockerRef = createHumanApprovalBlockerRef(gateId);
     const taskIds = input.tasks.map((task, index) => task.humanTaskId ?? defaultHumanTaskId(gateId, index));
-    const gate: HumanGateRecord = {
+    const approval: HumanApprovalRecord = {
       id: gateId,
       status: "waitingForHuman",
       toolCall: cloneValue(input.toolCall),
@@ -79,7 +79,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     };
     const tasks: HumanTaskRecord[] = input.tasks.map((task, index) => ({
       id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
-      humanGateId: gateId,
+      humanApprovalId: gateId,
       taskType: task.taskType ?? task.type ?? "approval",
       status: "waitingForHuman",
       prompt: task.prompt,
@@ -95,18 +95,18 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       throw new Error(`Duplicate human task id: "${duplicateTaskId.id}".`);
     }
 
-    this._gates.set(gate.id, gate);
-    this._gateIdByToolCall.set(toolCallKey, gate.id);
+    this._gates.set(approval.id, approval);
+    this._gateIdByToolCall.set(toolCallKey, approval.id);
     for (const task of tasks) {
       this._tasks.set(task.id, task);
     }
     this._blockerByConversation.set(
-      conversationKey(gate.toolCall.agentName, gate.toolCall.conversationId),
+      conversationKey(approval.toolCall.agentName, approval.toolCall.conversationId),
       blocker,
     );
 
     return {
-      gate: cloneValue(gate),
+      approval: cloneValue(approval),
       tasks: tasks.map(cloneValue),
       blocker: cloneValue(blocker),
       created: true,
@@ -123,14 +123,14 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     const views: HumanTaskView[] = [];
 
     for (const task of this._orderedTasks()) {
-      const gate = this._mustGetGate(task.humanGateId);
+      const gate = this._mustGetGate(task.humanApprovalId);
       if (filter.agentName && gate.toolCall.agentName !== filter.agentName) {
         continue;
       }
       if (filter.conversationId && gate.toolCall.conversationId !== filter.conversationId) {
         continue;
       }
-      if (filter.humanGateId && task.humanGateId !== filter.humanGateId) {
+      if (filter.humanApprovalId && task.humanApprovalId !== filter.humanApprovalId) {
         continue;
       }
       if (statuses && !statuses.has(task.status)) {
@@ -159,7 +159,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       return { status: "notFound", reason: `Unknown human task: "${input.humanTaskId}".` };
     }
 
-    const gate = this._mustGetGate(task.humanGateId);
+    const gate = this._mustGetGate(task.humanApprovalId);
     if (input.agentName && input.agentName !== gate.toolCall.agentName) {
       return { status: "invalid", reason: "agentName does not match the human task scope." };
     }
@@ -167,15 +167,15 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
       return { status: "invalid", reason: "conversationId does not match the human task scope." };
     }
     if (isTerminalGateStatus(gate.status)) {
-      return { status: "invalid", reason: `Human gate is already terminal: "${gate.status}".` };
+      return { status: "invalid", reason: `Human approval is already terminal: "${gate.status}".` };
     }
     if (task.status !== "waitingForHuman") {
       if (task.resultIdempotencyKey === input.idempotencyKey) {
         return {
           status: "duplicate",
           task: cloneValue(task),
-          gate: cloneValue(gate),
-          gateReady: gate.status === "ready",
+          approval: cloneValue(gate),
+          approvalReady: gate.status === "ready",
         };
       }
       return { status: "invalid", reason: `Human task is already "${task.status}".` };
@@ -192,8 +192,8 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     task.submittedAt = now;
     task.updatedAt = now;
 
-    const gateReady = this._allRequiredTasksSettled(gate);
-    if (gateReady) {
+    const approvalReady = this._allRequiredTasksSettled(gate);
+    if (approvalReady) {
       gate.status = "ready";
       gate.updatedAt = now;
     }
@@ -201,13 +201,13 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return {
       status: "accepted",
       task: cloneValue(task),
-      gate: cloneValue(gate),
-      gateReady,
+      approval: cloneValue(gate),
+      approvalReady,
     };
   }
 
-  async acquireGateForResume(input: AcquireHumanGateInput): Promise<HumanGateRecord | null> {
-    const gate = this._gates.get(input.humanGateId);
+  async acquireApprovalForResume(input: AcquireHumanApprovalInput): Promise<HumanApprovalRecord | null> {
+    const gate = this._gates.get(input.humanApprovalId);
     if (!gate) {
       return null;
     }
@@ -238,11 +238,11 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return cloneValue(gate);
   }
 
-  async markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord> {
-    const gate = this._mustGetGate(input.humanGateId);
+  async markApprovalHandlerStarted(input: MarkHumanApprovalHandlerStartedInput): Promise<HumanApprovalRecord> {
+    const gate = this._mustGetGate(input.humanApprovalId);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status !== "resuming") {
-      throw new Error(`Cannot mark human gate "${gate.id}" handler started from status "${gate.status}".`);
+      throw new Error(`Cannot mark human approval "${gate.id}" handler started from status "${gate.status}".`);
     }
     if (!gate.handlerStartedAt) {
       const now = input.now ?? this._now();
@@ -252,14 +252,14 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return cloneValue(gate);
   }
 
-  async markGateCompleted(input: CompleteHumanGateInput): Promise<HumanGateRecord> {
-    const gate = this._mustGetGate(input.humanGateId);
+  async markApprovalCompleted(input: CompleteHumanApprovalInput): Promise<HumanApprovalRecord> {
+    const gate = this._mustGetGate(input.humanApprovalId);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status === "completed") {
       return cloneValue(gate);
     }
     if (gate.status !== "resuming") {
-      throw new Error(`Cannot complete human gate "${gate.id}" from status "${gate.status}".`);
+      throw new Error(`Cannot complete human approval "${gate.id}" from status "${gate.status}".`);
     }
 
     const now = input.now ?? this._now();
@@ -273,8 +273,8 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return cloneValue(gate);
   }
 
-  async markGateFailed(input: FailHumanGateInput): Promise<HumanGateRecord> {
-    const gate = this._mustGetGate(input.humanGateId);
+  async markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord> {
+    const gate = this._mustGetGate(input.humanApprovalId);
     this._assertLeaseOwner(gate, input.leaseOwner);
     const now = input.now ?? this._now();
 
@@ -289,8 +289,8 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return cloneValue(gate);
   }
 
-  async cancelGate(input: CancelHumanGateInput): Promise<HumanGateRecord> {
-    const gate = this._mustGetGate(input.humanGateId);
+  async cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord> {
+    const gate = this._mustGetGate(input.humanApprovalId);
     if (isTerminalGateStatus(gate.status)) {
       return cloneValue(gate);
     }
@@ -316,7 +316,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return cloneValue(gate);
   }
 
-  async listRecoverableGates(filter: HumanGateRecoveryFilter = {}): Promise<HumanGateRecord[]> {
+  async listRecoverableApprovals(filter: HumanApprovalRecoveryFilter = {}): Promise<HumanApprovalRecord[]> {
     const gates = [...this._gates.values()].filter((gate) => {
       if (filter.agentName && gate.toolCall.agentName !== filter.agentName) {
         return false;
@@ -338,7 +338,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return limited.map(cloneValue);
   }
 
-  async getGate(id: string): Promise<HumanGateRecord | null> {
+  async getApproval(id: string): Promise<HumanApprovalRecord | null> {
     const gate = this._gates.get(id);
     return gate ? cloneValue(gate) : null;
   }
@@ -356,8 +356,8 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     return blocker ? cloneValue(blocker) : null;
   }
 
-  private _allRequiredTasksSettled(gate: HumanGateRecord): boolean {
-    return gate.taskIds.every((taskId) => {
+  private _allRequiredTasksSettled(approval: HumanApprovalRecord): boolean {
+    return approval.taskIds.every((taskId) => {
       const task = this._mustGetTask(taskId);
       if (!task.required) {
         return true;
@@ -366,10 +366,10 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     });
   }
 
-  private _mustGetGate(id: string): HumanGateRecord {
+  private _mustGetGate(id: string): HumanApprovalRecord {
     const gate = this._gates.get(id);
     if (!gate) {
-      throw new Error(`Unknown human gate: "${id}".`);
+      throw new Error(`Unknown human approval: "${id}".`);
     }
     return gate;
   }
@@ -384,7 +384,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
 
   private _orderedTasks(): HumanTaskRecord[] {
     return [...this._tasks.values()].sort((a, b) => {
-      const gateOrder = a.humanGateId.localeCompare(b.humanGateId);
+      const gateOrder = a.humanApprovalId.localeCompare(b.humanApprovalId);
       if (gateOrder !== 0) {
         return gateOrder;
       }
@@ -392,37 +392,37 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     });
   }
 
-  private _assertLeaseOwner(gate: HumanGateRecord, expectedOwner: string | undefined): void {
+  private _assertLeaseOwner(approval: HumanApprovalRecord, expectedOwner: string | undefined): void {
     if (!expectedOwner) {
       return;
     }
-    if (!gate.lease || gate.lease.owner !== expectedOwner) {
-      throw new Error(`Human gate "${gate.id}" is not leased by "${expectedOwner}".`);
+    if (!approval.lease || approval.lease.owner !== expectedOwner) {
+      throw new Error(`Human approval "${approval.id}" is not leased by "${expectedOwner}".`);
     }
   }
 }
 
-export function createInMemoryHumanGateStore(
-  options?: InMemoryHumanGateStoreOptions,
-): InMemoryHumanGateStore {
-  return new InMemoryHumanGateStore(options);
+export function createInMemoryHumanApprovalStore(
+  options?: InMemoryHumanApprovalStoreOptions,
+): InMemoryHumanApprovalStore {
+  return new InMemoryHumanApprovalStore(options);
 }
 
-export function createHumanGateBlockerRef(humanGateId: string): ConversationBlockerRef {
+export function createHumanApprovalBlockerRef(humanApprovalId: string): ConversationBlockerRef {
   return {
-    type: "humanGate",
-    id: humanGateId,
+    type: "humanApproval",
+    id: humanApprovalId,
   };
 }
 
-export function isHumanGateBlockerRef(blocker: ConversationBlockerRef | null | undefined): boolean {
-  return blocker?.type === "humanGate";
+export function isHumanApprovalBlockerRef(blocker: ConversationBlockerRef | null | undefined): boolean {
+  return blocker?.type === "humanApproval";
 }
 
-export function defaultHumanGateId(input: CreateHumanGateInput): string {
+export function defaultHumanApprovalId(input: CreateHumanApprovalInput): string {
   const { toolCall } = input;
   return [
-    "humanGate",
+    "humanApproval",
     toolCall.agentName,
     toolCall.conversationId,
     toolCall.turnId,
@@ -430,11 +430,11 @@ export function defaultHumanGateId(input: CreateHumanGateInput): string {
   ].join(":");
 }
 
-export function defaultHumanTaskId(humanGateId: string, index: number): string {
-  return `${humanGateId}:task:${index + 1}`;
+export function defaultHumanTaskId(humanApprovalId: string, index: number): string {
+  return `${humanApprovalId}:task:${index + 1}`;
 }
 
-function humanGateToolCallKey(input: CreateHumanGateInput): string {
+function humanApprovalToolCallKey(input: CreateHumanApprovalInput): string {
   const { toolCall } = input;
   return [
     toolCall.agentName,
@@ -472,7 +472,7 @@ function isValidHumanResult(result: HumanResult): boolean {
   return false;
 }
 
-function isTerminalGateStatus(status: HumanGateStatus): boolean {
+function isTerminalGateStatus(status: HumanApprovalStatus): boolean {
   return status === "completed" || status === "canceled" || status === "expired";
 }
 

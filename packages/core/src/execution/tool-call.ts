@@ -2,22 +2,22 @@ import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharn
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import type { HumanGateReferenceStore } from "../hitl/types.js";
+import type { HumanApprovalReferenceStore } from "../hitl/types.js";
 import { normalizeToolArgs } from "../tool-args.js";
 
-export class HumanGatePendingError extends Error {
-  readonly humanGateId: string;
+export class HumanApprovalPendingError extends Error {
+  readonly humanApprovalId: string;
 
-  constructor(humanGateId: string) {
-    super(`Human Gate is waiting for human input: ${humanGateId}`);
-    this.name = "HumanGatePendingError";
-    this.humanGateId = humanGateId;
+  constructor(humanApprovalId: string) {
+    super(`Human Approval is waiting for human input: ${humanApprovalId}`);
+    this.name = "HumanApprovalPendingError";
+    this.humanApprovalId = humanApprovalId;
   }
 }
 
-export function isHumanGatePendingError(error: unknown): error is HumanGatePendingError {
-  return error instanceof HumanGatePendingError || (
-    error instanceof Error && error.name === "HumanGatePendingError"
+export function isHumanApprovalPendingError(error: unknown): error is HumanApprovalPendingError {
+  return error instanceof HumanApprovalPendingError || (
+    error instanceof Error && error.name === "HumanApprovalPendingError"
   );
 }
 
@@ -38,10 +38,10 @@ export async function executeToolCall(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
-    humanGateStore?: HumanGateReferenceStore;
+    humanApprovalStore?: HumanApprovalReferenceStore;
   }
 ): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus, humanGateStore } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -74,13 +74,13 @@ export async function executeToolCall(
 
     const humanApproval = tool.humanApproval;
     if (humanApproval && humanApproval.required !== false) {
-      if (!humanGateStore) {
+      if (!humanApprovalStore) {
         return { type: "error", error: `Tool "${toolName}" requires a Human Approval store` };
       }
 
-      const created = await humanGateStore.createGate({
-        id: `${turnId}:${toolCallId}:humanGate`,
-        humanGateId: `${turnId}:${toolCallId}:humanGate`,
+      const created = await humanApprovalStore.createApproval({
+        id: `${turnId}:${toolCallId}:humanApproval`,
+        humanApprovalId: `${turnId}:${toolCallId}:humanApproval`,
         toolCall: {
           turnId,
           agentName,
@@ -114,9 +114,9 @@ export async function executeToolCall(
       });
 
       if (created.created) {
-        eventBus.emit("humanGate.created", {
-          type: "humanGate.created",
-          humanGateId: created.gate.id,
+        eventBus.emit("humanApproval.created", {
+          type: "humanApproval.created",
+          humanApprovalId: created.approval.id,
           agentName,
           conversationId,
           turnId,
@@ -125,7 +125,7 @@ export async function executeToolCall(
         for (const task of created.tasks) {
           eventBus.emit("humanTask.created", {
             type: "humanTask.created",
-            humanGateId: created.gate.id,
+            humanApprovalId: created.approval.id,
             humanTaskId: task.id,
             taskType: task.taskType as "approval" | "text" | "form",
             agentName,
@@ -134,7 +134,7 @@ export async function executeToolCall(
         }
       }
 
-      throw new HumanGatePendingError(created.gate.id);
+      throw new HumanApprovalPendingError(created.approval.id);
     }
 
     // Build the simpler ToolContext that the handler receives
@@ -170,7 +170,7 @@ export async function executeToolCall(
 
     return result;
   } catch (err) {
-    if (isHumanGatePendingError(err)) {
+    if (isHumanApprovalPendingError(err)) {
       throw err;
     }
     const error = err instanceof Error ? err : new Error(String(err));

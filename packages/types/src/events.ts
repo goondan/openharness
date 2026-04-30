@@ -212,12 +212,12 @@ export interface InboundDeadLetteredPayload {
 }
 
 // -----------------------------------------------------------------------
-// Human Gate event payloads
+// Human Approval event payloads
 // -----------------------------------------------------------------------
 
-export interface HumanGateCreatedPayload {
-  type: "humanGate.created";
-  humanGateId: string;
+export interface HumanApprovalCreatedPayload {
+  type: "humanApproval.created";
+  humanApprovalId: string;
   agentName: string;
   conversationId: string;
   turnId: string;
@@ -226,7 +226,7 @@ export interface HumanGateCreatedPayload {
 
 export interface HumanTaskCreatedPayload {
   type: "humanTask.created";
-  humanGateId: string;
+  humanApprovalId: string;
   humanTaskId: string;
   taskType: "approval" | "text" | "form";
   agentName: string;
@@ -236,47 +236,47 @@ export interface HumanTaskCreatedPayload {
 export interface HumanTaskResolvedPayload {
   type: "humanTask.resolved";
   humanTaskId: string;
-  humanGateId: string;
+  humanApprovalId: string;
   idempotencyKey: string;
 }
 
 export interface HumanTaskRejectedPayload {
   type: "humanTask.rejected";
   humanTaskId: string;
-  humanGateId: string;
+  humanApprovalId: string;
   idempotencyKey: string;
 }
 
-export interface HumanGateReadyPayload {
-  type: "humanGate.ready";
-  humanGateId: string;
+export interface HumanApprovalReadyPayload {
+  type: "humanApproval.ready";
+  humanApprovalId: string;
   taskIds: string[];
 }
 
-export interface HumanGateResumingPayload {
-  type: "humanGate.resuming";
-  humanGateId: string;
+export interface HumanApprovalResumingPayload {
+  type: "humanApproval.resuming";
+  humanApprovalId: string;
   leaseOwner: string;
   turnId: string;
 }
 
-export interface HumanGateCompletedPayload {
-  type: "humanGate.completed";
-  humanGateId: string;
+export interface HumanApprovalCompletedPayload {
+  type: "humanApproval.completed";
+  humanApprovalId: string;
   turnId: string;
   blockedInboundItemIds: string[];
 }
 
-export interface HumanGateFailedPayload {
-  type: "humanGate.failed";
-  humanGateId: string;
+export interface HumanApprovalFailedPayload {
+  type: "humanApproval.failed";
+  humanApprovalId: string;
   retryable: boolean;
   reason: string;
 }
 
-export interface HumanGateCanceledPayload {
-  type: "humanGate.canceled";
-  humanGateId: string;
+export interface HumanApprovalCanceledPayload {
+  type: "humanApproval.canceled";
+  humanApprovalId: string;
   reason?: string;
 }
 
@@ -307,12 +307,12 @@ export type EventPayload =
   | InboundConsumedPayload
   | InboundFailedPayload
   | InboundDeadLetteredPayload
-  | HumanGateCreatedPayload
+  | HumanApprovalCreatedPayload
   | HumanTaskCreatedPayload
   | HumanTaskResolvedPayload
   | HumanTaskRejectedPayload
-  | HumanGateReadyPayload
-  | HumanGateResumingPayload
-  | HumanGateCompletedPayload
-  | HumanGateFailedPayload
-  | HumanGateCanceledPayload;
+  | HumanApprovalReadyPayload
+  | HumanApprovalResumingPayload
+  | HumanApprovalCompletedPayload
+  | HumanApprovalFailedPayload
+  | HumanApprovalCanceledPayload;

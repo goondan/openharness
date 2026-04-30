@@ -93,8 +93,8 @@ Ingress는 raw payload를 검증/정규화한 뒤 routing rule로 agent와 conve
 | LLM calling/streaming 중 active Turn | `delivered` | `steered` |
 | tool handler 실행 중 active Turn | `delivered` | `steered` |
 | Step 경계에서 durable drain 중 | sequence order로 다음 drain batch에 포함 | 다음 steering inbox drain batch에 포함 |
-| Human Gate `waitingForHuman` | `blocked` | durable Human Gate 사용 시 `blocked` |
-| Human Gate `resuming` | `blocked` 또는 gate resume drain 대상 | durable Human Gate 사용 시 `blocked` |
+| Human Approval `waitingForHuman` | `blocked` | durable Human Approval 사용 시 `blocked` |
+| Human Approval `resuming` | `blocked` 또는 approval resume drain 대상 | durable Human Approval 사용 시 `blocked` |
 | `turn.done`/`turn.error` 발행 직전 이후 | 새 `started` 후보 | 새 `started` 후보 |
 
 ### 3.6 Durable append handoff
@@ -193,7 +193,7 @@ interface IngressAcceptResult {
   disposition: IngressDisposition;
   inboundItemId?: string;
   blocker?: {
-    type: "humanGate" | "operatorHold";
+    type: "humanApproval" | "operatorHold";
     id: string;
   };
 }
@@ -268,4 +268,4 @@ interface IngressApi {
 - Given Turn이 `turn.done`을 발행하는 중이면, When 같은 `(agentName, conversationId)`의 ingress가 들어오면, Then 종료 중인 Turn에 steer하지 않고 새 Turn으로 `disposition="started"`를 반환한다.
 - Given verify 또는 normalize가 실패하면, When `receive()`를 호출하면, Then 예외 대신 빈 배열과 `ingress.rejected` 이벤트가 발생한다.
 - Given durable inbound mode가 활성화되어 있으면, When route가 성공한 envelope를 accept하면, Then `DurableInboundStore.append()` 성공 이후에만 `ingress.accepted`가 발행된다.
-- Given durable inbound mode에서 conversation이 Human Gate로 blocked 상태이면, When route가 성공한 envelope를 accept하면, Then accepted result는 `disposition="blocked"`와 `inboundItemId`, blocker metadata를 포함한다.
+- Given durable inbound mode에서 conversation이 Human Approval로 blocked 상태이면, When route가 성공한 envelope를 accept하면, Then accepted result는 `disposition="blocked"`와 `inboundItemId`, blocker metadata를 포함한다.

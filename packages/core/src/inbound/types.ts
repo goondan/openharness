@@ -17,7 +17,7 @@ export type DurableIngressDisposition =
   | "steered";
 
 export interface ConversationBlockerRef {
-  type: "humanGate" | "operatorHold" | (string & {});
+  type: "humanApproval" | "operatorHold" | (string & {});
   id: string;
   reason?: string;
   metadata?: Record<string, unknown>;

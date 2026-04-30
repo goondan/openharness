@@ -1,5 +1,5 @@
 import type { Extension } from "./extension.js";
-import type { HumanGateStore, ToolDefinition } from "./tool.js";
+import type { HumanApprovalStore, ToolDefinition } from "./tool.js";
 import type { Connector, DurableInboundStore, RoutingRule } from "./ingress.js";
 
 // -----------------------------------------------------------------------
@@ -57,11 +57,9 @@ export interface DurableInboundConfig {
 }
 
 export interface HumanApprovalConfig {
-  store: HumanGateStore;
+  store: HumanApprovalStore;
   resumeLeaseMs?: number;
 }
-
-export type HumanGateConfig = HumanApprovalConfig;
 
 // -----------------------------------------------------------------------
 // Top-level harness config
@@ -72,7 +70,6 @@ export interface HarnessConfig {
   connections?: Record<string, ConnectionConfig>;
   durableInbound?: DurableInboundConfig;
   humanApproval?: HumanApprovalConfig;
-  humanGate?: HumanGateConfig;
 }
 
 // -----------------------------------------------------------------------

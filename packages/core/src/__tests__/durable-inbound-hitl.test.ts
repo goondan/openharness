@@ -8,7 +8,7 @@ import type {
 } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
 import { createInMemoryDurableInboundStore } from "../inbound/memory-store.js";
-import { createInMemoryHumanGateStore } from "../hitl/memory-store.js";
+import { createInMemoryHumanApprovalStore } from "../hitl/memory-store.js";
 
 let currentClient: LlmClient;
 
@@ -60,7 +60,7 @@ function baseConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
   };
 }
 
-describe("durable inbound and Human Gate integration", () => {
+describe("durable inbound and Human Approval integration", () => {
   beforeEach(() => {
     currentClient = mockClient({ text: "ok", toolCalls: [] });
   });
@@ -307,7 +307,7 @@ describe("durable inbound and Human Gate integration", () => {
     });
     await inboundStore.markBlocked({
       id: blocked.item.id,
-      blockedBy: { type: "humanGate", id: "gate-duplicate" },
+      blockedBy: { type: "humanApproval", id: "gate-duplicate" },
       now: "2026-01-01T00:00:01.000Z",
     });
 
@@ -516,9 +516,9 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
-  it("creates a durable Human Gate before running a guarded tool handler", async () => {
+  it("creates a durable Human Approval before running a guarded tool handler", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanGateStore = createInMemoryHumanGateStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -546,7 +546,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }));
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -557,7 +557,7 @@ describe("durable inbound and Human Gate integration", () => {
     expect(result.status).toBe("waitingForHuman");
     expect(toolHandler).not.toHaveBeenCalled();
 
-    const tasks = await humanGateStore.listTasks({ conversationId: "conv-human" });
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-human" });
     expect(tasks).toHaveLength(1);
     expect(tasks[0].status).toBe("waitingForHuman");
 
@@ -577,14 +577,14 @@ describe("durable inbound and Human Gate integration", () => {
     });
 
     expect(blocked.disposition).toBe("blocked");
-    expect(blocked.blocker?.type).toBe("humanGate");
+    expect(blocked.blocker?.type).toBe("humanApproval");
 
     await runtime.control.submitHumanResult?.({
       humanTaskId: tasks[0].id,
       result: { type: "approval", approved: true },
       idempotencyKey: "approve-1",
     });
-    const resumed = await runtime.control.resumeHumanGate?.(tasks[0].humanGateId);
+    const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
 
     expect(resumed?.status).toBe("completed");
     expect(resumed?.continuation?.status).toBe("completed");
@@ -599,9 +599,9 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
-  it("reblocks delivered steering items when a turn pauses for Human Gate", async () => {
+  it("reblocks delivered steering items when a turn pauses for Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanGateStore = createInMemoryHumanGateStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -624,7 +624,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }));
 
     const turnPromise = runtime.processTurn("default", "run guarded", {
@@ -640,7 +640,7 @@ describe("durable inbound and Human Gate integration", () => {
       connectionName: "test",
       envelope: {
         name: "message.created",
-        content: [{ type: "text", text: "arrived before human gate pause" }],
+        content: [{ type: "text", text: "arrived before human approval pause" }],
         properties: { id: "evt-steered-before-human" },
         conversationId: "conv-steered-human",
         source: {
@@ -663,15 +663,15 @@ describe("durable inbound and Human Gate integration", () => {
 
     expect(result.status).toBe("waitingForHuman");
     expect(steeredItem?.status).toBe("blocked");
-    expect(steeredItem?.blockedBy?.type).toBe("humanGate");
+    expect(steeredItem?.blockedBy?.type).toBe("humanApproval");
 
     await runtime.close();
   });
 
-  it("reacquires resuming Human Gates after resume lease expiry", async () => {
-    const humanGateStore = createInMemoryHumanGateStore();
-    const created = await humanGateStore.createGate({
-      humanGateId: "gate-resume-expiry",
+  it("reacquires resuming Human Approvals after resume lease expiry", async () => {
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const created = await humanApprovalStore.createApproval({
+      humanApprovalId: "gate-resume-expiry",
       toolCall: {
         turnId: "turn-resume-expiry",
         agentName: "default",
@@ -684,38 +684,38 @@ describe("durable inbound and Human Gate integration", () => {
       tasks: [{ humanTaskId: "task-resume-expiry", type: "approval", required: true }],
       now: "2026-01-01T00:00:00.000Z",
     });
-    await humanGateStore.submitResult({
+    await humanApprovalStore.submitResult({
       humanTaskId: created.tasks[0].id,
       result: { type: "approval", approved: true },
       idempotencyKey: "approval-resume-expiry",
       now: "2026-01-01T00:00:01.000Z",
     });
 
-    const first = await humanGateStore.acquireGateForResume({
-      humanGateId: created.gate.id,
+    const first = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: created.approval.id,
       leaseOwner: "worker-1",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:02.000Z",
     });
-    const blockedByActiveLease = await humanGateStore.acquireGateForResume({
-      humanGateId: created.gate.id,
+    const blockedByActiveLease = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: created.approval.id,
       leaseOwner: "worker-2",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:02.500Z",
     });
-    const reacquired = await humanGateStore.acquireGateForResume({
-      humanGateId: created.gate.id,
+    const reacquired = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: created.approval.id,
       leaseOwner: "worker-2",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:03.001Z",
     });
-    await humanGateStore.markGateHandlerStarted({
-      humanGateId: created.gate.id,
+    await humanApprovalStore.markApprovalHandlerStarted({
+      humanApprovalId: created.approval.id,
       leaseOwner: "worker-2",
       now: "2026-01-01T00:00:03.002Z",
     });
-    const blockedAfterHandlerStarted = await humanGateStore.acquireGateForResume({
-      humanGateId: created.gate.id,
+    const blockedAfterHandlerStarted = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: created.approval.id,
       leaseOwner: "worker-3",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:04.003Z",
@@ -729,9 +729,9 @@ describe("durable inbound and Human Gate integration", () => {
     expect(blockedAfterHandlerStarted).toBeNull();
   });
 
-  it("releases blocked inbound items when canceling a Human Gate", async () => {
+  it("releases blocked inbound items when canceling a Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanGateStore = createInMemoryHumanGateStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -753,7 +753,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }));
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -761,7 +761,7 @@ describe("durable inbound and Human Gate integration", () => {
       idempotencyKey: "direct-human-cancel",
     });
     expect(result.status).toBe("waitingForHuman");
-    const tasks = await humanGateStore.listTasks({ conversationId: "conv-cancel-human" });
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-cancel-human" });
 
     const blocked = await runtime.ingress.dispatch({
       connectionName: "test",
@@ -779,7 +779,7 @@ describe("durable inbound and Human Gate integration", () => {
     });
     expect(blocked.disposition).toBe("blocked");
 
-    const canceled = await runtime.control.cancelHumanGate?.(tasks[0].humanGateId);
+    const canceled = await runtime.control.cancelHumanApproval?.(tasks[0].humanApprovalId);
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-cancel-human",
       statuses: ["blocked"],
@@ -796,24 +796,24 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
-  it("rejects resume when a Human Gate record is missing", async () => {
+  it("rejects resume when a Human Approval record is missing", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanGateStore = createInMemoryHumanGateStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }));
 
-    await expect(runtime.control.resumeHumanGate?.("missing-gate")).rejects.toThrow(/Unknown human gate/);
+    await expect(runtime.control.resumeHumanApproval?.("missing-gate")).rejects.toThrow(/Unknown human approval/);
 
     await runtime.close();
   });
 
-  it("returns failed when resuming a terminal non-completed Human Gate", async () => {
+  it("returns failed when resuming a terminal non-completed Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const humanGateStore = createInMemoryHumanGateStore();
-    const created = await humanGateStore.createGate({
-      humanGateId: "gate-canceled-terminal",
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const created = await humanApprovalStore.createApproval({
+      humanApprovalId: "gate-canceled-terminal",
       toolCall: {
         turnId: "turn-canceled-terminal",
         agentName: "default",
@@ -825,23 +825,23 @@ describe("durable inbound and Human Gate integration", () => {
       },
       tasks: [{ humanTaskId: "task-canceled-terminal", type: "approval", required: true }],
     });
-    await humanGateStore.cancelGate({ humanGateId: created.gate.id, reason: "operator canceled" });
+    await humanApprovalStore.cancelApproval({ humanApprovalId: created.approval.id, reason: "operator canceled" });
 
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }));
 
-    const resumed = await runtime.control.resumeHumanGate?.(created.gate.id);
+    const resumed = await runtime.control.resumeHumanApproval?.(created.approval.id);
 
     expect(resumed?.status).toBe("failed");
-    expect(resumed?.gate.status).toBe("canceled");
+    expect(resumed?.approval.status).toBe("canceled");
 
     await runtime.close();
   });
 
-  it("requires durable inbound whenever Human Gate is configured", async () => {
-    const humanGateStore = createInMemoryHumanGateStore();
+  it("requires durable inbound whenever Human Approval is configured", async () => {
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
       name: "guarded",
@@ -862,12 +862,12 @@ describe("durable inbound and Human Gate integration", () => {
           tools: [guardedTool],
         },
       },
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }))).rejects.toThrow(/requires durableInbound\.store/);
 
     await expect(createHarness(baseConfig({
       connections: undefined,
-      humanApproval: { store: humanGateStore as any },
+      humanApproval: { store: humanApprovalStore as any },
     }))).rejects.toThrow(/requires durableInbound\.store/);
   });
 });

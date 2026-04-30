@@ -28,7 +28,7 @@ export interface ToolContext {
 }
 
 // Human Approval / durable HITL types
-export type HumanGateStatus =
+export type HumanApprovalStatus =
   | "preparing"
   | "waitingForHuman"
   | "ready"
@@ -65,8 +65,6 @@ export interface HumanApprovalPolicy {
   metadata?: Record<string, unknown>;
 }
 
-export type HumanGatePolicy = HumanApprovalPolicy;
-
 export type HumanResult =
   | { type: "approval"; approved: true; argsPatch?: JsonObject }
   | { type: "rejection"; reason?: string }
@@ -83,13 +81,13 @@ export interface ToolCallSnapshot {
   toolArgs: JsonObject;
 }
 
-export interface HumanGateRecord {
+export interface HumanApprovalRecord {
   id: string;
   agentName: string;
   conversationId: string;
   turnId: string;
   toolCallId: string;
-  status: HumanGateStatus;
+  status: HumanApprovalStatus;
   toolCall: ToolCallSnapshot;
   taskIds: string[];
   requiredTaskIds: string[];
@@ -112,7 +110,7 @@ export interface HumanGateRecord {
 
 export interface HumanTaskView {
   id: string;
-  humanGateId: string;
+  humanApprovalId: string;
   type: HumanTaskType;
   status: HumanTaskStatus;
   agentName: string;
@@ -129,7 +127,7 @@ export interface HumanTaskView {
   updatedAt: string;
 }
 
-export interface CreateHumanGateInput {
+export interface CreateHumanApprovalInput {
   id: string;
   toolCall: ToolCallSnapshot;
   policy: HumanApprovalPolicy;
@@ -139,8 +137,8 @@ export interface CreateHumanGateInput {
   metadata?: Record<string, unknown>;
 }
 
-export interface CreateHumanGateResult {
-  gate: HumanGateRecord;
+export interface CreateHumanApprovalResult {
+  approval: HumanApprovalRecord;
   tasks: HumanTaskView[];
   duplicate: boolean;
 }
@@ -148,7 +146,7 @@ export interface CreateHumanGateResult {
 export interface HumanTaskFilter {
   agentName?: string;
   conversationId?: string;
-  humanGateId?: string;
+  humanApprovalId?: string;
   status?: HumanTaskStatus | HumanTaskStatus[];
   limit?: number;
 }
@@ -167,65 +165,65 @@ export interface SubmitHumanResult {
   accepted: true;
   duplicate: boolean;
   task: HumanTaskView;
-  gate: HumanGateRecord;
+  approval: HumanApprovalRecord;
 }
 
-export interface AcquireHumanGateInput {
-  humanGateId: string;
+export interface AcquireHumanApprovalInput {
+  humanApprovalId: string;
   leaseOwner: string;
   leaseExpiresAt: string;
   now?: string;
 }
 
-export interface CompleteHumanGateInput {
-  humanGateId: string;
+export interface CompleteHumanApprovalInput {
+  humanApprovalId: string;
   turnId: string;
   blockedInboundItemIds?: string[];
   now?: string;
 }
 
-export interface MarkHumanGateHandlerStartedInput {
-  humanGateId: string;
+export interface MarkHumanApprovalHandlerStartedInput {
+  humanApprovalId: string;
   leaseOwner?: string;
   now?: string;
 }
 
-export interface FailHumanGateInput {
-  humanGateId: string;
+export interface FailHumanApprovalInput {
+  humanApprovalId: string;
   reason: string;
   retryable: boolean;
   now?: string;
 }
 
-export interface CancelHumanGateInput {
-  humanGateId: string;
+export interface CancelHumanApprovalInput {
+  humanApprovalId: string;
   reason?: string;
   expired?: boolean;
   now?: string;
 }
 
-export interface HumanGateRecoveryFilter {
+export interface HumanApprovalRecoveryFilter {
   agentName?: string;
   conversationId?: string;
-  status?: HumanGateStatus | HumanGateStatus[];
+  status?: HumanApprovalStatus | HumanApprovalStatus[];
   limit?: number;
 }
 
-export interface HumanGateStore {
-  createGate(input: CreateHumanGateInput): Promise<CreateHumanGateResult>;
+export interface HumanApprovalStore {
+  createApproval(input: CreateHumanApprovalInput): Promise<CreateHumanApprovalResult>;
   listTasks(filter: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  acquireGateForResume(input: AcquireHumanGateInput): Promise<HumanGateRecord | null>;
-  markGateHandlerStarted(input: MarkHumanGateHandlerStartedInput): Promise<HumanGateRecord>;
-  markGateCompleted(input: CompleteHumanGateInput): Promise<HumanGateRecord>;
-  markGateFailed(input: FailHumanGateInput): Promise<HumanGateRecord>;
-  cancelGate(input: CancelHumanGateInput): Promise<HumanGateRecord>;
-  listRecoverableGates(filter?: HumanGateRecoveryFilter): Promise<HumanGateRecord[]>;
+  acquireApprovalForResume(input: AcquireHumanApprovalInput): Promise<HumanApprovalRecord | null>;
+  markApprovalHandlerStarted(input: MarkHumanApprovalHandlerStartedInput): Promise<HumanApprovalRecord>;
+  markApprovalCompleted(input: CompleteHumanApprovalInput): Promise<HumanApprovalRecord>;
+  markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord>;
+  cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
+  listRecoverableApprovals(filter?: HumanApprovalRecoveryFilter): Promise<HumanApprovalRecord[]>;
   getConversationBlocker(input: {
     agentName: string;
     conversationId: string;
   }): Promise<ConversationBlockerRef | null>;
-  getGate(id: string): Promise<HumanGateRecord | null>;
+  getApproval(id: string): Promise<HumanApprovalRecord | null>;
   getTask(id: string): Promise<HumanTaskView | null>;
 }
 

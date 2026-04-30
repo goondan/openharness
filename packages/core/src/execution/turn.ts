@@ -14,8 +14,8 @@ import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
 import type { ConversationBlockerRef, DurableInboundItem } from "../inbound/types.js";
-import type { HumanGateReferenceStore } from "../hitl/types.js";
-import { isHumanGatePendingError } from "./tool-call.js";
+import type { HumanApprovalReferenceStore } from "../hitl/types.js";
+import { isHumanApprovalPendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
 
@@ -217,7 +217,7 @@ export async function executeTurn(
     maxSteps: number;
     abortController?: AbortController;
     steering?: TurnSteeringController;
-    humanGateStore?: HumanGateReferenceStore;
+    humanApprovalStore?: HumanApprovalReferenceStore;
     inboundItem?: DurableInboundItem;
     inboundCommitRef?: string;
     skipInputAppend?: boolean;
@@ -240,7 +240,7 @@ export async function executeTurn(
     conversationState,
     maxSteps,
     steering,
-    humanGateStore,
+    humanApprovalStore,
     inboundItem,
     inboundCommitRef,
     skipInputAppend,
@@ -329,7 +329,7 @@ export async function executeTurn(
         toolRegistry,
         middlewareRegistry,
         eventBus,
-        humanGateStore,
+        humanApprovalStore,
       });
 
       const stepSummary: StepSummary = {
@@ -434,8 +434,8 @@ export async function executeTurn(
       };
     }
 
-    if (isHumanGatePendingError(error)) {
-      const gate = await humanGateStore?.getGate(error.humanGateId);
+    if (isHumanApprovalPendingError(error)) {
+      const gate = await humanApprovalStore?.getApproval(error.humanApprovalId);
       if (gate) {
         await blockSteeredInboundItems(steering, gate.blocker, blockInboundItem);
       }

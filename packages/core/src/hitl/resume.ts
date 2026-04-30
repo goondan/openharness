@@ -1,48 +1,48 @@
 import type {
-  HumanGateRecord,
-  HumanGateStore,
+  HumanApprovalRecord,
+  HumanApprovalStore,
 } from "./types.js";
 
-export interface HumanGateResumeCoordinatorOptions {
-  store: HumanGateStore;
+export interface HumanApprovalResumeCoordinatorOptions {
+  store: HumanApprovalStore;
   leaseOwner: string;
   leaseTtlMs?: number;
   now?: () => string;
-  resumeGate: (input: ResumeHumanGateHandlerInput) => Promise<ResumeHumanGateHandlerResult> | ResumeHumanGateHandlerResult;
+  resumeApproval: (input: ResumeHumanApprovalHandlerInput) => Promise<ResumeHumanApprovalHandlerResult> | ResumeHumanApprovalHandlerResult;
 }
 
-export interface ResumeHumanGateHandlerInput {
-  gate: HumanGateRecord;
+export interface ResumeHumanApprovalHandlerInput {
+  approval: HumanApprovalRecord;
 }
 
-export interface ResumeHumanGateHandlerResult {
+export interface ResumeHumanApprovalHandlerResult {
   blockedInboundItemIds?: string[];
 }
 
-export type HumanGateResumeResult =
+export type HumanApprovalResumeResult =
   | {
       status: "completed";
-      gate: HumanGateRecord;
+      approval: HumanApprovalRecord;
       blockedInboundItemIds: string[];
     }
   | {
       status: "notReady" | "failed";
-      humanGateId: string;
+      humanApprovalId: string;
       reason: string;
-      gate?: HumanGateRecord;
+      approval?: HumanApprovalRecord;
     };
 
-export class HumanGateResumeCoordinator {
-  private readonly _options: HumanGateResumeCoordinatorOptions;
+export class HumanApprovalResumeCoordinator {
+  private readonly _options: HumanApprovalResumeCoordinatorOptions;
 
-  constructor(options: HumanGateResumeCoordinatorOptions) {
+  constructor(options: HumanApprovalResumeCoordinatorOptions) {
     this._options = options;
   }
 
-  async resumeHumanGate(humanGateId: string): Promise<HumanGateResumeResult> {
+  async resumeHumanApproval(humanApprovalId: string): Promise<HumanApprovalResumeResult> {
     const now = this._options.now?.() ?? new Date().toISOString();
-    const gate = await this._options.store.acquireGateForResume({
-      humanGateId,
+    const gate = await this._options.store.acquireApprovalForResume({
+      humanApprovalId,
       leaseOwner: this._options.leaseOwner,
       leaseTtlMs: this._options.leaseTtlMs,
       now,
@@ -51,29 +51,29 @@ export class HumanGateResumeCoordinator {
     if (!gate) {
       return {
         status: "notReady",
-        humanGateId,
-        reason: "Gate is missing, not ready, or currently leased by another worker.",
+        humanApprovalId,
+        reason: "Approval is missing, not ready, or currently leased by another worker.",
       };
     }
 
     try {
-      const resumeResult = await this._options.resumeGate({ gate });
+      const resumeResult = await this._options.resumeApproval({ approval: gate });
       const blockedInboundItemIds = resumeResult.blockedInboundItemIds ?? [];
-      const completed = await this._options.store.markGateCompleted({
-        humanGateId,
+      const completed = await this._options.store.markApprovalCompleted({
+        humanApprovalId,
         leaseOwner: this._options.leaseOwner,
         blockedInboundItemIds,
         now: this._options.now?.() ?? new Date().toISOString(),
       });
       return {
         status: "completed",
-        gate: completed,
+        approval: completed,
         blockedInboundItemIds,
       };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      const failed = await this._options.store.markGateFailed({
-        humanGateId,
+      const failed = await this._options.store.markApprovalFailed({
+        humanApprovalId,
         reason,
         retryable: true,
         leaseOwner: this._options.leaseOwner,
@@ -81,16 +81,16 @@ export class HumanGateResumeCoordinator {
       });
       return {
         status: "failed",
-        humanGateId,
+        humanApprovalId,
         reason,
-        gate: failed,
+        approval: failed,
       };
     }
   }
 }
 
-export function createHumanGateResumeCoordinator(
-  options: HumanGateResumeCoordinatorOptions,
-): HumanGateResumeCoordinator {
-  return new HumanGateResumeCoordinator(options);
+export function createHumanApprovalResumeCoordinator(
+  options: HumanApprovalResumeCoordinatorOptions,
+): HumanApprovalResumeCoordinator {
+  return new HumanApprovalResumeCoordinator(options);
 }
