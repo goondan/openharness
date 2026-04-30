@@ -51,6 +51,13 @@ interface InFlightTurn {
   steeringInbox: SteeringInbox;
 }
 
+interface PreparedContinuationTurn {
+  turnId: string;
+  promise: Promise<TurnResult>;
+  start: () => Promise<TurnResult>;
+  discard: () => void;
+}
+
 class SteeringInbox implements TurnSteeringController {
   private _queue: Array<InboundEnvelope | TurnSteeredInput> = [];
   private _closed = false;
@@ -374,6 +381,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     agentName: string,
     conversationId: string,
   ): Promise<TurnResult> {
+    const continuation = this._prepareContinuationTurn(agentName, conversationId);
+    return continuation.start();
+  }
+
+  private _prepareContinuationTurn(
+    agentName: string,
+    conversationId: string,
+  ): PreparedContinuationTurn {
     if (this._closed) {
       throw new HarnessError("Runtime is closed");
     }
@@ -389,6 +404,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const turnId = `turn-${randomUUID()}`;
     const steeringInbox = this._createSteeringInbox(turnId);
     const trackedTurn = createDeferred<TurnResult>();
+    let started = false;
+    let cleanedUp = false;
 
     const inFlightTurn: InFlightTurn = {
       turnId,
@@ -418,63 +435,105 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       },
     };
 
-    try {
-      const turnPromise = executeTurn(agentName, resumeEnvelope, { conversationId, turnId }, {
-        llmClient: agentDeps.llmClient,
-        toolRegistry: agentDeps.toolRegistry,
-        middlewareRegistry: agentDeps.middlewareRegistry,
-        eventBus: agentDeps.eventBus,
-        conversationState,
-        maxSteps: agentDeps.maxSteps,
-        abortController,
-        steering: steeringInbox,
-        humanApprovalStore: this._humanApprovalStore as any,
-        skipInputAppend: true,
-        consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
-          if (!this._durableInboundStore) {
-            return;
-          }
-          await this._durableInboundStore.markConsumed({
-            id: item.id,
-            turnId: consumedTurnId,
-            commitRef,
-          } as any);
-          this._runtimeEvents.emit("inbound.consumed", {
-            type: "inbound.consumed",
-            inboundItemId: item.id,
-            turnId: consumedTurnId,
-            commitRef,
-          });
-        },
-        blockInboundItem: async ({ item, blocker }) => {
-          if (!this._durableInboundStore) {
-            return;
-          }
-          const blocked = await this._durableInboundStore.markBlocked({
-            id: item.id,
-            blockedBy: blocker,
-          } as any);
-          this._runtimeEvents.emit("inbound.blocked", {
-            type: "inbound.blocked",
-            inboundItemId: blocked.id,
-            blockedBy: blocker,
-          } as any);
-        },
-      });
-      void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
-    } catch (err) {
-      trackedTurn.reject(err);
-    }
-
-    try {
-      return await trackedTurn.promise;
-    } finally {
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
       steeringInbox.close();
       this._inFlightTurns.delete(turnId);
       if (this._activeTurnByConversation.get(conversationKey)?.turnId === turnId) {
         this._activeTurnByConversation.delete(conversationKey);
       }
-    }
+    };
+
+    return {
+      turnId,
+      promise: trackedTurn.promise,
+      start: async () => {
+        if (!started) {
+          started = true;
+          try {
+            const turnPromise = executeTurn(agentName, resumeEnvelope, { conversationId, turnId }, {
+              llmClient: agentDeps.llmClient,
+              toolRegistry: agentDeps.toolRegistry,
+              middlewareRegistry: agentDeps.middlewareRegistry,
+              eventBus: agentDeps.eventBus,
+              conversationState,
+              maxSteps: agentDeps.maxSteps,
+              abortController,
+              steering: steeringInbox,
+              humanApprovalStore: this._humanApprovalStore as any,
+              skipInputAppend: true,
+              consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
+                if (!this._durableInboundStore) {
+                  return;
+                }
+                await this._durableInboundStore.markConsumed({
+                  id: item.id,
+                  turnId: consumedTurnId,
+                  commitRef,
+                } as any);
+                this._runtimeEvents.emit("inbound.consumed", {
+                  type: "inbound.consumed",
+                  inboundItemId: item.id,
+                  turnId: consumedTurnId,
+                  commitRef,
+                });
+              },
+              blockInboundItem: async ({ item, blocker }) => {
+                if (!this._durableInboundStore) {
+                  return;
+                }
+                const blocked = await this._durableInboundStore.markBlocked({
+                  id: item.id,
+                  blockedBy: blocker,
+                } as any);
+                this._runtimeEvents.emit("inbound.blocked", {
+                  type: "inbound.blocked",
+                  inboundItemId: blocked.id,
+                  blockedBy: blocker,
+                } as any);
+              },
+            });
+            void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
+          } catch (err) {
+            trackedTurn.reject(err);
+          }
+        }
+
+        try {
+          return await trackedTurn.promise;
+        } finally {
+          cleanup();
+        }
+      },
+      discard: () => {
+        if (!started) {
+          trackedTurn.resolve({
+            turnId,
+            agentName,
+            conversationId,
+            status: "aborted",
+            steps: [],
+          });
+        }
+        cleanup();
+      },
+    };
+  }
+
+  private _scheduleDurableInboundItemInBackground(item: DurableInboundItem): void {
+    void this._scheduleDurableInboundItem(item).catch((err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this._runtimeEvents.emit("inbound.failed", {
+        type: "inbound.failed",
+        inboundItemId: item.id,
+        attempt: item.attempt,
+        retryable: true,
+        reason: error.message,
+      });
+    });
   }
 
   async deliverInboundToActiveTurn(
@@ -759,7 +818,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       retryInboundItem: this._durableInboundStore
         ? async (id: string) => {
             const item = await this._durableInboundStore!.retryInboundItem(id);
-            void this._scheduleDurableInboundItem(item as any);
+            this._scheduleDurableInboundItemInBackground(item as any);
             return item;
           }
         : undefined,
@@ -773,7 +832,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             } else {
               item = await this._durableInboundStore!.retryInboundItem(typeof input === "string" ? input : input.id);
             }
-            void this._scheduleDurableInboundItem(item as any);
+            this._scheduleDurableInboundItemInBackground(item as any);
             return item;
           }
         : undefined,
@@ -857,6 +916,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               turnId: (gate as any).toolCall.turnId,
             } as any);
             let completedGate: any;
+            let continuationTurn: PreparedContinuationTurn | undefined;
             let resumeTurnId: string | undefined;
             let resumeSteeringInbox: SteeringInbox | undefined;
             let resumeTracked: ReturnType<typeof createDeferred<TurnResult>> | undefined;
@@ -1048,6 +1108,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 });
 
                 await drainBlockedInboundItemsForApproval();
+                continuationTurn = this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
                 completedGate = await this._humanApprovalStore!.markApprovalCompleted({
                   humanApprovalId: id,
                   leaseOwner: "runtime",
@@ -1064,7 +1125,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 turnId: toolCall.turnId,
                 blockedInboundItemIds: (completedGate as any).blockedInboundItemIds ?? blockedInboundItemIds,
               } as any);
-              const continuation = await this._continueTurnInternal(toolCall.agentName, toolCall.conversationId);
+              const continuation = await continuationTurn!.start();
               return {
                 humanApprovalId: id,
                 status: "completed",
@@ -1073,6 +1134,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               } as any;
             } catch (err) {
               const error = err instanceof Error ? err : new Error(String(err));
+              if (continuationTurn) {
+                continuationTurn.discard();
+              }
               if (completedGate) {
                 const toolCall = (completedGate as any).toolCall;
                 return {

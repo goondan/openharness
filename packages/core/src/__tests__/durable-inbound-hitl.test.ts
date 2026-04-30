@@ -562,6 +562,65 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("reports background scheduling failures after inbound retry", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const appended = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-retry-schedule-fail",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "retry me" }],
+        properties: { id: "evt-retry-schedule-fail" },
+        conversationId: "conv-retry-schedule-fail",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-retry-schedule-fail",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-retry-schedule-fail:evt-retry-schedule-fail",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    await inboundStore.deadLetterInboundItem({
+      id: appended.item.id,
+      reason: "operator test",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+    vi.spyOn(humanApprovalStore, "getConversationBlocker").mockRejectedValueOnce(
+      new Error("blocker lookup unavailable"),
+    );
+    const failures: any[] = [];
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+    runtime.events.on("inbound.failed", (event) => failures.push(event));
+
+    const retried = await runtime.control.retryInboundItem?.(appended.item.id);
+    expect(retried?.status).toBe("pending");
+
+    for (let attempt = 0; attempt < 20 && failures.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      type: "inbound.failed",
+      inboundItemId: appended.item.id,
+      retryable: true,
+      reason: "blocker lookup unavailable",
+    });
+
+    await runtime.close();
+  });
+
   it("creates a durable Human Approval before running a guarded tool handler", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore({
@@ -971,6 +1030,84 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumed.status).toBe("completed");
     expect(lateInboundItemId).not.toBe("");
     expect(consumed.some((item) => item.id === lateInboundItemId)).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("delivers inbound arriving after approval completion to the prepared continuation turn", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "secret" })),
+    };
+    currentClient = mockClient([
+      {
+        text: "need tool",
+        toolCalls: [{ toolCallId: "call-handoff", toolName: "guarded", args: {} }],
+      },
+      { text: "continued after handoff", toolCalls: [] },
+    ]);
+
+    let runtime: Awaited<ReturnType<typeof createHarness>>;
+    let handoffDispatch: any;
+    const markCompleted = humanApprovalStore.markApprovalCompleted.bind(humanApprovalStore);
+    vi.spyOn(humanApprovalStore, "markApprovalCompleted").mockImplementation(async (input) => {
+      const completed = await markCompleted(input as any);
+      handoffDispatch = await runtime.ingress.dispatch({
+        connectionName: "test",
+        envelope: {
+          name: "message.created",
+          content: [{ type: "text", text: "arrived during handoff" }],
+          properties: { id: "evt-handoff-delivered" },
+          conversationId: "conv-handoff-delivered",
+          source: {
+            connector: "test",
+            connectionName: "test",
+            receivedAt: new Date().toISOString(),
+          },
+        },
+      });
+      return completed;
+    });
+
+    runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-handoff-delivered",
+      idempotencyKey: "direct-human-handoff-delivered",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-handoff-delivered" });
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-handoff-delivered",
+    });
+    const resumed = await runtime.control.resumeHumanApproval!(tasks[0].humanApprovalId);
+    const handoffItems = await inboundStore.listInboundItems({
+      conversationId: "conv-handoff-delivered",
+      statuses: ["consumed"],
+    });
+
+    expect(handoffDispatch?.disposition).toBe("delivered");
+    expect(handoffDispatch?.turnId).toBe(resumed.continuation?.turnId);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.continuation?.status).toBe("completed");
+    expect(handoffItems.some((item) => item.id === handoffDispatch?.inboundItemId)).toBe(true);
 
     await runtime.close();
   });

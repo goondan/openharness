@@ -103,10 +103,12 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   5. tool result를 conversation에 append한다.
   6. Human Approval blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanApproval` item을 sequence order로 drain한다.
   7. drained inbound item을 user message로 append하고 consumed 처리한다.
-  8. blocked item consume이 완료된 뒤 runtime은 획득한 resume `leaseOwner`로 approval을 `completed`로 전환하며 blocker를 해제한다.
-  9. runtime은 blocker 해제 경계에서 같은 blocker로 새로 `blocked` 된 item을 재조회해 consumed 또는 scheduler-owned 상태로 수렴시킨다.
-  10. runtime은 lifecycle event를 발행한다.
-  11. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
+  8. blocked item consume이 완료된 뒤 runtime은 continuation Turn을 scheduler-visible active target으로 준비한다.
+  9. runtime은 획득한 resume `leaseOwner`로 approval을 `completed`로 전환하며 blocker를 해제한다.
+  10. runtime은 blocker 해제 경계에서 같은 blocker로 새로 `blocked` 된 item을 재조회해 consumed 또는 scheduler-owned 상태로 수렴시킨다.
+  11. runtime은 lifecycle event를 발행한다.
+  12. runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 준비된 continuation Turn을 실행한다.
+  13. blocker 해제 후 continuation 실행 시작 전까지 도착한 같은 conversation input은 새 Turn을 시작하지 않고 준비된 continuation Turn으로 delivered 된다.
 - Outputs:
   - `HumanApprovalResumeResult`
   - continuation `TurnResult`
@@ -298,5 +300,6 @@ interface HumanApprovalStore {
 - Given human task가 form args와 함께 approved 상태다, When resume이 실행된다, Then mapped args는 handler 실행 전에 tool JSON Schema 검증을 통과한다.
 - Given ready approval와 blocked inbound item 2개가 있다, When resume이 완료된다, Then tool result가 먼저 append되고 blocked inbound items가 sequence order로 append된 뒤 continuation Turn이 실행된다.
 - Given ready approval와 blocked inbound item 2개가 있다, When resume이 blocked item을 drain한다, Then tool result append, blocked item append, item consume이 모두 완료될 때까지 Human Approval blocker는 active 상태로 유지된다.
+- Given ready approval이 completed로 전환되어 blocker가 해제되는 순간 같은 conversation inbound input이 들어온다, When continuation Turn handoff가 아직 LLM 실행을 시작하기 전이다, Then input은 새 Turn을 시작하지 않고 준비된 continuation Turn에 delivered 된다.
 - Given approval이 `failed`, `canceled`, 또는 `expired` terminal 상태다, When `resumeHumanApproval(id)`가 호출된다, Then runtime은 `blocked`가 아니라 `failed` resume result를 반환한다.
 - Given 두 resume worker가 같은 ready approval을 처리하려 한다, When 둘 다 lease 획득을 시도한다, Then 하나만 handler를 실행하고 다른 하나는 existing completion 또는 lease conflict로 수렴한다.
