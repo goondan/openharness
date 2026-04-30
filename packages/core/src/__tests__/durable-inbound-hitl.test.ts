@@ -454,7 +454,8 @@ describe("durable inbound and Human Gate integration", () => {
     expect(failedResult.error?.message).toContain("previous failure");
     expect(deadLetterResult.status).toBe("error");
     expect(deadLetterResult.error?.message).toContain("sent to dead letter");
-    expect(consumedResult.status).toBe("completed");
+    expect(consumedResult.status).toBe("aborted");
+    expect(consumedResult.error?.message).toContain("consumed");
     expect(firstCached.status).toBe("completed");
     expect(secondCached).toBe(firstCached);
 
@@ -804,6 +805,37 @@ describe("durable inbound and Human Gate integration", () => {
     }));
 
     await expect(runtime.control.resumeHumanGate?.("missing-gate")).rejects.toThrow(/Unknown human gate/);
+
+    await runtime.close();
+  });
+
+  it("returns failed when resuming a terminal non-completed Human Gate", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanGateStore = createInMemoryHumanGateStore();
+    const created = await humanGateStore.createGate({
+      humanGateId: "gate-canceled-terminal",
+      toolCall: {
+        turnId: "turn-canceled-terminal",
+        agentName: "default",
+        conversationId: "conv-canceled-terminal",
+        stepNumber: 1,
+        toolCallId: "call-canceled-terminal",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-canceled-terminal", type: "approval", required: true }],
+    });
+    await humanGateStore.cancelGate({ humanGateId: created.gate.id, reason: "operator canceled" });
+
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanGateStore as any },
+    }));
+
+    const resumed = await runtime.control.resumeHumanGate?.(created.gate.id);
+
+    expect(resumed?.status).toBe("failed");
+    expect(resumed?.gate.status).toBe("canceled");
 
     await runtime.close();
   });

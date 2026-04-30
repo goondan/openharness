@@ -291,4 +291,5 @@ interface HumanGateStore {
 - Given human task가 form args와 함께 approved 상태다, When resume이 실행된다, Then mapped args는 handler 실행 전에 tool JSON Schema 검증을 통과한다.
 - Given ready gate와 blocked inbound item 2개가 있다, When resume이 완료된다, Then tool result가 먼저 append되고 blocked inbound items가 sequence order로 append된 뒤 continuation Turn이 실행된다.
 - Given ready gate와 blocked inbound item 2개가 있다, When resume이 blocked item을 drain한다, Then tool result append, blocked item append, item consume이 모두 완료될 때까지 Human Gate blocker는 active 상태로 유지된다.
+- Given gate가 `failed`, `canceled`, 또는 `expired` terminal 상태다, When `resumeHumanGate(id)`가 호출된다, Then runtime은 `blocked`가 아니라 `failed` resume result를 반환한다.
 - Given 두 resume worker가 같은 ready gate를 처리하려 한다, When 둘 다 lease 획득을 시도한다, Then 하나만 handler를 실행하고 다른 하나는 existing completion 또는 lease conflict로 수렴한다.

@@ -102,10 +102,6 @@ function turnResultForDurableDuplicate(
   conversationId: string,
   cached?: TurnResult,
 ): TurnResult {
-  if (item.status === "consumed" && cached) {
-    return cached;
-  }
-
   const turnId = item.turnId ?? `turn-${randomUUID()}`;
   const base = {
     turnId,
@@ -121,9 +117,15 @@ function turnResultForDurableDuplicate(
         status: "waitingForHuman",
       };
     case "consumed":
+      if (cached) {
+        return cached;
+      }
       return {
         ...base,
-        status: "completed",
+        status: "aborted",
+        error: new Error(
+          `Durable inbound item "${item.id}" is consumed but has no cached turn result; duplicate caller must use recovery state instead of assuming completion.`,
+        ),
       };
     case "pending":
     case "leased":
@@ -766,9 +768,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               if (!existing) {
                 throw new HarnessError(`Unknown human gate: "${id}"`);
               }
+              const existingStatus = (existing as any).status;
               return {
                 humanGateId: id,
-                status: existing.status === "completed" ? "completed" : "blocked",
+                status: existingStatus === "completed"
+                  ? "completed"
+                  : ["failed", "canceled", "expired"].includes(existingStatus)
+                    ? "failed"
+                    : "blocked",
                 gate: existing,
               } as any;
             }

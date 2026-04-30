@@ -287,7 +287,7 @@ interface DurableInboundStore {
   - `blocked -> deadLetter`
   - `delivered` is not a lease state and must not be automatically released to `pending` by lease expiry. Recovery must use an explicit operator/recovery decision after determining the active Turn cannot consume it.
   - explicit `retryInboundItem()`/`releaseInboundItem()` may move `delivered -> pending` after the active Turn is known to be gone or unable to consume the item.
-  - duplicate direct input must report from the existing item state: `blocked` maps to `waitingForHuman`, `consumed` maps to the cached/completed result, and non-terminal or failed states must not be coerced to successful completion.
+  - duplicate direct input must report from the existing item state: `blocked` maps to `waitingForHuman`, `consumed` maps to a cached final Turn result only when one exists, and non-terminal/failed/uncached consumed states must not be coerced to successful completion.
 - Concurrency Strategy:
   - store methods are compare-and-set/transactional at item and conversation sequence boundaries.
   - scheduler may run opportunistically in request path and/or background worker, but store lease decides ownership.
