@@ -325,6 +325,7 @@ interface DurableInboundStore {
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item이 append된다, Then item은 durable store에 남고 active Turn은 Step 경계에서 그 item을 user message로 반영한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item을 deliver한다, Then runtime은 `markDelivered()` 성공 이후에만 active Turn memory steering inbox에 notify한다.
 - Given active Turn delivery가 `markDelivered()` 이후 consume 전에 crash된다, When operator/recovery가 `retryInboundItem()` 또는 `releaseInboundItem()`을 호출한다, Then item은 `pending`으로 돌아가 다시 처리 가능하다.
+- Given durable direct input이 active Turn에 delivered 된 뒤 consumed 된다, When 같은 idempotency key로 duplicate direct call이 들어온다, Then runtime은 cached active Turn result를 반환하고 consumed item을 aborted/error로 보고하지 않는다.
 - Given conversation이 human approval로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanApproval` metadata와 함께 `blocked`가 된다.
 - Given human approval이 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.
 - Given human approval blocker가 completed 전환으로 해제되는 경계다, When 같은 conversation으로 inbound event가 들어온다, Then scheduler는 새 Turn을 시작하지 않고 준비된 continuation Turn으로 item을 deliver한다.
@@ -337,3 +338,4 @@ interface DurableInboundStore {
 - Given active Turn으로 delivered 된 item이 consume 되기 전에 Human Approval이 생성된다, When Turn이 waiting 상태로 전환된다, Then delivered item은 `blockedBy=humanApproval`로 재분류되어 resume drain 대상이 된다.
 - Given active Turn이 no-tool-call step으로 완료되려는 순간 새 inbound item이 steered 된다, When completion boundary가 실행된다, Then item은 같은 Turn의 다음 step에서 consumed 되거나 durable retry 가능한 상태로 돌아가며 `delivered`에 stranded 되지 않는다.
 - Given human approval이 operator cancel로 해제되고 blocked inbound item이 pending으로 release 된다, When cancel API가 반환된다, Then runtime은 release된 item을 scheduler에 다시 전달해 pending 상태로 방치하지 않는다.
+- Given operator control 또는 Human Approval expiry가 inbound item을 dead-letter로 전환한다, When state transition이 완료된다, Then runtime은 `inbound.deadLettered` event를 `inboundItemId`와 `reason`으로 발행한다.

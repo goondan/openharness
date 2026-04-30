@@ -253,6 +253,53 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("caches the active turn result for durable direct input delivered to that turn", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    let resolveFirstChat!: (response: LlmResponse) => void;
+    const chat = vi.fn(async () => {
+      if (chat.mock.calls.length === 1) {
+        return new Promise<LlmResponse>((resolve) => {
+          resolveFirstChat = resolve;
+        });
+      }
+      return { text: "active turn completed with delivered input", toolCalls: [] };
+    });
+    currentClient = { chat };
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const firstTurn = runtime.processTurn("default", "active turn", {
+      conversationId: "conv-active-direct-cache",
+      idempotencyKey: "direct-active-cache-first",
+    });
+    for (let attempt = 0; attempt < 10 && chat.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    const deliveredTurn = runtime.processTurn("default", "delivered direct input", {
+      conversationId: "conv-active-direct-cache",
+      idempotencyKey: "direct-active-cache-delivered",
+    });
+    resolveFirstChat({ text: "first step", toolCalls: [] });
+
+    const firstResult = await firstTurn;
+    const deliveredResult = await deliveredTurn;
+    const duplicateResult = await runtime.processTurn("default", "delivered direct input", {
+      conversationId: "conv-active-direct-cache",
+      idempotencyKey: "direct-active-cache-delivered",
+    });
+
+    expect(firstResult.status).toBe("completed");
+    expect(deliveredResult.status).toBe("completed");
+    expect(deliveredResult.text).toBe("active turn completed with delivered input");
+    expect(duplicateResult.status).toBe("completed");
+    expect(duplicateResult.text).toBe("active turn completed with delivered input");
+    expect(chat).toHaveBeenCalledTimes(2);
+
+    await runtime.close();
+  });
+
   it("reports durable direct duplicates according to inbound item state", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const pending = await inboundStore.append({
@@ -616,6 +663,53 @@ describe("durable inbound and Human Approval integration", () => {
       inboundItemId: appended.item.id,
       retryable: true,
       reason: "blocker lookup unavailable",
+    });
+
+    await runtime.close();
+  });
+
+  it("emits inbound.deadLettered when operator dead-letters an inbound item", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const appended = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-operator-dead-letter",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "dead letter me" }],
+        properties: { id: "evt-operator-dead-letter" },
+        conversationId: "conv-operator-dead-letter",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-operator-dead-letter",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-operator-dead-letter:evt-operator-dead-letter",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    const deadLetterEvents: unknown[] = [];
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+    runtime.events.on("inbound.deadLettered", (event) => deadLetterEvents.push(event));
+
+    const deadLettered = await runtime.control.deadLetterInboundItem?.({
+      id: appended.item.id,
+      reason: "operator decision",
+    });
+
+    expect(deadLettered?.status).toBe("deadLetter");
+    expect(deadLetterEvents).toHaveLength(1);
+    expect(deadLetterEvents[0]).toMatchObject({
+      type: "inbound.deadLettered",
+      inboundItemId: appended.item.id,
+      reason: "operator decision",
     });
 
     await runtime.close();
@@ -1429,6 +1523,7 @@ describe("durable inbound and Human Approval integration", () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const canceledEvents: unknown[] = [];
+    const deadLetterEvents: unknown[] = [];
     const guardedTool: ToolDefinition = {
       name: "guarded",
       description: "guarded tool",
@@ -1453,6 +1548,9 @@ describe("durable inbound and Human Approval integration", () => {
     }));
     runtime.events.on("humanApproval.canceled", (event) => {
       canceledEvents.push(event);
+    });
+    runtime.events.on("inbound.deadLettered", (event) => {
+      deadLetterEvents.push(event);
     });
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -1496,6 +1594,12 @@ describe("durable inbound and Human Approval integration", () => {
     expect(canceledEvents).toHaveLength(1);
     expect((canceledEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect((canceledEvents[0] as any).reason).toBe("approval expired");
+    expect(deadLetterEvents).toHaveLength(1);
+    expect(deadLetterEvents[0]).toMatchObject({
+      type: "inbound.deadLettered",
+      inboundItemId: blocked.inboundItemId,
+      reason: "approval expired",
+    });
     expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
     expect(deadLetterItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 

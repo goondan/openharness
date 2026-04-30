@@ -536,6 +536,20 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     });
   }
 
+  private async _deadLetterInboundItem(input: any): Promise<DurableInboundItem> {
+    if (!this._durableInboundStore) {
+      throw new HarnessError("Durable inbound store is not configured.");
+    }
+
+    const item = await this._durableInboundStore.deadLetterInboundItem(input);
+    this._runtimeEvents.emit("inbound.deadLettered", {
+      type: "inbound.deadLettered",
+      inboundItemId: item.id,
+      reason: (item as any).failure?.reason ?? input.reason,
+    });
+    return item as any;
+  }
+
   async deliverInboundToActiveTurn(
     agentName: string,
     conversationId: string,
@@ -573,7 +587,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       turnId: activeTurn.turnId,
       sequence: delivered.sequence,
     });
-    return { turnId: activeTurn.turnId, item: delivered, promise: activeTurn.promise };
+    const deliveredPromise = activeTurn.promise.then((result) => {
+      this._turnResultByInboundItem.set(delivered.id, result);
+      return result;
+    });
+    void deliveredPromise.catch(() => undefined);
+    return { turnId: activeTurn.turnId, item: delivered, promise: deliveredPromise };
   }
 
   private async _scheduleDurableInboundItem(item: DurableInboundItem): Promise<void> {
@@ -837,7 +856,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           }
         : undefined,
       deadLetterInboundItem: this._durableInboundStore
-        ? async (input: any) => this._durableInboundStore!.deadLetterInboundItem(
+        ? async (input: any) => this._deadLetterInboundItem(
             typeof input === "string" ? { id: input, reason: "dead-lettered by operator" } : input,
           )
         : undefined,
@@ -1203,7 +1222,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   statuses: ["blocked"],
                   blockedBy: gate.blocker,
                 } as any);
-                await Promise.all(blockedItems.map((item: any) => this._durableInboundStore!.deadLetterInboundItem({
+                await Promise.all(blockedItems.map((item: any) => this._deadLetterInboundItem({
                   id: item.id,
                   reason: cancelInput.reason ?? `Human approval "${gate.id}" expired.`,
                 })));
