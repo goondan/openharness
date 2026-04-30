@@ -553,163 +553,164 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               }
               return {
                 humanGateId: id,
-                status: existing?.status === "completed" ? "completed" : "blocked",
+                status: existing.status === "completed" ? "completed" : "blocked",
                 gate: existing,
               } as any;
             }
             try {
-            const toolCall = (gate as any).toolCall;
-            const agentDeps = this._agents.get(toolCall.agentName);
-            if (!agentDeps) {
-              throw new ConfigError(`Unknown agent: "${toolCall.agentName}"`);
-            }
-            const conversationKey = this._conversationKey(toolCall.agentName, toolCall.conversationId);
-            let conversationState = this._conversations.get(conversationKey);
-            if (!conversationState) {
-              conversationState = createConversationState();
-              this._conversations.set(conversationKey, conversationState);
-            }
+              const toolCall = (gate as any).toolCall;
+              const agentDeps = this._agents.get(toolCall.agentName);
+              if (!agentDeps) {
+                throw new ConfigError(`Unknown agent: "${toolCall.agentName}"`);
+              }
+              const conversationKey = this._conversationKey(toolCall.agentName, toolCall.conversationId);
+              let conversationState = this._conversations.get(conversationKey);
+              if (!conversationState) {
+                conversationState = createConversationState();
+                this._conversations.set(conversationKey, conversationState);
+              }
 
-            const taskIds: string[] = (gate as any).taskIds ?? [];
-            const tasks = await Promise.all(
-              taskIds.map((taskId) => (this._humanGateStore as any).getTask?.(taskId)),
-            );
-            const rejectedTask = tasks.find((task) => task?.status === "rejected" || task?.result?.type === "rejection");
-            const tool = agentDeps.toolRegistry.get(toolCall.toolName);
-            let toolResult: any;
+              const taskIds: string[] = (gate as any).taskIds ?? [];
+              const tasks = await Promise.all(
+                taskIds.map((taskId) => (this._humanGateStore as any).getTask?.(taskId)),
+              );
+              const rejectedTask = tasks.find((task) => task?.status === "rejected" || task?.result?.type === "rejection");
+              const tool = agentDeps.toolRegistry.get(toolCall.toolName);
+              let toolResult: any;
 
-            if (rejectedTask) {
-              toolResult = {
-                type: "error",
-                error: rejectedTask.result?.reason ?? "Human rejected tool call",
-              };
-            } else {
-              if (!tool) {
-                toolResult = { type: "error", error: `Tool "${toolCall.toolName}" not found` };
-              } else {
-                const argsPatch = tasks.find((task) => task?.result?.type === "approval")?.result?.argsPatch;
-                const formData = tasks.find((task) => task?.result?.type === "form")?.result?.data;
-                const finalArgs = {
-                  ...toolCall.toolArgs,
-                  ...(argsPatch ?? {}),
-                  ...(formData ?? {}),
+              if (rejectedTask) {
+                toolResult = {
+                  type: "error",
+                  error: rejectedTask.result?.reason ?? "Human rejected tool call",
                 };
-                const validation = agentDeps.toolRegistry.validate(toolCall.toolName, finalArgs);
-                if (!validation.valid) {
-                  toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
+              } else {
+                if (!tool) {
+                  toolResult = { type: "error", error: `Tool "${toolCall.toolName}" not found` };
                 } else {
-                  this._runtimeEvents.emit("tool.start", {
-                    type: "tool.start",
-                    turnId: toolCall.turnId,
-                    agentName: toolCall.agentName,
-                    conversationId: toolCall.conversationId,
-                    stepNumber: toolCall.stepNumber,
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
-                    args: finalArgs,
-                  });
-                toolResult = await tool.handler(finalArgs, {
-                  agentName: toolCall.agentName,
-                  conversationId: toolCall.conversationId,
-                  abortSignal: new AbortController().signal,
-                });
-                  this._runtimeEvents.emit("tool.done", {
-                    type: "tool.done",
-                    turnId: toolCall.turnId,
-                    agentName: toolCall.agentName,
-                    conversationId: toolCall.conversationId,
-                    stepNumber: toolCall.stepNumber,
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
-                    args: finalArgs,
-                    result: toolResult,
-                  });
+                  const argsPatch = tasks.find((task) => task?.result?.type === "approval")?.result?.argsPatch;
+                  const formData = tasks.find((task) => task?.result?.type === "form")?.result?.data;
+                  const finalArgs = {
+                    ...toolCall.toolArgs,
+                    ...(argsPatch ?? {}),
+                    ...(formData ?? {}),
+                  };
+                  const validation = agentDeps.toolRegistry.validate(toolCall.toolName, finalArgs);
+                  if (!validation.valid) {
+                    toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
+                  } else {
+                    this._runtimeEvents.emit("tool.start", {
+                      type: "tool.start",
+                      turnId: toolCall.turnId,
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      stepNumber: toolCall.stepNumber,
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      args: finalArgs,
+                    });
+                    toolResult = await tool.handler(finalArgs, {
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      abortSignal: new AbortController().signal,
+                    });
+                    this._runtimeEvents.emit("tool.done", {
+                      type: "tool.done",
+                      turnId: toolCall.turnId,
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      stepNumber: toolCall.stepNumber,
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      args: finalArgs,
+                      result: toolResult,
+                    });
+                  }
                 }
               }
-            }
 
-            conversationState._turnActive = true;
-            try {
-              conversationState.emit({
-                type: "appendMessage",
-                message: {
-                  id: `tool-result-${toolCall.toolCallId}`,
-                  data: {
-                    role: "tool",
-                    content: [
-                      {
-                        type: "tool-result",
-                        toolCallId: toolCall.toolCallId,
-                        toolName: toolCall.toolName,
-                        output: toolResult.type === "text"
-                          ? { type: "text", value: toolResult.text }
-                          : toolResult.type === "json"
-                            ? { type: "json", value: toolResult.data }
-                            : { type: "error-text", value: toolResult.error },
-                      },
-                    ],
-                  },
-                  metadata: {
-                    __createdBy: "core",
-                    __humanGateId: id,
-                  },
-                },
-              });
-
-              const blockedItems = this._durableInboundStore
-                ? await this._durableInboundStore.listInboundItems({
-                    agentName: toolCall.agentName,
-                    conversationId: toolCall.conversationId,
-                    status: ["blocked"],
-                    statuses: ["blocked"],
-                    blockedBy: (gate as any).blocker,
-                  } as any)
-                : [];
-              for (const item of blockedItems.sort((a: any, b: any) => a.sequence - b.sequence)) {
-                const commitRef = inboundUserMessageCommitRef(item.id);
-                const exists = conversationState.messages.some(
-                  (message) => message.metadata?.__inboundCommitRef === commitRef,
-                );
-                if (!exists) {
-                  const text = item.envelope.content
-                    .filter((part: any) => part.type === "text")
-                    .map((part: any) => part.text)
-                    .join("\n");
-                  conversationState.emit({
-                    type: "appendMessage",
-                    message: {
-                      id: `msg-${item.id}`,
-                      data: { role: "user", content: text },
-                      metadata: {
-                        __createdBy: "core",
-                        __inboundItemId: item.id,
-                        __inboundCommitRef: commitRef,
-                        __blockedBy: (gate as any).blocker,
-                      },
+              conversationState._turnActive = true;
+              try {
+                conversationState.emit({
+                  type: "appendMessage",
+                  message: {
+                    id: `tool-result-${toolCall.toolCallId}`,
+                    data: {
+                      role: "tool",
+                      content: [
+                        {
+                          type: "tool-result",
+                          toolCallId: toolCall.toolCallId,
+                          toolName: toolCall.toolName,
+                          output: toolResult.type === "text"
+                            ? { type: "text", value: toolResult.text }
+                            : toolResult.type === "json"
+                              ? { type: "json", value: toolResult.data }
+                              : { type: "error-text", value: toolResult.error },
+                        },
+                      ],
                     },
-                  });
-                }
-                await this._durableInboundStore?.markConsumed({
-                  id: item.id,
-                  turnId: toolCall.turnId,
-                  commitRef,
-                } as any);
-              }
-            } finally {
-              conversationState._turnActive = false;
-            }
+                    metadata: {
+                      __createdBy: "core",
+                      __humanGateId: id,
+                    },
+                  },
+                });
 
-            const completed = await this._humanGateStore!.markGateCompleted({
-              humanGateId: id,
-              turnId: toolCall.turnId,
-            } as any);
-            this._runtimeEvents.emit("humanGate.completed", {
-              type: "humanGate.completed",
-              humanGateId: id,
-              turnId: toolCall.turnId,
-              blockedInboundItemIds: (completed as any).blockedInboundItemIds ?? [],
-            } as any);
-            return { humanGateId: id, status: "completed", gate: completed } as any;
+                const blockedItems = this._durableInboundStore
+                  ? await this._durableInboundStore.listInboundItems({
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      status: ["blocked"],
+                      statuses: ["blocked"],
+                      blockedBy: (gate as any).blocker,
+                    } as any)
+                  : [];
+
+                for (const item of blockedItems.sort((a: any, b: any) => a.sequence - b.sequence)) {
+                  const commitRef = inboundUserMessageCommitRef(item.id);
+                  const exists = conversationState.messages.some(
+                    (message) => message.metadata?.__inboundCommitRef === commitRef,
+                  );
+                  if (!exists) {
+                    const text = item.envelope.content
+                      .filter((part: any) => part.type === "text")
+                      .map((part: any) => part.text)
+                      .join("\n");
+                    conversationState.emit({
+                      type: "appendMessage",
+                      message: {
+                        id: `msg-${item.id}`,
+                        data: { role: "user", content: text },
+                        metadata: {
+                          __createdBy: "core",
+                          __inboundItemId: item.id,
+                          __inboundCommitRef: commitRef,
+                          __blockedBy: (gate as any).blocker,
+                        },
+                      },
+                    });
+                  }
+                  await this._durableInboundStore?.markConsumed({
+                    id: item.id,
+                    turnId: toolCall.turnId,
+                    commitRef,
+                  } as any);
+                }
+              } finally {
+                conversationState._turnActive = false;
+              }
+
+              const completed = await this._humanGateStore!.markGateCompleted({
+                humanGateId: id,
+                turnId: toolCall.turnId,
+              } as any);
+              this._runtimeEvents.emit("humanGate.completed", {
+                type: "humanGate.completed",
+                humanGateId: id,
+                turnId: toolCall.turnId,
+                blockedInboundItemIds: (completed as any).blockedInboundItemIds ?? [],
+              } as any);
+              return { humanGateId: id, status: "completed", gate: completed } as any;
             } catch (err) {
               const error = err instanceof Error ? err : new Error(String(err));
               const failed = await this._humanGateStore!.markGateFailed({

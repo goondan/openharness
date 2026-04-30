@@ -465,6 +465,19 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
+  it("rejects resume when a Human Gate record is missing", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanGateStore = createInMemoryHumanGateStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanGate: { store: humanGateStore as any },
+    }));
+
+    await expect(runtime.control.resumeHumanGate?.("missing-gate")).rejects.toThrow(/Unknown human gate/);
+
+    await runtime.close();
+  });
+
   it("requires durable inbound when Human Gate is configured with ingress", async () => {
     const humanGateStore = createInMemoryHumanGateStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
