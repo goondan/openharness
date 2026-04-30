@@ -150,6 +150,17 @@ function turnResultForDurableDuplicate(
   }
 }
 
+function toPublicHumanTaskView(task: any): any {
+  if (!task) {
+    return task;
+  }
+  return {
+    ...task,
+    type: task.type ?? task.taskType,
+    idempotencyKey: task.idempotencyKey ?? task.resultIdempotencyKey,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HarnessRuntimeImpl
 // ---------------------------------------------------------------------------
@@ -734,13 +745,22 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           )
         : undefined,
       listHumanTasks: this._humanApprovalStore
-        ? async (filter = {}) => this._humanApprovalStore!.listTasks(filter as any) as any
+        ? async (filter = {}) => {
+            const tasks = await this._humanApprovalStore!.listTasks(filter as any);
+            return tasks.map(toPublicHumanTaskView) as any;
+          }
         : undefined,
       submitHumanResult: this._humanApprovalStore
         ? async (input: any) => {
             const result = await this._humanApprovalStore!.submitResult(input);
-            const status = (result as any).task?.status;
-            if ((result as any).status === "accepted" || (result as any).accepted) {
+            const resultStatus = (result as any).status;
+            const accepted = resultStatus === "accepted" || resultStatus === "duplicate" || (result as any).accepted;
+            if (!accepted) {
+              throw new HarnessError((result as any).reason ?? "Human result submission was rejected.");
+            }
+            const duplicate = resultStatus === "duplicate" || (result as any).duplicate === true;
+            if (!duplicate) {
+              const status = (result as any).task?.status;
               const task = (result as any).task;
               const gate = (result as any).approval;
               this._runtimeEvents.emit(status === "rejected" ? "humanTask.rejected" : "humanTask.resolved", {
@@ -757,7 +777,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 } as any);
               }
             }
-            return result as any;
+            return {
+              accepted: true,
+              duplicate,
+              task: toPublicHumanTaskView((result as any).task),
+              approval: (result as any).approval,
+            } as any;
           }
         : undefined,
       resumeHumanApproval: this._humanApprovalStore

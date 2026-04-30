@@ -140,6 +140,26 @@ interface HarnessRuntime {
   close(): Promise<void>;
 }
 
+interface HumanTaskView {
+  id: string;
+  humanApprovalId: string;
+  type: "approval" | "text" | "form";
+  status: "waitingForHuman" | "resolved" | "rejected" | "canceled" | "expired";
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  toolCallId: string;
+  toolName: string;
+  idempotencyKey?: string;
+}
+
+interface SubmitHumanResult {
+  accepted: true;
+  duplicate: boolean;
+  task: HumanTaskView;
+  approval: HumanApprovalRecord;
+}
+
 type IngressDisposition = "started" | "delivered" | "blocked" | "duplicate" | "steered";
 
 interface IngressAcceptResult {

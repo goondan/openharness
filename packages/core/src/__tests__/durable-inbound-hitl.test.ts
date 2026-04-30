@@ -587,6 +587,10 @@ describe("durable inbound and Human Approval integration", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].status).toBe("waitingForHuman");
     humanApprovalId = tasks[0].humanApprovalId;
+    const publicTasks = await runtime.control.listHumanTasks!({ conversationId: "conv-human" });
+    expect(publicTasks).toHaveLength(1);
+    expect(publicTasks[0].type).toBe("approval");
+    expect(publicTasks[0].humanApprovalId).toBe(tasks[0].humanApprovalId);
 
     const blocked = await runtime.ingress.dispatch({
       connectionName: "test",
@@ -609,13 +613,26 @@ describe("durable inbound and Human Approval integration", () => {
     runtime.events.on("humanApproval.resuming", (event) => {
       resumingEvents.push(event);
     });
-    await runtime.control.submitHumanResult?.({
+    const submitResult = await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-1",
+    });
+    const duplicateSubmitResult = await runtime.control.submitHumanResult!({
       humanTaskId: tasks[0].id,
       result: { type: "approval", approved: true },
       idempotencyKey: "approve-1",
     });
     const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
 
+    expect(submitResult.accepted).toBe(true);
+    expect(submitResult.duplicate).toBe(false);
+    expect(submitResult.task.type).toBe("approval");
+    expect(submitResult.task.idempotencyKey).toBe("approve-1");
+    expect(submitResult.approval.id).toBe(tasks[0].humanApprovalId);
+    expect(duplicateSubmitResult.accepted).toBe(true);
+    expect(duplicateSubmitResult.duplicate).toBe(true);
+    expect(duplicateSubmitResult.task.type).toBe("approval");
     expect(resumed?.status).toBe("completed");
     expect(resumed?.continuation?.status).toBe("completed");
     expect(resumed?.continuation?.text).toBe("approved and continued");
@@ -923,6 +940,23 @@ describe("durable inbound and Human Approval integration", () => {
     }));
 
     await expect(runtime.control.resumeHumanApproval?.("missing-gate")).rejects.toThrow(/Unknown human approval/);
+
+    await runtime.close();
+  });
+
+  it("rejects invalid Human Task submissions through the control API", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    await expect(runtime.control.submitHumanResult!({
+      humanTaskId: "missing-task",
+      result: { type: "approval", approved: true },
+      idempotencyKey: "missing-task-result",
+    })).rejects.toThrow(/Unknown human task/);
 
     await runtime.close();
   });
