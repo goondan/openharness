@@ -522,6 +522,7 @@ describe("durable inbound and Human Approval integration", () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore({
       now: () => "2026-01-01T00:00:00.000Z",
     });
+    const markCompleted = vi.spyOn(humanApprovalStore, "markApprovalCompleted");
     const middlewareCalls: string[] = [];
     const extensionToolDoneEvents: unknown[] = [];
     const toolMiddlewareExtension: Extension = {
@@ -634,6 +635,10 @@ describe("durable inbound and Human Approval integration", () => {
     expect(duplicateSubmitResult.duplicate).toBe(true);
     expect(duplicateSubmitResult.task.type).toBe("approval");
     expect(resumed?.status).toBe("completed");
+    expect(markCompleted).toHaveBeenCalledWith(expect.objectContaining({
+      humanApprovalId: tasks[0].humanApprovalId,
+      leaseOwner: "runtime",
+    }));
     expect(resumed?.continuation?.status).toBe("completed");
     expect(resumed?.continuation?.text).toBe("approved and continued");
     expect(toolHandler).toHaveBeenCalledOnce();
@@ -716,6 +721,60 @@ describe("durable inbound and Human Approval integration", () => {
     expect(result.status).toBe("waitingForHuman");
     expect(steeredItem?.status).toBe("blocked");
     expect(steeredItem?.blockedBy?.type).toBe("humanApproval");
+
+    await runtime.close();
+  });
+
+  it("marks failed Human Approval resumes with the acquired lease owner", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const markFailed = vi.spyOn(humanApprovalStore, "markApprovalFailed");
+    vi.spyOn(humanApprovalStore, "markApprovalCompleted").mockRejectedValueOnce(
+      new Error("completion write failed"),
+    );
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "secret" })),
+    };
+    currentClient = mockClient({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-failed-resume", toolName: "guarded", args: {} }],
+    });
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-failed-resume",
+      idempotencyKey: "direct-human-failed-resume",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-failed-resume" });
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-failed-resume",
+    });
+    const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
+
+    expect(resumed?.status).toBe("failed");
+    expect(markFailed).toHaveBeenCalledWith(expect.objectContaining({
+      humanApprovalId: tasks[0].humanApprovalId,
+      leaseOwner: "runtime",
+      reason: "completion write failed",
+    }));
 
     await runtime.close();
   });

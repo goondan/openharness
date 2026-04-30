@@ -30,6 +30,7 @@ export interface TurnSteeredInput {
 export interface TurnSteeringController {
   drain(): Array<InboundEnvelope | TurnSteeredInput>;
   consume?(input: TurnSteeredInput): Promise<void> | void;
+  tryCloseIfEmpty?(): boolean;
   close?(): void;
 }
 
@@ -120,6 +121,27 @@ function closeSteering(steering: TurnSteeringController | undefined): void {
   steering?.close?.();
 }
 
+async function prepareSteeringForCompletion(
+  conversationState: ConversationStateImpl,
+  steering: TurnSteeringController | undefined,
+): Promise<"complete" | "continue"> {
+  if (!steering) {
+    return "complete";
+  }
+
+  if (!steering.tryCloseIfEmpty) {
+    closeSteering(steering);
+    return "complete";
+  }
+
+  if (steering.tryCloseIfEmpty()) {
+    return "complete";
+  }
+
+  await appendSteeredInputs(conversationState, steering);
+  return "continue";
+}
+
 async function blockSteeredInboundItems(
   steering: TurnSteeringController | undefined,
   blocker: ConversationBlockerRef,
@@ -128,11 +150,21 @@ async function blockSteeredInboundItems(
     blocker: ConversationBlockerRef;
   }) => Promise<void> | void) | undefined,
 ): Promise<void> {
-  const inputs = steering?.drain() ?? [];
-  for (const drained of inputs) {
-    const input = "envelope" in drained ? drained : { envelope: drained };
-    if ("inboundItem" in input && input.inboundItem) {
-      await blockInboundItem?.({ item: input.inboundItem, blocker });
+  if (!steering) {
+    return;
+  }
+
+  for (;;) {
+    const inputs = steering.drain();
+    for (const drained of inputs) {
+      const input = "envelope" in drained ? drained : { envelope: drained };
+      if ("inboundItem" in input && input.inboundItem) {
+        await blockInboundItem?.({ item: input.inboundItem, blocker });
+      }
+    }
+
+    if (!steering.tryCloseIfEmpty || steering.tryCloseIfEmpty()) {
+      return;
     }
   }
 }
@@ -351,6 +383,9 @@ export async function executeTurn(
       // If no tool calls → turn is done (text response)
       if (!lastStepResult.toolCalls || lastStepResult.toolCalls.length === 0) {
         if (steeredInputCount > 0) {
+          continue;
+        }
+        if (await prepareSteeringForCompletion(conversationState, steering) === "continue") {
           continue;
         }
 

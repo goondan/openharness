@@ -78,6 +78,17 @@ class SteeringInbox implements TurnSteeringController {
     await this._consume?.(input);
   }
 
+  tryCloseIfEmpty(): boolean {
+    if (this._closed) {
+      return true;
+    }
+    if (this._queue.length > 0) {
+      return false;
+    }
+    this._closed = true;
+    return true;
+  }
+
   close(): void {
     this._closed = true;
   }
@@ -978,6 +989,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
                 completedGate = await this._humanApprovalStore!.markApprovalCompleted({
                   humanApprovalId: id,
+                  leaseOwner: "runtime",
                   turnId: toolCall.turnId,
                   blockedInboundItemIds,
                 } as any);
@@ -1014,6 +1026,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 humanApprovalId: id,
                 reason: error.message,
                 retryable: false,
+                leaseOwner: "runtime",
               } as any);
               this._runtimeEvents.emit("humanApproval.failed", {
                 type: "humanApproval.failed",

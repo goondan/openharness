@@ -177,6 +177,7 @@ export interface AcquireHumanApprovalInput {
 
 export interface CompleteHumanApprovalInput {
   humanApprovalId: string;
+  leaseOwner?: string;
   turnId: string;
   blockedInboundItemIds?: string[];
   now?: string;
@@ -192,6 +193,7 @@ export interface FailHumanApprovalInput {
   humanApprovalId: string;
   reason: string;
   retryable: boolean;
+  leaseOwner?: string;
   now?: string;
 }
 

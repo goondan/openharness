@@ -101,7 +101,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   6. Human Approval blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanApproval` item을 sequence order로 drain한다.
   7. drained inbound item을 user message로 append하고 consumed 처리한다.
   8. blocked item consume이 완료된 뒤 blocker를 해제한다.
-  9. approval을 `completed`로 전환하고 lifecycle event를 발행한다.
+  9. runtime은 획득한 resume `leaseOwner`로 approval을 `completed`로 전환하고 lifecycle event를 발행한다.
   10. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
 - Outputs:
   - `HumanApprovalResumeResult`
@@ -109,7 +109,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Failure Modes:
   - process crash before `markApprovalHandlerStarted()`: `resuming` lease expiry 후 다른 worker가 같은 approval을 재획득할 수 있다.
   - process crash after `markApprovalHandlerStarted()`: runtime은 자동 재획득/handler 재실행을 하지 않고 operator 확인 대상으로 남긴다.
-  - tool handler 실패: `failed(retryable|nonRetryable)`로 전환하고 event를 발행한다.
+  - tool handler 실패: runtime은 획득한 resume `leaseOwner`로 `failed(retryable|nonRetryable)` 전환을 기록하고 event를 발행한다.
 
 #### Flow ID: HA-CANCEL-01
 
