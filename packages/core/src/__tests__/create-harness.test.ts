@@ -228,7 +228,7 @@ class FailingOnceDispatchEnqueueStore extends InMemoryHitlStore {
   private failed = false;
 
   override async enqueueSteer(batchId: string, input: HitlQueuedSteerInput): Promise<HitlQueuedSteer> {
-    if (!this.failed && input.source === "dispatch") {
+    if (!this.failed && input.source === "direct") {
       this.failed = true;
       throw new Error("dispatch steer enqueue failed");
     }
@@ -242,7 +242,7 @@ class BlockingDispatchEnqueueStore extends InMemoryHitlStore {
   private blocked = false;
 
   override async enqueueSteer(batchId: string, input: HitlQueuedSteerInput): Promise<HitlQueuedSteer> {
-    if (!this.blocked && input.source === "dispatch") {
+    if (!this.blocked && input.source === "direct") {
       this.blocked = true;
       this.dispatchStarted.resolve();
       await this.allowDispatch.promise;
@@ -1588,7 +1588,7 @@ describe("createHarness", () => {
     expect(submitted.status).toBe("accepted");
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
-      expect(batch?.status).toBe("failed");
+      expect(batch?.status).toBe("blocked");
       expect(batch?.failure?.retryable).toBe(false);
       expect(batch?.toolResults).toHaveLength(0);
     });
@@ -1596,7 +1596,7 @@ describe("createHarness", () => {
     expect(chat).toHaveBeenCalledTimes(1);
 
     const resumed = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
-    expect(resumed.status).toBe("notReady");
+    expect(resumed.status).toBe("blocked");
     expect(handler).toHaveBeenCalledOnce();
     expect(chat).toHaveBeenCalledTimes(1);
     await waitUntil(async () => {
@@ -1793,7 +1793,7 @@ describe("createHarness", () => {
     expect(chat).toHaveBeenCalledTimes(2);
 
     const retried = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
-    expect(retried.status).toBe("notReady");
+    expect(retried.status).toBe("alreadyTerminal");
     expect(chat).toHaveBeenCalledTimes(2);
 
     await runtime.close();
@@ -1844,17 +1844,22 @@ describe("createHarness", () => {
 
     await waitUntil(async () => {
       const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
-      expect(batch?.status).toBe("failed");
-      expect(batch?.failure?.retryable).toBe(false);
+      expect(batch?.status).toBe("continuing");
+      expect(batch?.continuationOutcome?.outcome).toBe("completed");
       expect(batch?.completion).toBeUndefined();
     });
     expect(handler).toHaveBeenCalledOnce();
     expect(chat).toHaveBeenCalledTimes(2);
 
-    const retried = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
-    expect(retried.status).toBe("notReady");
-    expect(handler).toHaveBeenCalledOnce();
-    expect(chat).toHaveBeenCalledTimes(2);
+    await waitUntil(async () => {
+      const retried = await runtime.control.resumeHitlBatch(result.pendingHitlBatchId!);
+      expect(["completed", "alreadyCompleted"]).toContain(retried.status);
+      expect(handler).toHaveBeenCalledOnce();
+      expect(chat).toHaveBeenCalledTimes(2);
+      const batch = await runtime.control.getHitlBatch(result.pendingHitlBatchId!);
+      expect(batch?.status).toBe("completed");
+      expect(batch?.completion?.outcome).toBe("completed");
+    });
 
     await runtime.close();
   });
@@ -1914,7 +1919,7 @@ describe("createHarness", () => {
     await waitUntil(async () => {
       const firstBatch = await runtime.control.getHitlBatch(first.pendingHitlBatchId!);
       expect(firstBatch?.status).toBe("completed");
-      expect(firstBatch?.completion?.continuationStatus).toBe("waitingForHuman");
+      expect(firstBatch?.completion?.outcome).toBe("spawnedChild");
       const pending = await runtime.control.listPendingHitl({ conversationId: "staged-hitl-conv" });
       expect(pending).toHaveLength(1);
       expect(pending[0].toolName).toBe("second_stage_hitl_tool");
@@ -2137,6 +2142,7 @@ describe("createHarness", () => {
     });
     await store.startBatchToolExecution("preparing-marker-failed-batch", {
       batchId: "preparing-marker-failed-batch",
+      phase: "pre-resume",
       toolCallId: "call-preparing-marker-normal",
       toolCallIndex: 0,
       toolName: "preparing_marker_normal_tool",
@@ -2906,7 +2912,7 @@ describe("createHarness", () => {
     });
 
     const retried = await runtime2.control.resumeHitl(requestId);
-    expect(retried.status).toBe("notReady");
+    expect(retried.status).toBe("alreadyTerminal");
 
     await runtime2.close();
   });

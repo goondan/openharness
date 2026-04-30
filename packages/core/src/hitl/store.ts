@@ -1,4 +1,5 @@
 import type {
+  CancelHitlBatchInput,
   CreateHitlBatchResult,
   HitlBatchAppendCommit,
   HitlBatchCompletion,
@@ -10,6 +11,7 @@ import type {
   HitlBatchToolResult,
   HitlBatchView,
   HitlCompletion,
+  HitlContinuationOutcome,
   HitlFailure,
   HitlHumanResult,
   HitlLeaseGuard,
@@ -29,6 +31,7 @@ const CONVERSATION_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
   "ready",
   "resuming",
   "continuing",
+  "blocked",
 ]);
 
 const STEER_QUEUE_OPEN_BATCH_STATUSES = new Set<HitlBatchStatus>([
@@ -206,6 +209,7 @@ export class InMemoryHitlStore implements HitlStore {
           batch.status === "ready" ||
           batch.status === "resuming" ||
           batch.status === "continuing" ||
+          batch.status === "blocked" ||
           (batch.status === "failed" && batch.failure?.retryable === true),
       )
       .filter((batch) => matchesBatchFilter(batch, filter))
@@ -245,6 +249,15 @@ export class InMemoryHitlStore implements HitlStore {
     const batch = mustGetBatch(this.batches, batchId);
     if (batch.status !== "preparing" && batch.status !== "resuming") {
       throw new HitlStoreError(`Cannot start batch tool execution from ${batch.status}`);
+    }
+    if (marker.phase === "resume") {
+      if (!marker.ownerId || !marker.fencingToken) {
+        throw new HitlStoreError("Resume HITL tool execution marker requires ownerId and fencingToken");
+      }
+      assertBatchLease(batch, {
+        ownerId: marker.ownerId,
+        token: marker.fencingToken,
+      });
     }
     const exists = batch.toolExecutions.some(
       (item) => item.toolCallId === marker.toolCallId && item.requestId === marker.requestId,
@@ -517,15 +530,30 @@ export class InMemoryHitlStore implements HitlStore {
   ): Promise<HitlBatchRecord> {
     const batch = mustGetBatch(this.batches, batchId);
     assertBatchLease(batch, guard);
-    if (batch.status !== "continuing") {
+    if (batch.status === "canceled") {
+      return clone(batch);
+    }
+    if (batch.status === "completed") {
+      if (batch.completion?.outcome === completion.outcome) {
+        return clone(batch);
+      }
+      throw new HitlStoreError(`HITL batch already completed with ${batch.completion?.outcome ?? "unknown"} outcome`);
+    }
+    if (batch.status !== "continuing" && batch.status !== "resuming") {
       throw new HitlStoreError(`Cannot complete HITL batch from ${batch.status}`);
     }
     if (
-      completion.continuationStatus !== "completed" &&
-      completion.continuationStatus !== "maxStepsReached" &&
-      completion.continuationStatus !== "waitingForHuman"
+      completion.outcome !== "completed" &&
+      completion.outcome !== "maxStepsReached" &&
+      completion.outcome !== "spawnedChild"
     ) {
-      throw new HitlStoreError(`Cannot complete HITL batch with continuation status ${completion.continuationStatus}`);
+      throw new HitlStoreError(`Cannot complete HITL batch with outcome ${completion.outcome}`);
+    }
+    if (completion.outcome === "spawnedChild") {
+      throw new HitlStoreError("spawnedChild completion must be committed through spawnChildBatch");
+    }
+    if (!batch.continuationOutcome || batch.continuationOutcome.outcome !== completion.outcome) {
+      throw new HitlStoreError("HITL continuation outcome must be recorded before completing batch");
     }
     const updated = touchBatch({
       ...batch,
@@ -537,8 +565,130 @@ export class InMemoryHitlStore implements HitlStore {
     return clone(updated);
   }
 
+  async recordContinuationOutcome(
+    batchId: string,
+    outcome: HitlContinuationOutcome,
+    guard: HitlLeaseGuard,
+  ): Promise<HitlBatchRecord> {
+    const batch = mustGetBatch(this.batches, batchId);
+    assertBatchLease(batch, guard);
+    if (batch.status === "canceled") {
+      return clone(batch);
+    }
+    if (outcome.outcome === "spawnedChild") {
+      throw new HitlStoreError("spawnedChild outcome must be recorded through spawnChildBatch");
+    }
+    if (batch.status !== "continuing") {
+      throw new HitlStoreError(`Cannot record continuation outcome for HITL batch in ${batch.status}`);
+    }
+    if (!batch.appendCommit) {
+      throw new HitlStoreError("Cannot record continuation outcome before append commit");
+    }
+    if (batch.continuationOutcome) {
+      if (continuationOutcomesMatch(batch.continuationOutcome, outcome)) {
+        return clone(batch);
+      }
+      throw new HitlStoreError("HITL continuation outcome already recorded with a different outcome");
+    }
+    const updated = touchBatch({
+      ...batch,
+      continuationOutcome: clone(outcome),
+    });
+    this.batches.set(batchId, updated);
+    return clone(updated);
+  }
+
+  async spawnChildBatch(input: {
+    parentBatchId: string;
+    parentCompletion: HitlBatchCompletion;
+    childBatch: HitlBatchRecord;
+    childRequests: HitlRequestRecord[];
+    guard: HitlLeaseGuard;
+  }): Promise<{ parent: HitlBatchRecord; child: HitlBatchRecord }> {
+    const parent = mustGetBatch(this.batches, input.parentBatchId);
+    assertBatchLease(parent, input.guard);
+    if (parent.status !== "continuing") {
+      throw new HitlStoreError(`Cannot spawn child HITL batch from ${parent.status}`);
+    }
+    if (!parent.appendCommit) {
+      throw new HitlStoreError("Cannot spawn child HITL batch before append commit");
+    }
+    if (input.parentCompletion.outcome !== "spawnedChild" || !input.parentCompletion.childBatchId) {
+      throw new HitlStoreError("spawnChildBatch requires a parent spawnedChild completion with childBatchId");
+    }
+    if (input.childBatch.batchId !== input.parentCompletion.childBatchId) {
+      throw new HitlStoreError("spawnChildBatch childBatchId must match parent completion");
+    }
+    if (input.childBatch.parentBatchId !== parent.batchId) {
+      throw new HitlStoreError("Child HITL batch parentBatchId must match parent");
+    }
+    if (this.batches.has(input.childBatch.batchId)) {
+      throw new HitlStoreError("Child HITL batch already exists");
+    }
+    if (parent.childBatchId && parent.childBatchId !== input.childBatch.batchId) {
+      throw new HitlStoreError("Parent HITL batch already spawned another child");
+    }
+    if (this.findOpenBatchByConversation(parent.agentName, parent.conversationId)) {
+      const open = this.findOpenBatchByConversation(parent.agentName, parent.conversationId);
+      if (open?.batchId !== parent.batchId) {
+        throw new HitlStoreError("Conversation already has another open HITL batch");
+      }
+    }
+    const now = nowIso();
+    const continuationOutcome: HitlContinuationOutcome = {
+      outcome: "spawnedChild",
+      recordedAt: now,
+      continuationTurnId: input.parentCompletion.continuationTurnId,
+      childBatchId: input.childBatch.batchId,
+    };
+    const closedParent = touchBatch({
+      ...parent,
+      status: "completed",
+      continuationOutcome,
+      completion: clone(input.parentCompletion),
+      childBatchId: input.childBatch.batchId,
+      lease: undefined,
+    });
+    const child = touchBatch({
+      ...clone(input.childBatch),
+      status: "preparing",
+      parentBatchId: parent.batchId,
+      childBatchId: undefined,
+      toolResults: input.childBatch.toolResults.map(clone),
+      toolExecutions: input.childBatch.toolExecutions.map(clone),
+      createdAt: input.childBatch.createdAt || now,
+      updatedAt: now,
+    });
+    const childRequests = input.childRequests.map((request) => {
+      if (request.status !== "pending") {
+        throw new HitlStoreError("New child HITL requests must start in pending state");
+      }
+      if (request.batchId !== child.batchId) {
+        throw new HitlStoreError("Child HITL request batchId must match child batch");
+      }
+      return touchRequest({
+        ...clone(request),
+        createdAt: request.createdAt || now,
+        updatedAt: now,
+      });
+    });
+    this.batches.set(parent.batchId, closedParent);
+    this.batches.set(child.batchId, child);
+    for (const request of childRequests) {
+      this.requests.set(request.requestId, request);
+    }
+    this.queuedSteers.set(child.batchId, []);
+    return {
+      parent: clone(closedParent),
+      child: clone(child),
+    };
+  }
+
   async failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord> {
     const batch = mustGetBatch(this.batches, batchId);
+    if (batch.status === "canceled") {
+      return clone(batch);
+    }
     if (guard) {
       assertBatchLease(batch, guard);
     } else if (batch.status !== "preparing" && batch.status !== "continuing") {
@@ -559,7 +709,11 @@ export class InMemoryHitlStore implements HitlStore {
     }
     const updated = touchBatch({
       ...batch,
-      status: "failed",
+      status: failure.retryable
+        ? "failed"
+        : shouldBlockFailedBatch(batch, this.requests)
+          ? "blocked"
+          : "failed",
       failure: clone(failure),
       lease: undefined,
     });
@@ -567,13 +721,27 @@ export class InMemoryHitlStore implements HitlStore {
     return clone(updated);
   }
 
-  async cancelBatch(batchId: string, reason?: string): Promise<HitlBatchRecord> {
-    const batch = mustGetBatch(this.batches, batchId);
-    if (batch.status !== "preparing" && batch.status !== "waitingForHuman") {
+  async cancelBatch(input: CancelHitlBatchInput): Promise<HitlBatchRecord> {
+    const batch = mustGetBatch(this.batches, input.batchId);
+    const reason = input.reason;
+    if (isTerminalBatchStatus(batch)) {
+      return clone(batch);
+    }
+    if (batch.status === "continuing" && input.abortContinuation !== true) {
+      return clone(batch);
+    }
+    if (
+      batch.status !== "preparing" &&
+      batch.status !== "waitingForHuman" &&
+      batch.status !== "ready" &&
+      batch.status !== "blocked" &&
+      !(batch.status === "failed" && batch.failure?.retryable === true) &&
+      !(batch.status === "continuing" && input.abortContinuation === true)
+    ) {
       throw new HitlStoreError(`Cannot cancel HITL batch from ${batch.status}`);
     }
     for (const request of this.requests.values()) {
-      if (request.batchId === batchId && request.status === "pending") {
+      if (request.batchId === input.batchId && !isTerminalRequestStatus(request.status)) {
         this.requests.set(
           request.requestId,
           touchRequest({
@@ -587,8 +755,8 @@ export class InMemoryHitlStore implements HitlStore {
         );
       }
     }
-    const steers = this.queuedSteers.get(batchId) ?? [];
-    this.queuedSteers.set(batchId, steers.map((item) => ({ ...item, status: "canceled" })));
+    const steers = this.queuedSteers.get(input.batchId) ?? [];
+    this.queuedSteers.set(input.batchId, steers.map((item) => ({ ...item, status: "canceled" })));
     const updated = touchBatch({
       ...batch,
       status: "canceled",
@@ -598,7 +766,7 @@ export class InMemoryHitlStore implements HitlStore {
       },
       lease: undefined,
     });
-    this.batches.set(batchId, updated);
+    this.batches.set(input.batchId, updated);
     return clone(updated);
   }
 
@@ -733,7 +901,7 @@ export class InMemoryHitlStore implements HitlStore {
   async cancel(requestId: string, reason?: string): Promise<HitlRequestRecord> {
     const request = mustGetRequest(this.requests, requestId);
     const batchId = requireRequestBatchId(request);
-    await this.cancelBatch(batchId, reason);
+    await this.cancelBatch({ batchId, reason });
     return clone(withLease(mustGetRequest(this.requests, requestId), this.batches.get(batchId)));
   }
 
@@ -794,6 +962,8 @@ function isResumableBatch(batch: HitlBatchRecord): boolean {
   return (
     batch.status === "ready" ||
     batch.status === "resuming" ||
+    batch.status === "blocked" ||
+    (batch.status === "continuing" && Boolean(batch.continuationOutcome)) ||
     (batch.status === "failed" && batch.failure?.retryable === true)
   );
 }
@@ -808,6 +978,15 @@ function isTerminalRequestStatus(status: HitlRequestStatus): boolean {
   );
 }
 
+function isTerminalBatchStatus(batch: HitlBatchRecord): boolean {
+  return (
+    batch.status === "completed" ||
+    batch.status === "canceled" ||
+    batch.status === "expired" ||
+    (batch.status === "failed" && batch.failure?.retryable !== true)
+  );
+}
+
 function isSteerQueueOpenBatch(batch: HitlBatchRecord): boolean {
   return STEER_QUEUE_OPEN_BATCH_STATUSES.has(batch.status) && !batch.metadata?.["steerQueueClosedAt"];
 }
@@ -816,7 +995,44 @@ function isConversationOpenBatch(batch: HitlBatchRecord): boolean {
   return (
     CONVERSATION_OPEN_BATCH_STATUSES.has(batch.status) ||
     (batch.status === "failed" && batch.failure?.retryable === true)
-  ) && !batch.metadata?.["steerQueueClosedAt"];
+  );
+}
+
+function shouldBlockFailedBatch(
+  batch: HitlBatchRecord,
+  requests: Map<string, HitlRequestRecord>,
+): boolean {
+  if (batch.continuationOutcome?.outcome === "errored" || batch.continuationOutcome?.outcome === "aborted") {
+    return false;
+  }
+  if (batch.status === "continuing") {
+    return true;
+  }
+  if (batch.toolExecutions.some((marker) => marker.phase === "resume")) {
+    return true;
+  }
+  for (const request of requests.values()) {
+    if (request.batchId === batch.batchId && request.status === "blocked") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function continuationOutcomesMatch(
+  left: HitlContinuationOutcome,
+  right: HitlContinuationOutcome,
+): boolean {
+  if (left.outcome !== right.outcome) {
+    return false;
+  }
+  if (left.continuationTurnId !== right.continuationTurnId) {
+    return false;
+  }
+  if (left.outcome === "spawnedChild" && right.outcome === "spawnedChild") {
+    return left.childBatchId === right.childBatchId;
+  }
+  return true;
 }
 
 function hasPendingRequests(batchId: string, requests: Map<string, HitlRequestRecord>): boolean {

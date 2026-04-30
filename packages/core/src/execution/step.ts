@@ -8,6 +8,7 @@ import type {
   HitlStore,
   HitlRequestRecord,
   HitlResponseSchema,
+  HitlLeaseGuard,
   JsonObject,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
@@ -67,9 +68,13 @@ export async function executeStep(
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
     hitlStore?: HitlStore;
+    parentHitlBatch?: {
+      batchId: string;
+      guard: HitlLeaseGuard;
+    };
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, hitlStore } = deps;
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, hitlStore, parentHitlBatch } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -230,32 +235,54 @@ export async function executeStep(
             };
           });
 
-        const created = await hitlStore.createBatch({
-          batch: {
-            batchId,
-            status: "preparing",
-            agentName,
-            conversationId,
-            turnId,
-            stepNumber,
-            toolCalls: plannedToolCalls.map((tc) => ({
-              toolCallId: tc.toolCallId,
-              toolCallIndex: tc.toolCallIndex,
-              toolName: tc.toolName,
-              toolArgs: tc.args,
-              requiresHitl: tc.requiresHitl,
-              ...(tc.requestId ? { requestId: tc.requestId } : {}),
-            })),
-            toolResults: [],
-            toolExecutions: [],
-            conversationEvents: [...stepCtx.conversation.events],
-            createdAt: now,
-            updatedAt: now,
-          },
-          requests,
-        });
-        if (created.status === "conflict") {
-          throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
+        const childBatch = {
+          batchId,
+          status: "preparing" as const,
+          agentName,
+          conversationId,
+          turnId,
+          stepNumber,
+          toolCalls: plannedToolCalls.map((tc) => ({
+            toolCallId: tc.toolCallId,
+            toolCallIndex: tc.toolCallIndex,
+            toolName: tc.toolName,
+            toolArgs: tc.args,
+            requiresHitl: tc.requiresHitl,
+            ...(tc.requestId ? { requestId: tc.requestId } : {}),
+          })),
+          toolResults: [],
+          toolExecutions: [],
+          conversationEvents: [...stepCtx.conversation.events],
+          createdAt: now,
+          updatedAt: now,
+          ...(parentHitlBatch ? { parentBatchId: parentHitlBatch.batchId } : {}),
+        };
+
+        if (parentHitlBatch) {
+          const nonHitlPeer = plannedToolCalls.find((tc) => !tc.requiresHitl);
+          if (nonHitlPeer) {
+            throw new Error("Chained HITL steps cannot mix HITL requests with non-HITL peer tool calls");
+          }
+          await hitlStore.spawnChildBatch({
+            parentBatchId: parentHitlBatch.batchId,
+            parentCompletion: {
+              completedAt: now,
+              continuationTurnId: turnId,
+              outcome: "spawnedChild",
+              childBatchId: batchId,
+            },
+            childBatch,
+            childRequests: requests,
+            guard: parentHitlBatch.guard,
+          });
+        } else {
+          const created = await hitlStore.createBatch({
+            batch: childBatch,
+            requests,
+          });
+          if (created.status === "conflict") {
+            throw new Error(`Conversation already has an open HITL batch: ${created.openBatch.batchId}`);
+          }
         }
 
         let exposedForHuman = false;
@@ -507,6 +534,7 @@ async function executeNonHitlToolCall(
   if (deps.batchId && deps.hitlStore) {
     await deps.hitlStore.startBatchToolExecution(deps.batchId, {
       batchId: deps.batchId,
+      phase: "pre-resume",
       toolCallId: tc.toolCallId,
       toolCallIndex: tc.toolCallIndex,
       toolName: tc.toolName,
@@ -570,5 +598,8 @@ async function closeUnexposedHitlBatchAfterPreparationFailure(
     return;
   }
 
-  await hitlStore.cancelBatch(batchId, "HITL batch preparation failed before peer execution").catch(() => undefined);
+  await hitlStore.cancelBatch({
+    batchId,
+    reason: "HITL batch preparation failed before peer execution",
+  }).catch(() => undefined);
 }

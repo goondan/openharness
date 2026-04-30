@@ -102,10 +102,13 @@ export interface HitlBatchToolCallSnapshot {
 
 export interface HitlBatchToolExecutionMarker {
   batchId?: string;
+  phase: "pre-resume" | "resume";
   toolCallId: string;
   toolCallIndex: number;
   toolName: string;
   requestId?: string;
+  ownerId?: string;
+  fencingToken?: string;
   startedAt: string;
 }
 
@@ -131,8 +134,16 @@ export interface HitlBatchAppendCommit {
 export interface HitlBatchCompletion {
   completedAt: string;
   continuationTurnId: string;
-  continuationStatus: "completed" | "maxStepsReached" | "waitingForHuman";
+  outcome: "completed" | "maxStepsReached" | "spawnedChild";
+  childBatchId?: string;
 }
+
+export type HitlContinuationOutcome =
+  | { outcome: "completed"; recordedAt: string; continuationTurnId: string }
+  | { outcome: "maxStepsReached"; recordedAt: string; continuationTurnId: string }
+  | { outcome: "aborted"; recordedAt: string; continuationTurnId: string }
+  | { outcome: "errored"; recordedAt: string; continuationTurnId: string; error?: string }
+  | { outcome: "spawnedChild"; recordedAt: string; continuationTurnId: string; childBatchId: string };
 
 export interface HitlBatchRecord {
   batchId: string;
@@ -149,8 +160,11 @@ export interface HitlBatchRecord {
   updatedAt: string;
   lease?: HitlLease;
   appendCommit?: HitlBatchAppendCommit;
+  continuationOutcome?: HitlContinuationOutcome;
   completion?: HitlBatchCompletion;
   failure?: HitlFailure;
+  parentBatchId?: string;
+  childBatchId?: string;
   metadata?: Record<string, JsonValue>;
 }
 
@@ -202,18 +216,32 @@ export interface HitlRequestFilter {
   status?: HitlRequestStatus | HitlRequestStatus[];
 }
 
-export interface HitlQueuedSteerInput {
-  source: "ingress" | "dispatch";
-  envelope: InboundEnvelope;
-  receivedAt: string;
-  metadata?: Record<string, JsonValue>;
+export type HitlQueuedSteerInput =
+  | {
+      source: "ingress";
+      envelope: InboundEnvelope;
+      receivedAt: string;
+      metadata?: Record<string, JsonValue>;
+    }
+  | {
+      source: "direct";
+      input: HitlDirectProcessTurnInput;
+      receivedAt: string;
+      metadata?: Record<string, JsonValue>;
+    };
+
+export interface HitlDirectProcessTurnInput {
+  agentName: string;
+  conversationId: string;
+  content: MessageEvent[] | string | InboundEnvelope;
+  options?: JsonObject;
 }
 
-export interface HitlQueuedSteer extends HitlQueuedSteerInput {
+export type HitlQueuedSteer = HitlQueuedSteerInput & {
   queuedInputId: string;
   batchId: string;
   status: "queued" | "draining" | "drained" | "canceled";
-}
+};
 
 export type CreateHitlBatchResult =
   | { status: "created"; batch: HitlBatchRecord; requests: HitlRequestRecord[] }
@@ -247,6 +275,8 @@ export type ResumeHitlResult =
   | { status: "completed"; batch: HitlBatchView; result?: ToolResult }
   | { status: "scheduled"; batchId: string }
   | { status: "alreadyCompleted"; batch: HitlBatchView }
+  | { status: "alreadyTerminal"; batch: HitlBatchView }
+  | { status: "blocked"; batch: HitlBatchView }
   | { status: "notReady"; batch: HitlBatchView; pendingRequestIds: string[] }
   | { status: "notFound"; batchId?: string; requestId?: string }
   | { status: "leaseConflict"; batch: HitlBatchView | null }
@@ -256,15 +286,18 @@ export type ResumeHitlResult =
 export interface CancelHitlBatchInput {
   batchId: string;
   reason?: string;
+  abortContinuation?: boolean;
 }
 
 export interface CancelHitlInput {
   requestId: string;
   reason?: string;
+  abortContinuation?: boolean;
 }
 
 export type CancelHitlResult =
   | { status: "canceled"; batch: HitlBatchView }
+  | { status: "alreadyTerminal"; batch: HitlBatchView }
   | { status: "notFound"; batchId?: string; requestId?: string }
   | { status: "notCancelable"; batch: HitlBatchView }
   | { status: "error"; batchId?: string; requestId?: string; batch?: HitlBatchView; error: string };
@@ -310,9 +343,21 @@ export interface HitlStore {
   completeRequest(requestId: string, completion: HitlCompletion, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
   failRequest(requestId: string, failure: HitlFailure, guard: HitlLeaseGuard): Promise<HitlRequestRecord>;
   commitBatchAppend(batchId: string, appendCommit: HitlBatchAppendCommit, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  recordContinuationOutcome(
+    batchId: string,
+    outcome: HitlContinuationOutcome,
+    guard: HitlLeaseGuard,
+  ): Promise<HitlBatchRecord>;
   completeBatch(batchId: string, completion: HitlBatchCompletion, guard: HitlLeaseGuard): Promise<HitlBatchRecord>;
+  spawnChildBatch(input: {
+    parentBatchId: string;
+    parentCompletion: HitlBatchCompletion;
+    childBatch: HitlBatchRecord;
+    childRequests: HitlRequestRecord[];
+    guard: HitlLeaseGuard;
+  }): Promise<{ parent: HitlBatchRecord; child: HitlBatchRecord }>;
   failBatch(batchId: string, failure: HitlFailure, guard?: HitlLeaseGuard): Promise<HitlBatchRecord>;
-  cancelBatch(batchId: string, reason?: string): Promise<HitlBatchRecord>;
+  cancelBatch(input: CancelHitlBatchInput): Promise<HitlBatchRecord>;
   releaseBatchLease(batchId: string, guard: HitlLeaseGuard): Promise<void>;
 }
 

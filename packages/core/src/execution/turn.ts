@@ -8,6 +8,7 @@ import type {
   LlmClient,
   LlmUsage,
   HitlStore,
+  HitlLeaseGuard,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -92,6 +93,8 @@ function appendSteeredInputs(
 async function queueSteeredInputsForHitl(
   hitlStore: HitlStore | undefined,
   batchId: string | undefined,
+  agentName: string,
+  conversationId: string,
   steering: TurnSteeringController | undefined,
 ): Promise<number> {
   if (!hitlStore || !batchId || !steering) {
@@ -103,7 +106,7 @@ async function queueSteeredInputsForHitl(
     const inputs = steering.peek();
     let queued = 0;
     for (const input of inputs) {
-      await enqueueSteerWithRetry(hitlStore, batchId, input);
+      await enqueueSteerWithRetry(hitlStore, batchId, agentName, conversationId, input);
       steering.ack(1);
       queued++;
     }
@@ -113,7 +116,7 @@ async function queueSteeredInputsForHitl(
   const inputs = steering.drain();
   let queued = 0;
   for (const input of inputs) {
-    await enqueueSteerWithRetry(hitlStore, batchId, input);
+    await enqueueSteerWithRetry(hitlStore, batchId, agentName, conversationId, input);
     queued++;
   }
   return queued;
@@ -122,15 +125,25 @@ async function queueSteeredInputsForHitl(
 async function enqueueSteerWithRetry(
   hitlStore: HitlStore,
   batchId: string,
+  agentName: string,
+  conversationId: string,
   input: InboundEnvelope,
 ): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await hitlStore.enqueueSteer(batchId, {
-        source: "dispatch",
-        envelope: input,
+        source: "direct",
+        input: {
+          agentName,
+          conversationId,
+          content: extractText(input),
+          options: {},
+        },
         receivedAt: new Date().toISOString(),
+        metadata: {
+          envelopeName: input.name,
+        },
       });
       return;
     } catch (err) {
@@ -328,7 +341,7 @@ export async function executeTurn(
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
-        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, steering);
+        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, agentName, conversationId, steering);
         return {
           turnId,
           agentName,
@@ -471,6 +484,10 @@ export async function executeContinuationTurn(
     hitlStore?: HitlStore;
     abortController?: AbortController;
     steering?: TurnSteeringController;
+    parentHitlBatch?: {
+      batchId: string;
+      guard: HitlLeaseGuard;
+    };
   },
 ): Promise<TurnResult> {
   const { llmClient, toolRegistry, middlewareRegistry, eventBus, conversationState, maxSteps, hitlStore, steering } =
@@ -535,6 +552,7 @@ export async function executeContinuationTurn(
         middlewareRegistry,
         eventBus,
         hitlStore,
+        parentHitlBatch: deps.parentHitlBatch,
       });
 
       const stepSummary: StepSummary = {
@@ -553,7 +571,7 @@ export async function executeContinuationTurn(
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
 
       if (lastStepResult.pendingHitlRequestIds && lastStepResult.pendingHitlRequestIds.length > 0) {
-        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, steering);
+        await queueSteeredInputsForHitl(hitlStore, lastStepResult.pendingHitlBatchId, agentName, conversationId, steering);
         result = {
           turnId,
           agentName,
