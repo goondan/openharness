@@ -334,3 +334,4 @@ interface DurableInboundStore {
 - Given durable inbound mode가 꺼져 있고 conversation이 human approval로 blocked 상태다, When ingress event가 들어온다, Then runtime은 envelope를 drop하지 않고 명시적 오류를 반환한다.
 - Given active Turn으로 delivered 된 item이 consume 되기 전에 Human Approval이 생성된다, When Turn이 waiting 상태로 전환된다, Then delivered item은 `blockedBy=humanApproval`로 재분류되어 resume drain 대상이 된다.
 - Given active Turn이 no-tool-call step으로 완료되려는 순간 새 inbound item이 steered 된다, When completion boundary가 실행된다, Then item은 같은 Turn의 다음 step에서 consumed 되거나 durable retry 가능한 상태로 돌아가며 `delivered`에 stranded 되지 않는다.
+- Given human approval이 operator cancel로 해제되고 blocked inbound item이 pending으로 release 된다, When cancel API가 반환된다, Then runtime은 release된 item을 scheduler에 다시 전달해 pending 상태로 방치하지 않는다.

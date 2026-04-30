@@ -120,7 +120,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Main Flow:
   1. runtime은 approval/task scope를 검증한다.
   2. store는 approval을 `canceled` 또는 `expired`로 전환한다.
-  3. operator cancel 기본 정책은 blocker를 해제하고 blocked inbound items를 sequence order로 `pending`에 되돌린다.
+  3. operator cancel 기본 정책은 blocker를 해제하고 blocked inbound items를 sequence order로 `pending`에 되돌린 뒤 scheduler에 다시 전달한다.
   4. expiry/TTL cancel 기본 정책은 blocked inbound items를 `deadLetter`로 전환한다.
   5. operator가 explicit dead-letter 또는 operatorHold를 지정하면 그 정책이 기본 정책보다 우선한다.
 - Outputs:

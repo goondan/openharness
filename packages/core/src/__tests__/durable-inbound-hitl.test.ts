@@ -899,16 +899,23 @@ describe("durable inbound and Human Approval integration", () => {
       conversationId: "conv-cancel-human",
       statuses: ["blocked"],
     });
-    const pendingItems = await inboundStore.listInboundItems({
+    let consumedItems = await inboundStore.listInboundItems({
       conversationId: "conv-cancel-human",
-      statuses: ["pending"],
+      statuses: ["consumed"],
     });
+    for (let attempt = 0; attempt < 10 && !consumedItems.some((item) => item.id === blocked.inboundItemId); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      consumedItems = await inboundStore.listInboundItems({
+        conversationId: "conv-cancel-human",
+        statuses: ["consumed"],
+      });
+    }
 
     expect(canceled?.status).toBe("canceled");
     expect(canceledEvents).toHaveLength(1);
     expect((canceledEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(false);
-    expect(pendingItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
+    expect(consumedItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 
     await runtime.close();
   });

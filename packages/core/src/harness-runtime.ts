@@ -1061,11 +1061,28 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   reason: cancelInput.reason ?? `Human approval "${gate.id}" expired.`,
                 })));
               } else {
-                await (this._durableInboundStore as any).releaseBlockedInboundItems?.({
-                  agentName: gate.toolCall.agentName,
-                  conversationId: gate.toolCall.conversationId,
-                  blockedBy: gate.blocker,
-                });
+                let releasedItems: DurableInboundItem[] = [];
+                if ((this._durableInboundStore as any).releaseBlockedInboundItems) {
+                  releasedItems = await (this._durableInboundStore as any).releaseBlockedInboundItems({
+                    agentName: gate.toolCall.agentName,
+                    conversationId: gate.toolCall.conversationId,
+                    blockedBy: gate.blocker,
+                  });
+                } else {
+                  const blockedItems = await this._durableInboundStore.listInboundItems({
+                    agentName: gate.toolCall.agentName,
+                    conversationId: gate.toolCall.conversationId,
+                    status: ["blocked"],
+                    statuses: ["blocked"],
+                    blockedBy: gate.blocker,
+                  } as any);
+                  releasedItems = await Promise.all(blockedItems.map((item: any) =>
+                    this._durableInboundStore!.releaseInboundItem
+                      ? this._durableInboundStore!.releaseInboundItem({ id: item.id } as any)
+                      : this._durableInboundStore!.retryInboundItem(item.id),
+                  ));
+                }
+                await Promise.all(releasedItems.map((item) => this._scheduleDurableInboundItem(item as any)));
               }
             }
             return gate;
