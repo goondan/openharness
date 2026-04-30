@@ -199,9 +199,9 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   const durableInboundStore = config.durableInbound?.enabled === false
     ? undefined
     : config.durableInbound?.store;
-  const humanGateStore = config.humanGate?.store;
+  const humanGateStore = config.humanApproval?.store ?? config.humanGate?.store;
   if (humanGateStore && !durableInboundStore) {
-    throw new ConfigError("humanGate requires durableInbound.store.");
+    throw new ConfigError("humanApproval requires durableInbound.store.");
   }
 
   // Create the runtime first (we need a reference for dispatchTurn)
@@ -288,27 +288,17 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
         const activeTurn = runtimeRef.getActiveTurn(agentName, conversationId);
         if (activeTurn) {
-          const commitRef = inboundUserMessageCommitRef(appended.item.id);
-          const steered = runtimeRef.steerTurn(agentName, {
+          const delivered = await runtimeRef.deliverInboundToActiveTurn(
+            agentName,
+            conversationId,
             envelope,
-            inboundItem: appended.item as any,
-            commitRef,
-          }, conversationId);
-          if (steered) {
-            const delivered = await durableInboundStore.markDelivered({
-              id: appended.item.id,
-              turnId: activeTurn.turnId,
-            });
-            ingressEventBus.emit("inbound.delivered", {
-              type: "inbound.delivered",
-              inboundItemId: delivered.id,
-              turnId: activeTurn.turnId,
-              sequence: delivered.sequence,
-            });
+            appended.item as any,
+          );
+          if (delivered) {
             return {
-              turnId: activeTurn.turnId,
+              turnId: delivered.turnId,
               disposition: "delivered" as const,
-              inboundItemId: delivered.id,
+              inboundItemId: delivered.item.id,
             };
           }
         }

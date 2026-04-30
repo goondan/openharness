@@ -16,9 +16,10 @@ vi.mock("../models/index.js", () => ({
   createLlmClient: vi.fn(() => currentClient),
 }));
 
-function mockClient(response: LlmResponse): LlmClient {
+function mockClient(response: LlmResponse | LlmResponse[]): LlmClient {
+  const responses = Array.isArray(response) ? [...response] : [response];
   return {
-    chat: vi.fn().mockResolvedValue(response),
+    chat: vi.fn(async () => responses.shift() ?? responses[responses.length - 1] ?? { text: "ok", toolCalls: [] }),
   };
 }
 
@@ -109,6 +110,18 @@ describe("durable inbound and Human Gate integration", () => {
     expect(reacquired).toBeNull();
     expect(items[0].status).toBe("delivered");
     expect(items[0].turnId).toBe("turn-delivered");
+
+    const retried = await inboundStore.retryInboundItem(appended.item.id);
+    expect(retried.status).toBe("pending");
+    expect(retried.turnId).toBeUndefined();
+
+    const reacquiredAfterRetry = await inboundStore.acquireNext({
+      agentName: "default",
+      conversationId: "conv-delivered",
+      leaseOwner: "worker-3",
+      now: "2026-01-01T00:01:02.000Z",
+    });
+    expect(reacquiredAfterRetry?.id).toBe(appended.item.id);
   });
 
   it("appends ingress input before returning a durable accepted result", async () => {
@@ -132,6 +145,64 @@ describe("durable inbound and Human Gate integration", () => {
     });
     expect(items).toHaveLength(1);
     expect(items[0].id).toBe(accepted[0].inboundItemId);
+
+    await runtime.close();
+  });
+
+  it("marks active-turn delivery in the durable store before notifying memory steering", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const markDelivered = vi.fn(async () => {
+      throw new Error("markDelivered failed");
+    });
+    const store = new Proxy(inboundStore, {
+      get(target, property, receiver) {
+        if (property === "markDelivered") {
+          return markDelivered;
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    let resolveChat!: (response: LlmResponse) => void;
+    const chat = vi.fn(() => new Promise<LlmResponse>((resolve) => {
+      resolveChat = resolve;
+    }));
+    currentClient = { chat };
+
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: store as any },
+    }));
+
+    const turnPromise = runtime.processTurn("default", "active turn", {
+      conversationId: "conv-store-first",
+      idempotencyKey: "direct-store-first",
+    });
+    for (let attempt = 0; attempt < 10 && chat.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    await expect(runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "must not reach memory before delivered" }],
+        properties: { id: "evt-store-first" },
+        conversationId: "conv-store-first",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: new Date().toISOString(),
+        },
+      },
+    })).rejects.toThrow(/markDelivered failed/);
+
+    resolveChat({ text: "done", toolCalls: [] });
+    await expect(turnPromise).resolves.toMatchObject({ status: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(markDelivered).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledTimes(1);
 
     await runtime.close();
   });
@@ -390,6 +461,60 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
+  it("retries a delivered inbound item through the control API", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const appended = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-retry-delivered",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "recover delivered" }],
+        properties: { id: "evt-retry-delivered" },
+        conversationId: "conv-retry-delivered",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-retry-delivered",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-retry-delivered:evt-retry-delivered",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    await inboundStore.markDelivered({
+      id: appended.item.id,
+      turnId: "turn-crashed-before-consume",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+
+    currentClient = mockClient({ text: "recovered", toolCalls: [] });
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const retried = await runtime.control.retryInboundItem?.(appended.item.id);
+    expect(retried?.status).toBe("pending");
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const [item] = await inboundStore.listInboundItems({ conversationId: "conv-retry-delivered" });
+      if (item?.status === "consumed") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    const [item] = await inboundStore.listInboundItems({ conversationId: "conv-retry-delivered" });
+    expect(item.status).toBe("consumed");
+    expect(item.commitRef).toBe(`inbound:${appended.item.id}:user-message`);
+
+    await runtime.close();
+  });
+
   it("creates a durable Human Gate before running a guarded tool handler", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanGateStore = createInMemoryHumanGateStore();
@@ -398,13 +523,19 @@ describe("durable inbound and Human Gate integration", () => {
       name: "guarded",
       description: "guarded tool",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      humanGate: { required: true, prompt: "Approve?" },
+      humanApproval: { required: true, prompt: "Approve?" },
       handler: toolHandler,
     };
-    currentClient = mockClient({
-      text: "need tool",
-      toolCalls: [{ toolCallId: "call-1", toolName: "guarded", args: {} }],
-    });
+    currentClient = mockClient([
+      {
+        text: "need tool",
+        toolCalls: [{ toolCallId: "call-1", toolName: "guarded", args: {} }],
+      },
+      {
+        text: "approved and continued",
+        toolCalls: [],
+      },
+    ]);
 
     const runtime = await createHarness(baseConfig({
       agents: {
@@ -414,7 +545,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }));
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -455,6 +586,8 @@ describe("durable inbound and Human Gate integration", () => {
     const resumed = await runtime.control.resumeHumanGate?.(tasks[0].humanGateId);
 
     expect(resumed?.status).toBe("completed");
+    expect(resumed?.continuation?.status).toBe("completed");
+    expect(resumed?.continuation?.text).toBe("approved and continued");
     expect(toolHandler).toHaveBeenCalledOnce();
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-human",
@@ -473,7 +606,7 @@ describe("durable inbound and Human Gate integration", () => {
       name: "guarded",
       description: "guarded tool",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      humanGate: { required: true, prompt: "Approve?" },
+      humanApproval: { required: true, prompt: "Approve?" },
       handler: toolHandler,
     };
     let resolveChat!: (response: LlmResponse) => void;
@@ -490,7 +623,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }));
 
     const turnPromise = runtime.processTurn("default", "run guarded", {
@@ -591,7 +724,7 @@ describe("durable inbound and Human Gate integration", () => {
       name: "guarded",
       description: "guarded tool",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      humanGate: { required: true, prompt: "Approve?" },
+      humanApproval: { required: true, prompt: "Approve?" },
       handler: toolHandler,
     };
     currentClient = mockClient({
@@ -607,7 +740,7 @@ describe("durable inbound and Human Gate integration", () => {
         },
       },
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }));
 
     const result = await runtime.processTurn("default", "run guarded", {
@@ -655,7 +788,7 @@ describe("durable inbound and Human Gate integration", () => {
     const humanGateStore = createInMemoryHumanGateStore();
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }));
 
     await expect(runtime.control.resumeHumanGate?.("missing-gate")).rejects.toThrow(/Unknown human gate/);
@@ -670,7 +803,7 @@ describe("durable inbound and Human Gate integration", () => {
       name: "guarded",
       description: "guarded tool",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      humanGate: { required: true, prompt: "Approve?" },
+      humanApproval: { required: true, prompt: "Approve?" },
       handler: toolHandler,
     };
     currentClient = mockClient({
@@ -685,12 +818,12 @@ describe("durable inbound and Human Gate integration", () => {
           tools: [guardedTool],
         },
       },
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }))).rejects.toThrow(/requires durableInbound\.store/);
 
     await expect(createHarness(baseConfig({
       connections: undefined,
-      humanGate: { store: humanGateStore as any },
+      humanApproval: { store: humanGateStore as any },
     }))).rejects.toThrow(/requires durableInbound\.store/);
   });
 });

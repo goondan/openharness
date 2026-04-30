@@ -181,6 +181,35 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     return `${agentName}::${conversationId}`;
   }
 
+  private _getConversationState(agentName: string, conversationId: string): ConversationStateImpl {
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    let conversationState = this._conversations.get(conversationKey);
+    if (!conversationState) {
+      conversationState = createConversationState();
+      this._conversations.set(conversationKey, conversationState);
+    }
+    return conversationState;
+  }
+
+  private _createSteeringInbox(turnId: string): SteeringInbox {
+    return new SteeringInbox(async (steered) => {
+      if (!this._durableInboundStore || !steered.inboundItem || !steered.commitRef) {
+        return;
+      }
+      await this._durableInboundStore.markConsumed({
+        id: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      } as any);
+      this._runtimeEvents.emit("inbound.consumed", {
+        type: "inbound.consumed",
+        inboundItemId: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      });
+    });
+  }
+
   private async _processTurnInternal(
     agentName: string,
     input: string | InboundEnvelope,
@@ -207,30 +236,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     const conversationKey = this._conversationKey(agentName, conversationId);
 
-    let conversationState = this._conversations.get(conversationKey);
-    if (!conversationState) {
-      conversationState = createConversationState();
-      this._conversations.set(conversationKey, conversationState);
-    }
+    const conversationState = this._getConversationState(agentName, conversationId);
 
     const abortController = new AbortController();
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
-    const steeringInbox = new SteeringInbox(async (steered) => {
-      if (!this._durableInboundStore || !steered.inboundItem || !steered.commitRef) {
-        return;
-      }
-      await this._durableInboundStore.markConsumed({
-        id: steered.inboundItem.id,
-        turnId,
-        commitRef: steered.commitRef,
-      } as any);
-      this._runtimeEvents.emit("inbound.consumed", {
-        type: "inbound.consumed",
-        inboundItemId: steered.inboundItem.id,
-        turnId,
-        commitRef: steered.commitRef,
-      });
-    });
+    const steeringInbox = this._createSteeringInbox(turnId);
     const trackedTurn = createDeferred<TurnResult>();
 
     const inFlightTurn: InFlightTurn = {
@@ -303,6 +313,205 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         this._activeTurnByConversation.delete(conversationKey);
       }
     }
+  }
+
+  private async _continueTurnInternal(
+    agentName: string,
+    conversationId: string,
+  ): Promise<TurnResult> {
+    if (this._closed) {
+      throw new HarnessError("Runtime is closed");
+    }
+
+    const agentDeps = this._agents.get(agentName);
+    if (!agentDeps) {
+      throw new ConfigError(`Unknown agent: "${agentName}"`);
+    }
+
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const conversationState = this._getConversationState(agentName, conversationId);
+    const abortController = new AbortController();
+    const turnId = `turn-${randomUUID()}`;
+    const steeringInbox = this._createSteeringInbox(turnId);
+    const trackedTurn = createDeferred<TurnResult>();
+
+    const inFlightTurn: InFlightTurn = {
+      turnId,
+      agentName,
+      conversationId,
+      abortController,
+      promise: trackedTurn.promise,
+      steeringInbox,
+    };
+
+    this._inFlightTurns.set(turnId, inFlightTurn);
+    this._activeTurnByConversation.set(conversationKey, inFlightTurn);
+
+    const resumeEnvelope: InboundEnvelope = {
+      name: "humanApproval.resume",
+      content: [],
+      properties: {},
+      conversationId,
+      source: {
+        connector: "humanApproval",
+        connectionName: "humanApproval",
+        receivedAt: new Date().toISOString(),
+      },
+      metadata: {
+        __createdBy: "core",
+        __humanApprovalContinuation: true,
+      },
+    };
+
+    try {
+      const turnPromise = executeTurn(agentName, resumeEnvelope, { conversationId, turnId }, {
+        llmClient: agentDeps.llmClient,
+        toolRegistry: agentDeps.toolRegistry,
+        middlewareRegistry: agentDeps.middlewareRegistry,
+        eventBus: agentDeps.eventBus,
+        conversationState,
+        maxSteps: agentDeps.maxSteps,
+        abortController,
+        steering: steeringInbox,
+        humanGateStore: this._humanGateStore as any,
+        skipInputAppend: true,
+        consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          await this._durableInboundStore.markConsumed({
+            id: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          } as any);
+          this._runtimeEvents.emit("inbound.consumed", {
+            type: "inbound.consumed",
+            inboundItemId: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          });
+        },
+        blockInboundItem: async ({ item, blocker }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          const blocked = await this._durableInboundStore.markBlocked({
+            id: item.id,
+            blockedBy: blocker,
+          } as any);
+          this._runtimeEvents.emit("inbound.blocked", {
+            type: "inbound.blocked",
+            inboundItemId: blocked.id,
+            blockedBy: blocker,
+          } as any);
+        },
+      });
+      void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
+    } catch (err) {
+      trackedTurn.reject(err);
+    }
+
+    try {
+      return await trackedTurn.promise;
+    } finally {
+      steeringInbox.close();
+      this._inFlightTurns.delete(turnId);
+      if (this._activeTurnByConversation.get(conversationKey)?.turnId === turnId) {
+        this._activeTurnByConversation.delete(conversationKey);
+      }
+    }
+  }
+
+  async deliverInboundToActiveTurn(
+    agentName: string,
+    conversationId: string,
+    envelope: InboundEnvelope,
+    item: DurableInboundItem,
+  ): Promise<{ turnId: string; item: DurableInboundItem; promise: Promise<TurnResult> } | null> {
+    if (!this._durableInboundStore) {
+      return null;
+    }
+
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    if (!activeTurn) {
+      return null;
+    }
+
+    const delivered = await this._durableInboundStore.markDelivered({
+      id: item.id,
+      turnId: activeTurn.turnId,
+    } as any);
+    const commitRef = inboundUserMessageCommitRef(delivered.id);
+    const enqueued = activeTurn.steeringInbox.enqueue({
+      envelope,
+      inboundItem: delivered as any,
+      commitRef,
+    });
+    if (!enqueued) {
+      await this._durableInboundStore.retryInboundItem(delivered.id);
+      return null;
+    }
+
+    this._runtimeEvents.emit("inbound.delivered", {
+      type: "inbound.delivered",
+      inboundItemId: delivered.id,
+      turnId: activeTurn.turnId,
+      sequence: delivered.sequence,
+    });
+    return { turnId: activeTurn.turnId, item: delivered, promise: activeTurn.promise };
+  }
+
+  private async _scheduleDurableInboundItem(item: DurableInboundItem): Promise<void> {
+    if (!this._durableInboundStore) {
+      return;
+    }
+
+    const blocker = await (this._humanGateStore as any)?.getConversationBlocker?.({
+      agentName: item.agentName,
+      conversationId: item.conversationId,
+    });
+    if (blocker) {
+      const blocked = await this._durableInboundStore.markBlocked({
+        id: item.id,
+        blockedBy: blocker,
+      } as any);
+      this._runtimeEvents.emit("inbound.blocked", {
+        type: "inbound.blocked",
+        inboundItemId: blocked.id,
+        blockedBy: blocker,
+      } as any);
+      return;
+    }
+
+    const delivered = await this.deliverInboundToActiveTurn(
+      item.agentName,
+      item.conversationId,
+      item.envelope,
+      item,
+    );
+    if (delivered) {
+      return;
+    }
+
+    const turnId = `turn-${randomUUID()}`;
+    this.dispatchTurn(item.agentName, item.envelope, { conversationId: item.conversationId, turnId }, {
+      item,
+      commitRef: inboundUserMessageCommitRef(item.id),
+    } as any)
+      .then((result) => {
+        this._turnResultByInboundItem.set(item.id, result);
+      })
+      .catch((err) => {
+        this._runtimeEvents.emit("turn.error", {
+          type: "turn.error",
+          turnId,
+          agentName: item.agentName,
+          conversationId: item.conversationId,
+          status: "error",
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      });
   }
 
   // -----------------------------------------------------------------------
@@ -390,24 +599,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       const conversationKey = this._conversationKey(agentName, conversationId);
       const activeTurn = this._activeTurnByConversation.get(conversationKey);
       if (activeTurn) {
-        const commitRef = inboundUserMessageCommitRef(appended.item.id);
-        const steered = activeTurn.steeringInbox.enqueue({
-          envelope,
-          inboundItem: appended.item as any,
-          commitRef,
-        });
-        if (steered) {
-          const delivered = await this._durableInboundStore.markDelivered({
-            id: appended.item.id,
-            turnId: activeTurn.turnId,
-          } as any);
-          this._runtimeEvents.emit("inbound.delivered", {
-            type: "inbound.delivered",
-            inboundItemId: delivered.id,
-            turnId: activeTurn.turnId,
-            sequence: delivered.sequence,
-          });
-          return activeTurn.promise;
+        const delivered = await this.deliverInboundToActiveTurn(agentName, conversationId, envelope, appended.item as any);
+        if (delivered) {
+          return delivered.promise;
         }
       }
       const result = await this._processTurnInternal(agentName, envelope, { ...options, conversationId }, {
@@ -508,16 +702,24 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         ? async (filter = {}) => this._durableInboundStore!.listInboundItems(filter)
         : undefined,
       retryInboundItem: this._durableInboundStore
-        ? async (id: string) => this._durableInboundStore!.retryInboundItem(id)
+        ? async (id: string) => {
+            const item = await this._durableInboundStore!.retryInboundItem(id);
+            void this._scheduleDurableInboundItem(item as any);
+            return item;
+          }
         : undefined,
       releaseInboundItem: this._durableInboundStore
         ? async (input: any) => {
+            let item: DurableInboundItem;
             if (this._durableInboundStore!.releaseInboundItem) {
-              return this._durableInboundStore!.releaseInboundItem(
+              item = await this._durableInboundStore!.releaseInboundItem(
                 typeof input === "string" ? { id: input } : input,
               );
+            } else {
+              item = await this._durableInboundStore!.retryInboundItem(typeof input === "string" ? input : input.id);
             }
-            return this._durableInboundStore!.retryInboundItem(typeof input === "string" ? input : input.id);
+            void this._scheduleDurableInboundItem(item as any);
+            return item;
           }
         : undefined,
       deadLetterInboundItem: this._durableInboundStore
@@ -570,6 +772,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 gate: existing,
               } as any;
             }
+            let completedGate: any;
             try {
               const toolCall = (gate as any).toolCall;
               const agentDeps = this._agents.get(toolCall.agentName);
@@ -641,6 +844,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 }
               }
 
+              const blockedInboundItemIds: string[] = [];
               conversationState._turnActive = true;
               try {
                 conversationState.emit({
@@ -708,24 +912,49 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     turnId: toolCall.turnId,
                     commitRef,
                   } as any);
+                  blockedInboundItemIds.push(item.id);
+                  this._runtimeEvents.emit("inbound.consumed", {
+                    type: "inbound.consumed",
+                    inboundItemId: item.id,
+                    turnId: toolCall.turnId,
+                    commitRef,
+                  });
                 }
+
+                completedGate = await this._humanGateStore!.markGateCompleted({
+                  humanGateId: id,
+                  turnId: toolCall.turnId,
+                  blockedInboundItemIds,
+                } as any);
               } finally {
                 conversationState._turnActive = false;
               }
-
-              const completed = await this._humanGateStore!.markGateCompleted({
-                humanGateId: id,
-                turnId: toolCall.turnId,
-              } as any);
               this._runtimeEvents.emit("humanGate.completed", {
                 type: "humanGate.completed",
                 humanGateId: id,
                 turnId: toolCall.turnId,
-                blockedInboundItemIds: (completed as any).blockedInboundItemIds ?? [],
+                blockedInboundItemIds: (completedGate as any).blockedInboundItemIds ?? blockedInboundItemIds,
               } as any);
-              return { humanGateId: id, status: "completed", gate: completed } as any;
+              const continuation = await this._continueTurnInternal(toolCall.agentName, toolCall.conversationId);
+              return { humanGateId: id, status: "completed", gate: completedGate, continuation } as any;
             } catch (err) {
               const error = err instanceof Error ? err : new Error(String(err));
+              if (completedGate) {
+                const toolCall = (completedGate as any).toolCall;
+                return {
+                  humanGateId: id,
+                  status: "completed",
+                  gate: completedGate,
+                  continuation: {
+                    turnId: `turn-${randomUUID()}`,
+                    agentName: toolCall.agentName,
+                    conversationId: toolCall.conversationId,
+                    status: "error",
+                    steps: [],
+                    error,
+                  },
+                } as any;
+              }
               const failed = await this._humanGateStore!.markGateFailed({
                 humanGateId: id,
                 reason: error.message,

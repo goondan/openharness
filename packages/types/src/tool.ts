@@ -27,7 +27,7 @@ export interface ToolContext {
   abortSignal: AbortSignal;
 }
 
-// Human Gate / durable HITL types
+// Human Approval / durable HITL types
 export type HumanGateStatus =
   | "preparing"
   | "waitingForHuman"
@@ -56,7 +56,7 @@ export interface HumanTaskDefinition {
   responseSchema?: JsonSchema;
 }
 
-export interface HumanGatePolicy {
+export interface HumanApprovalPolicy {
   required?: boolean;
   prompt?: string;
   tasks?: HumanTaskDefinition[];
@@ -64,6 +64,8 @@ export interface HumanGatePolicy {
   timeoutMs?: number;
   metadata?: Record<string, unknown>;
 }
+
+export type HumanGatePolicy = HumanApprovalPolicy;
 
 export type HumanResult =
   | { type: "approval"; approved: true; argsPatch?: JsonObject }
@@ -129,7 +131,7 @@ export interface HumanTaskView {
 export interface CreateHumanGateInput {
   id: string;
   toolCall: ToolCallSnapshot;
-  policy: HumanGatePolicy;
+  policy: HumanApprovalPolicy;
   tasks: HumanTaskDefinition[];
   createdAt?: string;
   idempotencyKey?: string;
@@ -224,7 +226,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: ToolParameters;
-  humanGate?: HumanGatePolicy;
+  humanApproval?: HumanApprovalPolicy;
   handler: (args: JsonObject, context: ToolContext) => Promise<ToolResult>;
 }
 

@@ -72,9 +72,10 @@ export async function executeToolCall(
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
     }
 
-    if (tool.humanGate && tool.humanGate.required !== false) {
+    const humanApproval = tool.humanApproval;
+    if (humanApproval && humanApproval.required !== false) {
       if (!humanGateStore) {
-        return { type: "error", error: `Tool "${toolName}" requires a Human Gate store` };
+        return { type: "error", error: `Tool "${toolName}" requires a Human Approval store` };
       }
 
       const created = await humanGateStore.createGate({
@@ -89,16 +90,16 @@ export async function executeToolCall(
           toolName,
           toolArgs: normalizedToolArgs,
         },
-        policy: tool.humanGate,
-        prompt: tool.humanGate?.prompt,
-        expectedResultSchema: tool.humanGate?.responseSchema,
-        tasks: (tool.humanGate?.tasks?.length
-          ? tool.humanGate.tasks.map((task, index) => ({
+        policy: humanApproval,
+        prompt: humanApproval.prompt,
+        expectedResultSchema: humanApproval.responseSchema,
+        tasks: (humanApproval.tasks?.length
+          ? humanApproval.tasks.map((task, index) => ({
               humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
               type: task.type,
               taskType: task.type,
               title: task.title,
-              prompt: task.prompt ?? tool.humanGate?.prompt,
+              prompt: task.prompt ?? humanApproval.prompt,
               required: task.required,
               responseSchema: task.responseSchema,
             }))
@@ -106,9 +107,9 @@ export async function executeToolCall(
               humanTaskId: `${turnId}:${toolCallId}:task:1`,
               type: "approval" as const,
               taskType: "approval" as const,
-              prompt: tool.humanGate?.prompt,
+              prompt: humanApproval.prompt,
               required: true,
-              responseSchema: tool.humanGate?.responseSchema,
+              responseSchema: humanApproval.responseSchema,
             }]),
       });
 

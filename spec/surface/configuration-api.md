@@ -96,6 +96,8 @@
 interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
+  durableInbound?: DurableInboundConfig;
+  humanApproval?: HumanApprovalConfig;
 }
 
 interface AgentConfig {

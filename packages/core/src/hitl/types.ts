@@ -83,6 +83,7 @@ export interface HumanGateRecord {
   conversationSnapshot?: unknown;
   taskIds: string[];
   blocker: ConversationBlockerRef;
+  blockedInboundItemIds?: string[];
   lease?: LeaseInfo;
   failure?: HumanGateFailureInfo;
   completedAt?: string;

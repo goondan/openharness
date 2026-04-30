@@ -286,6 +286,7 @@ interface DurableInboundStore {
   - `leased -> failed -> pending|deadLetter`
   - `blocked -> deadLetter`
   - `delivered` is not a lease state and must not be automatically released to `pending` by lease expiry. Recovery must use an explicit operator/recovery decision after determining the active Turn cannot consume it.
+  - explicit `retryInboundItem()`/`releaseInboundItem()` may move `delivered -> pending` after the active Turn is known to be gone or unable to consume the item.
   - duplicate direct input must report from the existing item state: `blocked` maps to `waitingForHuman`, `consumed` maps to the cached/completed result, and non-terminal or failed states must not be coerced to successful completion.
 - Concurrency Strategy:
   - store methods are compare-and-set/transactional at item and conversation sequence boundaries.
@@ -321,7 +322,8 @@ interface DurableInboundStore {
 - Given durable inbound store append가 실패한다, When `receive()` 또는 durable `processTurn()`이 호출된다, Then caller는 accepted handle을 받지 않고 store 실패를 관찰한다.
 - Given 같은 external id/idempotency key payload 두 개가 동시에 들어온다, When durable append가 실행된다, Then store에는 inbound item이 하나만 생성되고 두 번째 호출은 기존 item identity를 반환한다.
 - Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item이 append된다, Then item은 durable store에 남고 active Turn은 Step 경계에서 그 item을 user message로 반영한다.
-- Given active Turn notification 이후 delivery 전 process가 crash된다, When runtime이 재시작된다, Then durable item 기준으로 pending/retryable item이 조회되고 다시 처리된다.
+- Given conversation에 active Turn이 있다, When 같은 conversation으로 inbound item을 deliver한다, Then runtime은 `markDelivered()` 성공 이후에만 active Turn memory steering inbox에 notify한다.
+- Given active Turn delivery가 `markDelivered()` 이후 consume 전에 crash된다, When operator/recovery가 `retryInboundItem()` 또는 `releaseInboundItem()`을 호출한다, Then item은 `pending`으로 돌아가 다시 처리 가능하다.
 - Given conversation이 human gate로 blocked 상태다, When 같은 conversation으로 inbound event가 들어온다, Then 새 Turn은 시작되지 않고 item은 `blockedBy=humanGate` metadata와 함께 `blocked`가 된다.
 - Given human gate가 해제되고 blocked item 2개가 있다, When scheduler/resume이 실행된다, Then blocked item은 sequence order로 append되고 consumed 된다.
 - Given 두 worker가 같은 conversation pending item을 동시에 schedule한다, When 둘 다 lease를 시도한다, Then 하나만 lease를 얻고 다른 worker는 no-op/conflict result로 수렴한다.

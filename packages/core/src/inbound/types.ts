@@ -128,6 +128,12 @@ export interface ReleaseBlockedInboundInput {
   now?: string;
 }
 
+export interface ReleaseInboundItemInput {
+  id: string;
+  leaseOwner?: string;
+  now?: string;
+}
+
 export interface InboundItemFilter {
   agentName?: string;
   conversationId?: string;
@@ -146,6 +152,7 @@ export interface DurableInboundStore {
   releaseExpiredLeases(now: string): Promise<number>;
   listInboundItems(filter: InboundItemFilter): Promise<DurableInboundItem[]>;
   retryInboundItem(id: string): Promise<DurableInboundItem>;
+  releaseInboundItem?(input: ReleaseInboundItemInput): Promise<DurableInboundItem>;
   deadLetterInboundItem(input: DeadLetterInboundInput): Promise<DurableInboundItem>;
 }
 

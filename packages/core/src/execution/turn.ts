@@ -220,6 +220,7 @@ export async function executeTurn(
     humanGateStore?: HumanGateReferenceStore;
     inboundItem?: DurableInboundItem;
     inboundCommitRef?: string;
+    skipInputAppend?: boolean;
     consumeInboundItem?: (input: {
       item: DurableInboundItem;
       turnId: string;
@@ -242,6 +243,7 @@ export async function executeTurn(
     humanGateStore,
     inboundItem,
     inboundCommitRef,
+    skipInputAppend,
     consumeInboundItem,
     blockInboundItem,
   } =
@@ -391,15 +393,17 @@ export async function executeTurn(
     // 4. Set conversationState._turnActive = true (inside try so errors reset it)
     conversationState._turnActive = true;
 
-    // 5. FR-CORE-007: Record inbound message as a non-system conversation event
-    appendEnvelopeAsUserMessage(conversationState, envelope, inboundItem && inboundCommitRef
-      ? {
-          __inboundItemId: inboundItem.id,
-          __inboundCommitRef: inboundCommitRef,
-        }
-      : undefined);
-    if (inboundItem && inboundCommitRef) {
-      await consumeInboundItem?.({ item: inboundItem, turnId, commitRef: inboundCommitRef });
+    if (!skipInputAppend) {
+      // 5. FR-CORE-007: Record inbound message as a non-system conversation event
+      appendEnvelopeAsUserMessage(conversationState, envelope, inboundItem && inboundCommitRef
+        ? {
+            __inboundItemId: inboundItem.id,
+            __inboundCommitRef: inboundCommitRef,
+          }
+        : undefined);
+      if (inboundItem && inboundCommitRef) {
+        await consumeInboundItem?.({ item: inboundItem, turnId, commitRef: inboundCommitRef });
+      }
     }
 
     result = await chain(turnCtx);

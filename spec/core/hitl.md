@@ -1,8 +1,8 @@
-# hitl - Human Gate and durable human task resume
+# hitl - Human Approval and durable human task resume
 
 ## 1. 한 줄 요약 (Outcome Statement)
 
-OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable Human Task로 전환하고, Human Gate를 conversation blocker로 등록해 입력 유실 없이 안전하게 resume한다.
+OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanApproval` policy로 선언하고, durable approval gate와 Human Task를 통해 입력 유실 없이 안전하게 resume한다.
 
 ---
 
@@ -21,14 +21,14 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable
 #### Flow ID: HG-CREATE-01
 
 - Actor: core execution loop, toolCall middleware
-- Trigger: `executeToolCall()`이 human gate policy가 적용된 ToolCall을 만난다.
+- Trigger: `executeToolCall()`이 `humanApproval` policy가 적용된 ToolCall을 만난다.
 - Preconditions:
   - runtime에 `HumanGateStore`가 구성되어 있다.
   - ToolCall은 `turnId`, `agentName`, `conversationId`, `stepNumber`, `toolCallId`, `toolName`, `toolArgs`를 가진다.
-  - 해당 ToolCall에 대해 active human gate가 아직 없다.
+  - 해당 ToolCall에 대해 active approval gate가 아직 없다.
 - Main Flow:
   1. core는 deterministic `humanGateId`와 required `humanTaskId` 목록을 계산한다.
-  2. core는 ToolCall snapshot, prompt, expected result schema, conversation cursor/snapshot을 포함한 human gate record를 만든다.
+  2. core는 ToolCall snapshot, prompt, expected result schema, conversation cursor/snapshot을 포함한 approval gate record를 만든다.
   3. core는 `HumanGateStore.createGate()`를 호출해 gate와 task를 atomically 저장한다.
   4. `HumanGateStore.createGate()`는 gate/task 저장과 conversation blocker `humanGate` 등록을 같은 atomic boundary에서 완료한다.
   5. core는 `humanGate.created`와 `humanTask.created` 이벤트를 발행한다.
@@ -99,10 +99,10 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable
   6. drained inbound item을 user message로 append하고 consumed 처리한다.
   7. blocked item consume이 완료된 뒤 blocker를 해제한다.
   8. gate를 `completed`로 전환하고 lifecycle event를 발행한다.
-  9. continuation Turn 실행은 phase 1에서는 optional이며, durable conversation execution과 함께 Planned 범위에서 강화한다.
+  9. blocker 해제 후 runtime은 tool result와 blocked inbound user messages가 반영된 conversation에서 continuation Turn을 실행한다.
 - Outputs:
   - `HumanGateResumeResult`
-  - continuation `TurnResult` if continuation is enabled
+  - continuation `TurnResult`
 - Failure Modes:
   - process crash before side-effect boundary: `resuming` lease expiry 후 다른 worker가 같은 gate를 재획득할 수 있다.
   - process crash after side-effect boundary: gate를 `blocked` 또는 retry policy가 지정한 상태로 남겨 operator가 확인한다.
@@ -132,7 +132,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable
 ### Constraint ID: HG-CONST-001
 
 - Category: Durability
-- Description: handler 실행 전 human gate와 required human task가 durable store에 저장되어야 한다.
+- Description: handler 실행 전 approval gate와 required human task가 durable store에 저장되어야 한다.
 - Scope: `HG-CREATE-01`
 - Measurement: store create 실패 시 handler 호출 count가 0이다.
 - Verification: unit/integration test
@@ -235,7 +235,7 @@ interface HumanGateStore {
 ## 6. Realization Specification
 
 - Module Boundaries:
-  - `packages/types`: Human Gate policy, task/result/store/control/event types.
+  - `packages/types`: `humanApproval` policy, task/result/store/control/event types.
   - `packages/core/src/hitl`: store implementation, policy evaluation, resume worker.
   - `packages/core/src/execution/tool-call.ts`: handler-before-human guard and gate creation hook.
   - `packages/core/src/inbound`: blocker lookup and blocked item drain.
@@ -264,7 +264,7 @@ interface HumanGateStore {
   - pending tasks and blocked inbound items are queryable.
 - Migration / Rollback:
   - legacy `HitlRequest` naming may be kept as compatibility alias only.
-  - public Desired State uses Human Gate/Human Task terminology.
+  - public ToolDefinition/HarnessConfig Desired State uses `humanApproval` naming; durable store/control/event internals may keep Human Gate identifiers as compatibility aliases.
 
 ---
 
@@ -278,14 +278,14 @@ interface HumanGateStore {
 
 ## 8. Acceptance Criteria
 
-- Given required human gate policy를 가진 tool이 있다, When LLM이 해당 tool을 요청한다, Then durable human task creation이 성공하기 전에는 tool handler가 호출되지 않는다.
-- Given `humanGate.store`가 설정되었지만 `durableInbound.store`가 없다, When runtime 생성이 실행된다, Then runtime은 fail-fast 한다.
+- Given required `humanApproval` policy를 가진 tool이 있다, When LLM이 해당 tool을 요청한다, Then durable human task creation이 성공하기 전에는 tool handler가 호출되지 않는다.
+- Given `humanApproval.store`가 설정되었지만 `durableInbound.store`가 없다, When runtime 생성이 실행된다, Then runtime은 fail-fast 한다.
 - Given human task store creation이 실패한다, When tool call이 평가된다, Then Turn은 error가 되고 human task event와 handler side effect는 관찰되지 않는다.
 - Given conversation이 Human Gate에서 waiting 상태다, When 새 ingress/direct input이 들어온다, Then input은 HITL 전용 queue가 아니라 durable inbound queue에 append되고 `blockedBy=humanGate`로 표시된다.
 - Given active Turn으로 delivered 된 durable inbound item이 consume 되기 전에 같은 Turn이 Human Gate로 pause된다, When Turn이 `waitingForHuman`으로 반환된다, Then delivered item은 같은 Human Gate blocker로 `blocked` 상태가 된다.
 - Given pending human task에 같은 idempotency key의 duplicate submit request가 들어온다, When 두 submit이 완료된다, Then durable result는 하나만 존재하고 두 caller는 같은 final result를 관찰한다.
 - Given human task가 rejected 상태다, When resume이 실행된다, Then 원래 tool handler는 호출되지 않고 rejection tool result가 append된다.
 - Given human task가 form args와 함께 approved 상태다, When resume이 실행된다, Then mapped args는 handler 실행 전에 tool JSON Schema 검증을 통과한다.
-- Given ready gate와 blocked inbound item 2개가 있다, When resume이 완료된다, Then tool result가 먼저 append되고 blocked inbound items가 sequence order로 append된다.
+- Given ready gate와 blocked inbound item 2개가 있다, When resume이 완료된다, Then tool result가 먼저 append되고 blocked inbound items가 sequence order로 append된 뒤 continuation Turn이 실행된다.
 - Given ready gate와 blocked inbound item 2개가 있다, When resume이 blocked item을 drain한다, Then tool result append, blocked item append, item consume이 모두 완료될 때까지 Human Gate blocker는 active 상태로 유지된다.
 - Given 두 resume worker가 같은 ready gate를 처리하려 한다, When 둘 다 lease 획득을 시도한다, Then 하나만 handler를 실행하고 다른 하나는 existing completion 또는 lease conflict로 수렴한다.

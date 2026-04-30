@@ -56,10 +56,12 @@ export interface DurableInboundConfig {
   maxAttempts?: number;
 }
 
-export interface HumanGateConfig {
+export interface HumanApprovalConfig {
   store: HumanGateStore;
   resumeLeaseMs?: number;
 }
+
+export type HumanGateConfig = HumanApprovalConfig;
 
 // -----------------------------------------------------------------------
 // Top-level harness config
@@ -69,6 +71,7 @@ export interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
   durableInbound?: DurableInboundConfig;
+  humanApproval?: HumanApprovalConfig;
   humanGate?: HumanGateConfig;
 }
 

@@ -12,6 +12,7 @@ import type {
   MarkInboundConsumedInput,
   MarkInboundDeliveredInput,
   ReleaseBlockedInboundInput,
+  ReleaseInboundItemInput,
 } from "./types.js";
 
 export interface InMemoryDurableInboundStoreOptions {
@@ -246,16 +247,21 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
 
   async retryInboundItem(id: string): Promise<DurableInboundItem> {
     const item = this._mustGet(id);
-    if (!["failed", "deadLetter", "blocked"].includes(item.status)) {
+    if (!["failed", "deadLetter", "blocked", "delivered"].includes(item.status)) {
       throw new Error(`Cannot retry inbound item "${id}" from status "${item.status}".`);
     }
 
-    item.status = "pending";
-    item.blockedBy = undefined;
-    item.lease = undefined;
-    item.failure = undefined;
-    item.updatedAt = this._now();
-    return cloneInboundItem(item);
+    return this._releaseToPending(item, this._now());
+  }
+
+  async releaseInboundItem(input: ReleaseInboundItemInput): Promise<DurableInboundItem> {
+    const item = this._mustGet(input.id);
+    this._assertLeaseOwner(item, input.leaseOwner);
+    if (!["leased", "delivered", "blocked"].includes(item.status)) {
+      throw new Error(`Cannot release inbound item "${input.id}" from status "${item.status}".`);
+    }
+
+    return this._releaseToPending(item, input.now ?? this._now());
   }
 
   async deadLetterInboundItem(input: DeadLetterInboundInput): Promise<DurableInboundItem> {
@@ -332,6 +338,17 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
       }
       return a.sequence - b.sequence;
     });
+  }
+
+  private _releaseToPending(item: DurableInboundItem, now: string): DurableInboundItem {
+    item.status = "pending";
+    item.turnId = undefined;
+    item.blockedBy = undefined;
+    item.commitRef = undefined;
+    item.lease = undefined;
+    item.failure = undefined;
+    item.updatedAt = now;
+    return cloneInboundItem(item);
   }
 }
 

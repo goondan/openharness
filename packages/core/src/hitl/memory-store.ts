@@ -248,6 +248,7 @@ export class InMemoryHumanGateStore implements HumanGateReferenceStore {
     gate.status = "completed";
     gate.lease = undefined;
     gate.failure = undefined;
+    gate.blockedInboundItemIds = [...(input.blockedInboundItemIds ?? [])];
     gate.completedAt = now;
     gate.updatedAt = now;
     this._blockerByConversation.delete(conversationKey(gate.toolCall.agentName, gate.toolCall.conversationId));
