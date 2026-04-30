@@ -172,6 +172,33 @@ function toPublicHumanTaskView(task: any): any {
   };
 }
 
+async function toPublicHumanApprovalRecord(approval: any, store?: HumanApprovalStore): Promise<any> {
+  if (!approval) {
+    return approval;
+  }
+  const toolCall = approval.toolCall ?? {};
+  const taskIds = approval.taskIds ?? [];
+  let requiredTaskIds = approval.requiredTaskIds;
+  if (!requiredTaskIds && store && taskIds.length > 0) {
+    const tasks = await Promise.all(
+      taskIds.map((taskId: string) => (store as any).getTask?.(taskId)),
+    );
+    const required = tasks
+      .filter((task) => task && task.required !== false)
+      .map((task) => task.id);
+    requiredTaskIds = required.length > 0 ? required : taskIds;
+  }
+
+  return {
+    ...approval,
+    agentName: approval.agentName ?? toolCall.agentName,
+    conversationId: approval.conversationId ?? toolCall.conversationId,
+    turnId: approval.turnId ?? toolCall.turnId,
+    toolCallId: approval.toolCallId ?? toolCall.toolCallId,
+    requiredTaskIds: requiredTaskIds ?? taskIds,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HarnessRuntimeImpl
 // ---------------------------------------------------------------------------
@@ -788,11 +815,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 } as any);
               }
             }
+            const publicApproval = await toPublicHumanApprovalRecord((result as any).approval, this._humanApprovalStore);
             return {
               accepted: true,
               duplicate,
               task: toPublicHumanTaskView((result as any).task),
-              approval: (result as any).approval,
+              approval: publicApproval,
             } as any;
           }
         : undefined,
@@ -819,7 +847,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   : ["failed", "canceled", "expired"].includes(existingStatus)
                     ? "failed"
                     : "blocked",
-                approval: existing,
+                approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
               } as any;
             }
             this._runtimeEvents.emit("humanApproval.resuming", {
@@ -1037,7 +1065,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 blockedInboundItemIds: (completedGate as any).blockedInboundItemIds ?? blockedInboundItemIds,
               } as any);
               const continuation = await this._continueTurnInternal(toolCall.agentName, toolCall.conversationId);
-              return { humanApprovalId: id, status: "completed", approval: completedGate, continuation } as any;
+              return {
+                humanApprovalId: id,
+                status: "completed",
+                approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
+                continuation,
+              } as any;
             } catch (err) {
               const error = err instanceof Error ? err : new Error(String(err));
               if (completedGate) {
@@ -1045,7 +1078,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 return {
                   humanApprovalId: id,
                   status: "completed",
-                  approval: completedGate,
+                  approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
                   continuation: {
                     turnId: `turn-${randomUUID()}`,
                     agentName: toolCall.agentName,
@@ -1068,7 +1101,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 retryable: false,
                 reason: error.message,
               } as any);
-              return { humanApprovalId: id, status: "failed", approval: failed } as any;
+              return {
+                humanApprovalId: id,
+                status: "failed",
+                approval: await toPublicHumanApprovalRecord(failed, this._humanApprovalStore),
+              } as any;
             } finally {
               if (resumeTurnId && resumeSteeringInbox && resumeTracked && resumeToolCall) {
                 resumeSteeringInbox.close();
@@ -1131,7 +1168,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 await Promise.all(releasedItems.map((item) => this._scheduleDurableInboundItem(item as any)));
               }
             }
-            return gate;
+            return await toPublicHumanApprovalRecord(gate, this._humanApprovalStore);
           }
         : undefined,
     };

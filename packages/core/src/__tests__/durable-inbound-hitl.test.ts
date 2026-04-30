@@ -151,6 +151,50 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("does not collapse repeated ingress text without an external id", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const first = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "hi" }],
+        properties: {},
+        conversationId: "conv-repeat-ingress",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const second = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "hi" }],
+        properties: {},
+        conversationId: "conv-repeat-ingress",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    });
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-repeat-ingress" });
+
+    expect(first.disposition).not.toBe("duplicate");
+    expect(second.disposition).not.toBe("duplicate");
+    expect(items).toHaveLength(2);
+    expect(new Set(items.map((item) => item.idempotencyKey)).size).toBe(2);
+
+    await runtime.close();
+  });
+
   it("marks active-turn delivery in the durable store before notifying memory steering", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const markDelivered = vi.fn(async () => {
@@ -632,6 +676,11 @@ describe("durable inbound and Human Approval integration", () => {
     expect(submitResult.task.type).toBe("approval");
     expect(submitResult.task.idempotencyKey).toBe("approve-1");
     expect(submitResult.approval.id).toBe(tasks[0].humanApprovalId);
+    expect(submitResult.approval.agentName).toBe("default");
+    expect(submitResult.approval.conversationId).toBe("conv-human");
+    expect(submitResult.approval.turnId).toEqual(expect.any(String));
+    expect(submitResult.approval.toolCallId).toBe("call-1");
+    expect(submitResult.approval.requiredTaskIds).toEqual([tasks[0].id]);
     expect(duplicateSubmitResult.accepted).toBe(true);
     expect(duplicateSubmitResult.duplicate).toBe(true);
     expect(duplicateSubmitResult.task.type).toBe("approval");

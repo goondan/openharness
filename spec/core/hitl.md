@@ -80,6 +80,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   - rejection은 handler 호출 없이 rejection tool result를 만들 수 있는 approval result로 저장된다.
 - Outputs:
   - `SubmitHumanResult`: `{ accepted: true, duplicate: boolean, task: HumanTaskView, approval: HumanApprovalRecord }`
+  - returned `approval`은 top-level `agentName`, `conversationId`, `turnId`, `toolCallId`, `requiredTaskIds`를 포함하는 public shape이다.
 - Failure Modes:
   - schema/scope 실패: durable state를 바꾸지 않는다.
   - resume lease 실패: result는 저장하고 다른 worker가 resume할 수 있게 둔다.

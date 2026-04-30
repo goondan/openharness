@@ -226,6 +226,22 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
 
       if (durableInboundStore) {
+        const externalId = typeof envelope.properties["id"] === "string"
+          ? envelope.properties["id"]
+          : undefined;
+        const inboundEventIdempotencyKey = [
+          "ingress",
+          envelope.source.connectionName,
+          agentName,
+          conversationId,
+          envelope.name,
+          externalId ?? [
+            "no-external-id",
+            envelope.source.receivedAt,
+            JSON.stringify(envelope.properties ?? {}),
+            JSON.stringify(envelope.content),
+          ].join(":"),
+        ].join(":");
         const appended = await durableInboundStore.append({
           agentName,
           conversationId,
@@ -234,20 +250,9 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
             kind: "ingress",
             connectionName: envelope.source.connectionName,
             receivedAt: envelope.source.receivedAt,
-            externalId: typeof envelope.properties["id"] === "string"
-              ? envelope.properties["id"]
-              : undefined,
+            externalId,
           },
-          idempotencyKey: [
-            "ingress",
-            envelope.source.connectionName,
-            agentName,
-            conversationId,
-            envelope.name,
-            typeof envelope.properties["id"] === "string"
-              ? envelope.properties["id"]
-              : JSON.stringify(envelope.content),
-          ].join(":"),
+          idempotencyKey: inboundEventIdempotencyKey,
         });
         ingressEventBus.emit(appended.duplicate ? "inbound.duplicate" : "inbound.appended", {
           type: appended.duplicate ? "inbound.duplicate" : "inbound.appended",
