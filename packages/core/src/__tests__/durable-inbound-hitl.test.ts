@@ -5,6 +5,7 @@ import type {
   HarnessConfig,
   LlmClient,
   LlmResponse,
+  ToolContext,
   ToolDefinition,
 } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
@@ -775,6 +776,73 @@ describe("durable inbound and Human Approval integration", () => {
       leaseOwner: "runtime",
       reason: "completion write failed",
     }));
+
+    await runtime.close();
+  });
+
+  it("aborts in-flight resumed Human Approval tool execution through runtime control", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    let capturedSignal: AbortSignal | undefined;
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async (_args: unknown, ctx: ToolContext) => {
+        capturedSignal = ctx.abortSignal;
+        return new Promise<any>((resolve) => {
+          ctx.abortSignal.addEventListener("abort", () => {
+            resolve({ type: "text", text: "aborted" });
+          }, { once: true });
+        });
+      }),
+    };
+    currentClient = mockClient({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-abort-resume", toolName: "guarded", args: {} }],
+    });
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-abort-resume",
+      idempotencyKey: "direct-human-abort-resume",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-abort-resume" });
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-abort-resume",
+    });
+    const resumePromise = runtime.control.resumeHumanApproval!(tasks[0].humanApprovalId);
+
+    for (let attempt = 0; attempt < 10 && !capturedSignal; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(capturedSignal).toBeDefined();
+
+    const abortResult = await runtime.control.abortConversation({
+      conversationId: "conv-abort-resume",
+      reason: "abort resume",
+    });
+    const resumed = await resumePromise;
+
+    expect(abortResult.abortedTurns).toBe(1);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(resumed.status).toBe("failed");
+    expect(resumed.approval.failure?.reason).toBe("abort resume");
 
     await runtime.close();
   });

@@ -96,7 +96,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
      - approval: 원래 args 또는 보정 args로 tool handler 실행
      - rejection: tool handler 호출 없이 rejection tool result 생성
      - form/text input: mapped args를 JSON Schema로 재검증한 뒤 tool handler 실행
-  4. handler 실행이 필요한 action이면 runtime은 `markApprovalHandlerStarted()`를 durable하게 기록한 뒤 normal ToolCall execution path로 tool middleware와 handler를 호출한다.
+  4. handler 실행이 필요한 action이면 runtime은 `markApprovalHandlerStarted()`를 durable하게 기록한 뒤 runtime cancel/close 경로에 연결된 abort signal로 normal ToolCall execution path와 tool middleware/handler를 호출한다.
   5. tool result를 conversation에 append한다.
   6. Human Approval blocker를 유지한 상태로 durable inbound queue에서 같은 conversation의 `blockedBy=humanApproval` item을 sequence order로 drain한다.
   7. drained inbound item을 user message로 append하고 consumed 처리한다.
@@ -109,6 +109,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Failure Modes:
   - process crash before `markApprovalHandlerStarted()`: `resuming` lease expiry 후 다른 worker가 같은 approval을 재획득할 수 있다.
   - process crash after `markApprovalHandlerStarted()`: runtime은 자동 재획득/handler 재실행을 하지 않고 operator 확인 대상으로 남긴다.
+  - abort/close during resumed handler: runtime은 abort signal을 tool handler에 전달하고 approval을 completed로 닫지 않는다.
   - tool handler 실패: runtime은 획득한 resume `leaseOwner`로 `failed(retryable|nonRetryable)` 전환을 기록하고 event를 발행한다.
 
 #### Flow ID: HA-CANCEL-01

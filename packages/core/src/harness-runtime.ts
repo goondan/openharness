@@ -829,12 +829,37 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               turnId: (gate as any).toolCall.turnId,
             } as any);
             let completedGate: any;
+            let resumeTurnId: string | undefined;
+            let resumeSteeringInbox: SteeringInbox | undefined;
+            let resumeTracked: ReturnType<typeof createDeferred<TurnResult>> | undefined;
+            let resumeToolCall: any;
             try {
               const toolCall = (gate as any).toolCall;
+              resumeToolCall = toolCall;
               const agentDeps = this._agents.get(toolCall.agentName);
               if (!agentDeps) {
                 throw new ConfigError(`Unknown agent: "${toolCall.agentName}"`);
               }
+              resumeTurnId = `${toolCall.turnId}:humanApproval:${id}:resume`;
+              const resumeAbortController = new AbortController();
+              resumeSteeringInbox = this._createSteeringInbox(resumeTurnId);
+              resumeTracked = createDeferred<TurnResult>();
+              const resumeInFlight: InFlightTurn = {
+                turnId: resumeTurnId,
+                agentName: toolCall.agentName,
+                conversationId: toolCall.conversationId,
+                abortController: resumeAbortController,
+                promise: resumeTracked.promise,
+                steeringInbox: resumeSteeringInbox,
+              };
+              const throwIfResumeAborted = (): void => {
+                if (resumeAbortController.signal.aborted) {
+                  const reason = (resumeAbortController.signal as any).reason ?? "Human approval resume aborted.";
+                  throw new Error(String(reason));
+                }
+              };
+              this._inFlightTurns.set(resumeTurnId, resumeInFlight);
+
               const conversationKey = this._conversationKey(toolCall.agentName, toolCall.conversationId);
               let conversationState = this._conversations.get(conversationKey);
               if (!conversationState) {
@@ -870,10 +895,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   if (!validation.valid) {
                     toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
                   } else {
+                    throwIfResumeAborted();
                     await this._humanApprovalStore!.markApprovalHandlerStarted({
                       humanApprovalId: id,
                       leaseOwner: "runtime",
                     } as any);
+                    throwIfResumeAborted();
                     toolResult = await executeToolCall(toolCall.toolCallId, {
                       turnId: toolCall.turnId,
                       agentName: toolCall.agentName,
@@ -898,7 +925,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       toolCallId: toolCall.toolCallId,
                       toolName: toolCall.toolName,
                       toolArgs: finalArgs,
-                      abortSignal: new AbortController().signal,
+                      abortSignal: resumeAbortController.signal,
                     }, {
                       toolRegistry: agentDeps.toolRegistry,
                       middlewareRegistry: agentDeps.middlewareRegistry,
@@ -906,9 +933,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       humanApprovalStore: this._humanApprovalStore as any,
                       skipHumanApproval: true,
                     });
+                    throwIfResumeAborted();
                   }
                 }
               }
+              throwIfResumeAborted();
 
               const blockedInboundItemIds: string[] = [];
               conversationState._turnActive = true;
@@ -1035,6 +1064,18 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 reason: error.message,
               } as any);
               return { humanApprovalId: id, status: "failed", approval: failed } as any;
+            } finally {
+              if (resumeTurnId && resumeSteeringInbox && resumeTracked && resumeToolCall) {
+                resumeSteeringInbox.close();
+                this._inFlightTurns.delete(resumeTurnId);
+                resumeTracked.resolve({
+                  turnId: resumeTurnId,
+                  agentName: resumeToolCall.agentName,
+                  conversationId: resumeToolCall.conversationId,
+                  status: "completed",
+                  steps: [],
+                });
+              }
             }
           }
         : undefined,
