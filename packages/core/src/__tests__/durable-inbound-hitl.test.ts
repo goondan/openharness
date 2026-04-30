@@ -465,6 +465,75 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
+  it("reblocks delivered steering items when a turn pauses for Human Gate", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanGateStore = createInMemoryHumanGateStore();
+    const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanGate: { required: true, prompt: "Approve?" },
+      handler: toolHandler,
+    };
+    let resolveChat!: (response: LlmResponse) => void;
+    const chat = vi.fn(() => new Promise<LlmResponse>((resolve) => {
+      resolveChat = resolve;
+    }));
+    currentClient = { chat };
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanGate: { store: humanGateStore as any },
+    }));
+
+    const turnPromise = runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-steered-human",
+      idempotencyKey: "direct-human-steered",
+    });
+    for (let attempt = 0; attempt < 10 && chat.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(chat).toHaveBeenCalled();
+
+    const delivered = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "arrived before human gate pause" }],
+        properties: { id: "evt-steered-before-human" },
+        conversationId: "conv-steered-human",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: new Date().toISOString(),
+        },
+      },
+    });
+    expect(delivered.disposition).toBe("delivered");
+
+    resolveChat({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-steered", toolName: "guarded", args: {} }],
+    });
+    const result = await turnPromise;
+
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-steered-human" });
+    const steeredItem = items.find((item) => item.id === delivered.inboundItemId);
+
+    expect(result.status).toBe("waitingForHuman");
+    expect(steeredItem?.status).toBe("blocked");
+    expect(steeredItem?.blockedBy?.type).toBe("humanGate");
+
+    await runtime.close();
+  });
+
   it("reacquires resuming Human Gates after resume lease expiry", async () => {
     const humanGateStore = createInMemoryHumanGateStore();
     const created = await humanGateStore.createGate({
@@ -594,7 +663,7 @@ describe("durable inbound and Human Gate integration", () => {
     await runtime.close();
   });
 
-  it("requires durable inbound when Human Gate is configured with ingress", async () => {
+  it("requires durable inbound whenever Human Gate is configured", async () => {
     const humanGateStore = createInMemoryHumanGateStore();
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "secret" }));
     const guardedTool: ToolDefinition = {
@@ -616,6 +685,11 @@ describe("durable inbound and Human Gate integration", () => {
           tools: [guardedTool],
         },
       },
+      humanGate: { store: humanGateStore as any },
+    }))).rejects.toThrow(/requires durableInbound\.store/);
+
+    await expect(createHarness(baseConfig({
+      connections: undefined,
       humanGate: { store: humanGateStore as any },
     }))).rejects.toThrow(/requires durableInbound\.store/);
   });

@@ -279,6 +279,7 @@ interface DurableInboundStore {
   - `DurableInboundStore.markConsumed()` stores the same commit reference. If recovery sees an existing commit reference before `consumed`, it marks the item consumed with that reference instead of appending another message.
 - State Model:
   - `pending -> leased -> delivered -> consumed`
+  - `pending -> delivered -> blocked` when an active Turn pauses for a Human Gate before consuming steered durable input
   - `pending -> blocked -> consumed` for Human Gate resume drain
   - `pending -> blocked -> pending` for operator hold release
   - `leased -> pending`
@@ -301,7 +302,7 @@ interface DurableInboundStore {
 - Migration / Rollback:
   - durable mode is opt-in.
   - existing `steered` disposition is accepted as migration alias for canonical `delivered`.
-  - if Human Gate blockers are used with ingress, durable inbound storage is required to preserve blocked envelopes; non-durable ingress must fail explicitly instead of returning `blocked` for an unpersisted envelope.
+  - if Human Gate blockers are used, durable inbound storage is required to preserve blocked envelopes and direct inputs; non-durable runtime creation must fail explicitly instead of accepting untracked Human Gate blockers.
 
 ---
 
@@ -329,3 +330,4 @@ interface DurableInboundStore {
 - Given inbound item이 `delivered` 상태다, When lease expiry recovery가 실행된다, Then item은 자동으로 `pending`이 되지 않는다.
 - Given durable direct input이 duplicate이고 기존 item이 `delivered` 또는 `failed` 상태다, When `processTurn()`이 호출된다, Then runtime은 성공 완료로 보고하지 않는다.
 - Given durable inbound mode가 꺼져 있고 conversation이 human gate로 blocked 상태다, When ingress event가 들어온다, Then runtime은 envelope를 drop하지 않고 명시적 오류를 반환한다.
+- Given active Turn으로 delivered 된 item이 consume 되기 전에 Human Gate가 생성된다, When Turn이 waiting 상태로 전환된다, Then delivered item은 `blockedBy=humanGate`로 재분류되어 resume drain 대상이 된다.

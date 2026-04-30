@@ -13,7 +13,7 @@ import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
-import type { DurableInboundItem } from "../inbound/types.js";
+import type { ConversationBlockerRef, DurableInboundItem } from "../inbound/types.js";
 import type { HumanGateReferenceStore } from "../hitl/types.js";
 import { isHumanGatePendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
@@ -120,6 +120,23 @@ function closeSteering(steering: TurnSteeringController | undefined): void {
   steering?.close?.();
 }
 
+async function blockSteeredInboundItems(
+  steering: TurnSteeringController | undefined,
+  blocker: ConversationBlockerRef,
+  blockInboundItem: ((input: {
+    item: DurableInboundItem;
+    blocker: ConversationBlockerRef;
+  }) => Promise<void> | void) | undefined,
+): Promise<void> {
+  const inputs = steering?.drain() ?? [];
+  for (const drained of inputs) {
+    const input = "envelope" in drained ? drained : { envelope: drained };
+    if ("inboundItem" in input && input.inboundItem) {
+      await blockInboundItem?.({ item: input.inboundItem, blocker });
+    }
+  }
+}
+
 function addTokenCounts(
   a: number | undefined,
   b: number | undefined,
@@ -208,6 +225,10 @@ export async function executeTurn(
       turnId: string;
       commitRef: string;
     }) => Promise<void> | void;
+    blockInboundItem?: (input: {
+      item: DurableInboundItem;
+      blocker: ConversationBlockerRef;
+    }) => Promise<void> | void;
   }
 ): Promise<TurnResult> {
   const {
@@ -222,6 +243,7 @@ export async function executeTurn(
     inboundItem,
     inboundCommitRef,
     consumeInboundItem,
+    blockInboundItem,
   } =
     deps;
 
@@ -409,6 +431,10 @@ export async function executeTurn(
     }
 
     if (isHumanGatePendingError(error)) {
+      const gate = await humanGateStore?.getGate(error.humanGateId);
+      if (gate) {
+        await blockSteeredInboundItems(steering, gate.blocker, blockInboundItem);
+      }
       closeSteering(steering);
       eventBus.emit("turn.done", {
         type: "turn.done",

@@ -141,7 +141,7 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
     if (item.status === "blocked" && sameBlocker(item.blockedBy, input.blockedBy)) {
       return cloneInboundItem(item);
     }
-    if (item.status !== "leased" && item.status !== "pending" && item.status !== "blocked") {
+    if (item.status !== "leased" && item.status !== "pending" && item.status !== "blocked" && item.status !== "delivered") {
       throw new Error(`Cannot mark inbound item "${item.id}" blocked from status "${item.status}".`);
     }
 

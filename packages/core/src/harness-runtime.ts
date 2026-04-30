@@ -275,6 +275,20 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             commitRef,
           });
         },
+        blockInboundItem: async ({ item, blocker }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          const blocked = await this._durableInboundStore.markBlocked({
+            id: item.id,
+            blockedBy: blocker,
+          } as any);
+          this._runtimeEvents.emit("inbound.blocked", {
+            type: "inbound.blocked",
+            inboundItemId: blocked.id,
+            blockedBy: blocker,
+          } as any);
+        },
       });
       void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
     } catch (err) {

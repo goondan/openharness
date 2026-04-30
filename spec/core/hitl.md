@@ -141,7 +141,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 durable
 ### Constraint ID: HG-CONST-002
 
 - Category: Blocker semantics
-- Description: Human Gate는 durable inbound queue를 소유하지 않고 conversation blocker로만 동작한다. blocker lifecycle의 canonical owner는 `HumanGateStore`다.
+- Description: Human Gate는 durable inbound queue를 소유하지 않고 conversation blocker로만 동작한다. blocker lifecycle의 canonical owner는 `HumanGateStore`이며, Human Gate 사용 시 `DurableInboundStore` 구성이 필수다.
 - Scope: `HG-CREATE-01`, `HG-RESUME-01`
 - Measurement: human gate 중 inbound input은 `HumanGateStore` queue가 아니라 `DurableInboundStore` item으로 저장된다.
 - Verification: runtime integration test
@@ -279,8 +279,10 @@ interface HumanGateStore {
 ## 8. Acceptance Criteria
 
 - Given required human gate policy를 가진 tool이 있다, When LLM이 해당 tool을 요청한다, Then durable human task creation이 성공하기 전에는 tool handler가 호출되지 않는다.
+- Given `humanGate.store`가 설정되었지만 `durableInbound.store`가 없다, When runtime 생성이 실행된다, Then runtime은 fail-fast 한다.
 - Given human task store creation이 실패한다, When tool call이 평가된다, Then Turn은 error가 되고 human task event와 handler side effect는 관찰되지 않는다.
 - Given conversation이 Human Gate에서 waiting 상태다, When 새 ingress/direct input이 들어온다, Then input은 HITL 전용 queue가 아니라 durable inbound queue에 append되고 `blockedBy=humanGate`로 표시된다.
+- Given active Turn으로 delivered 된 durable inbound item이 consume 되기 전에 같은 Turn이 Human Gate로 pause된다, When Turn이 `waitingForHuman`으로 반환된다, Then delivered item은 같은 Human Gate blocker로 `blocked` 상태가 된다.
 - Given pending human task에 같은 idempotency key의 duplicate submit request가 들어온다, When 두 submit이 완료된다, Then durable result는 하나만 존재하고 두 caller는 같은 final result를 관찰한다.
 - Given human task가 rejected 상태다, When resume이 실행된다, Then 원래 tool handler는 호출되지 않고 rejection tool result가 append된다.
 - Given human task가 form args와 함께 approved 상태다, When resume이 실행된다, Then mapped args는 handler 실행 전에 tool JSON Schema 검증을 통과한다.

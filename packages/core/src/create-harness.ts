@@ -200,8 +200,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     ? undefined
     : config.durableInbound?.store;
   const humanGateStore = config.humanGate?.store;
-  if (humanGateStore && connectionsMap.size > 0 && !durableInboundStore) {
-    throw new ConfigError("humanGate with ingress connections requires durableInbound.store.");
+  if (humanGateStore && !durableInboundStore) {
+    throw new ConfigError("humanGate requires durableInbound.store.");
   }
 
   // Create the runtime first (we need a reference for dispatchTurn)
