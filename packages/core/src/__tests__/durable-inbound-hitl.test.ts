@@ -220,7 +220,7 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
-  it("deduplicates repeated ingress without an external id when the normalized event is identical", async () => {
+  it("does not deduplicate no-id ingress deliveries that differ by receivedAt", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
@@ -257,9 +257,10 @@ describe("durable inbound and Human Approval integration", () => {
     const items = await inboundStore.listInboundItems({ conversationId: "conv-repeat-ingress" });
 
     expect(first.disposition).not.toBe("duplicate");
-    expect(second.disposition).toBe("duplicate");
-    expect(second.inboundItemId).toBe(first.inboundItemId);
-    expect(items).toHaveLength(1);
+    expect(second.disposition).not.toBe("duplicate");
+    expect(second.inboundItemId).not.toBe(first.inboundItemId);
+    expect(items).toHaveLength(2);
+    expect(new Set(items.map((item) => item.idempotencyKey)).size).toBe(2);
 
     await runtime.close();
   });
@@ -352,6 +353,52 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("uses numeric ingress external ids as provider idempotency ids", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+
+    const first = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "numeric id" }],
+        properties: { id: 42 },
+        conversationId: "conv-numeric-external-id",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const second = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "numeric id" }],
+        properties: { id: 42 },
+        conversationId: "conv-numeric-external-id",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    });
+    const items = await inboundStore.listInboundItems({ conversationId: "conv-numeric-external-id" });
+
+    expect(first.disposition).not.toBe("duplicate");
+    expect(second.disposition).toBe("duplicate");
+    expect(second.inboundItemId).toBe(first.inboundItemId);
+    expect(items).toHaveLength(1);
+    expect(items[0].source.externalId).toBe("42");
+    expect(items[0].idempotencyKey).toBe("ingress:test:default:conv-numeric-external-id:message.created:42");
+
+    await runtime.close();
+  });
+
   it("uses stable property serialization in fallback ingress idempotency keys", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const runtime = await createHarness(baseConfig({
@@ -382,7 +429,7 @@ describe("durable inbound and Human Approval integration", () => {
         source: {
           connector: "test",
           connectionName: "test",
-          receivedAt: "2026-01-01T00:00:01.000Z",
+          receivedAt: "2026-01-01T00:00:00.000Z",
         },
       },
     });

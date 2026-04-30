@@ -33,6 +33,17 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(sortKeys(value));
 }
 
+function normalizeIngressExternalId(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return undefined;
+}
+
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortKeys);
@@ -244,10 +255,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
 
       if (durableInboundStore) {
-        const rawExternalId = envelope.properties["id"];
-        const externalId = typeof rawExternalId === "string" && rawExternalId.trim().length > 0
-          ? rawExternalId
-          : undefined;
+        const externalId = normalizeIngressExternalId(envelope.properties["id"]);
         const inboundEventIdempotencyKey = [
           "ingress",
           envelope.source.connectionName,
@@ -256,6 +264,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           envelope.name,
           externalId ?? [
             "no-external-id",
+            envelope.source.receivedAt,
             stableStringify(envelope.properties ?? {}),
             stableStringify(envelope.content),
           ].join(":"),
