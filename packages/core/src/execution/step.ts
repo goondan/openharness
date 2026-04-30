@@ -340,14 +340,15 @@ export async function executeStep(
           }
           // Per spec §8.5 step 12.1, after a successful `spawnChildBatch()` the parent is
           // atomically `completed(spawnedChild)` (lease released) and child peer execution runs
-          // *outside* the spawn transaction. If peer execution fails post-spawn, the child has
-          // been closed terminally above; the outer resume layer must observe this and not
-          // attempt to re-fail the already-completed parent. We rely on
+          // *outside* the spawn transaction. If peer execution fails *before* the child is
+          // exposed, the child has been closed terminally above; the outer resume layer must
+          // observe this and not attempt to re-fail the already-completed parent. We rely on
           // `_recordHitlBatchFailure()` re-reading the parent's state and short-circuiting on
-          // post-spawn terminal completion. The `spawnedFromParent` flag is preserved on the
-          // wrapped error so observers can tell the failure was a child-prep failure rather
-          // than a parent-side error.
-          if (spawnedFromParent) {
+          // post-spawn terminal completion. The `__chainedChildPrepFailure` marker is set ONLY
+          // when the failure happened during child preparation (peer execution / atomic
+          // exposure) — not for post-exposure listener exceptions, which must surface
+          // unchanged so listener bugs are not silently swallowed.
+          if (spawnedFromParent && !exposedForHuman) {
             const wrapped = err instanceof Error ? err : new Error(String(err));
             (wrapped as Error & { __chainedChildPrepFailure?: boolean }).__chainedChildPrepFailure = true;
             throw wrapped;
