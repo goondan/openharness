@@ -30,7 +30,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   private readonly _gates = new Map<string, HumanApprovalRecord>();
   private readonly _tasks = new Map<string, HumanTaskRecord>();
   private readonly _gateIdByToolCall = new Map<string, string>();
-  private readonly _blockerByConversation = new Map<string, ConversationBlockerRef>();
+  private readonly _blockersByConversation = new Map<string, Map<string, ConversationBlockerRef>>();
   private readonly _defaultLeaseTtlMs: number;
   private readonly _now: () => string;
 
@@ -102,10 +102,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     for (const task of tasks) {
       this._tasks.set(task.id, task);
     }
-    this._blockerByConversation.set(
-      conversationKey(approval.toolCall.agentName, approval.toolCall.conversationId),
-      blocker,
-    );
+    this._setConversationBlocker(approval);
 
     return {
       approval: cloneValue(approval),
@@ -281,7 +278,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     gate.blockedInboundItemIds = [...(input.blockedInboundItemIds ?? [])];
     gate.completedAt = now;
     gate.updatedAt = now;
-    this._blockerByConversation.delete(conversationKey(gate.toolCall.agentName, gate.toolCall.conversationId));
+    this._deleteConversationBlocker(gate);
     return cloneValue(gate);
   }
 
@@ -324,7 +321,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       }
     }
 
-    this._blockerByConversation.delete(conversationKey(gate.toolCall.agentName, gate.toolCall.conversationId));
+    this._deleteConversationBlocker(gate);
     return cloneValue(gate);
   }
 
@@ -364,8 +361,35 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     agentName: string;
     conversationId: string;
   }): Promise<ConversationBlockerRef | null> {
-    const blocker = this._blockerByConversation.get(conversationKey(input.agentName, input.conversationId));
+    const blockers = this._blockersByConversation.get(conversationKey(input.agentName, input.conversationId));
+    const blocker = blockers?.values().next().value;
     return blocker ? cloneValue(blocker) : null;
+  }
+
+  private _setConversationBlocker(approval: HumanApprovalRecord): void {
+    const key = conversationKey(approval.toolCall.agentName, approval.toolCall.conversationId);
+    let blockers = this._blockersByConversation.get(key);
+    if (!blockers) {
+      blockers = new Map<string, ConversationBlockerRef>();
+      this._blockersByConversation.set(key, blockers);
+    }
+    blockers.set(approval.id, cloneValue(approval.blocker));
+  }
+
+  private _deleteConversationBlocker(approval: HumanApprovalRecord): void {
+    const key = conversationKey(approval.toolCall.agentName, approval.toolCall.conversationId);
+    const blockers = this._blockersByConversation.get(key);
+    if (!blockers) {
+      return;
+    }
+
+    const blocker = blockers.get(approval.id);
+    if (blocker?.id === approval.blocker.id) {
+      blockers.delete(approval.id);
+    }
+    if (blockers.size === 0) {
+      this._blockersByConversation.delete(key);
+    }
   }
 
   private _allRequiredTasksSettled(approval: HumanApprovalRecord): boolean {

@@ -116,7 +116,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   - process crash before `markApprovalHandlerStarted()`: `resuming` lease expiry 후 다른 worker가 같은 approval을 재획득할 수 있다.
   - process crash after `markApprovalHandlerStarted()`: runtime은 자동 재획득/handler 재실행을 하지 않고 operator 확인 대상으로 남긴다.
   - abort/close during resumed handler: runtime은 abort signal을 tool handler에 전달하고 approval을 completed로 닫지 않는다.
-  - tool handler 실패: runtime은 획득한 resume `leaseOwner`로 `failed(retryable|nonRetryable)` 전환을 기록하고 event를 발행한다.
+  - resume 중 completion 전 예외: runtime은 획득한 resume `leaseOwner`로 `failed` 전환을 기록하고, 명시적으로 non-retryable로 분류된 정책 오류가 아니면 `retryable=true` event를 발행한다.
 
 #### Flow ID: HA-CANCEL-01
 
@@ -151,7 +151,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 ### Constraint ID: HA-CONST-002
 
 - Category: Blocker semantics
-- Description: Human Approval은 durable inbound queue를 소유하지 않고 conversation blocker로만 동작한다. blocker lifecycle의 canonical owner는 `HumanApprovalStore`이며, Human Approval 사용 시 `DurableInboundStore` 구성이 필수다.
+- Description: Human Approval은 durable inbound queue를 소유하지 않고 conversation blocker로만 동작한다. blocker lifecycle의 canonical owner는 `HumanApprovalStore`이며, Human Approval 사용 시 `DurableInboundStore` 구성이 필수다. Conversation blocker index는 approval id 단위로 유지되어 하나의 approval 완료/취소가 같은 conversation의 다른 active approval blocker를 제거하지 않는다.
 - Scope: `HA-CREATE-01`, `HA-RESUME-01`
 - Measurement: human approval 중 inbound input은 `HumanApprovalStore` queue가 아니라 `DurableInboundStore` item으로 저장된다.
 - Verification: runtime integration test
@@ -301,5 +301,7 @@ interface HumanApprovalStore {
 - Given ready approval와 blocked inbound item 2개가 있다, When resume이 완료된다, Then tool result가 먼저 append되고 blocked inbound items가 sequence order로 append된 뒤 continuation Turn이 실행된다.
 - Given ready approval와 blocked inbound item 2개가 있다, When resume이 blocked item을 drain한다, Then tool result append, blocked item append, item consume이 모두 완료될 때까지 Human Approval blocker는 active 상태로 유지된다.
 - Given ready approval이 completed로 전환되어 blocker가 해제되는 순간 같은 conversation inbound input이 들어온다, When continuation Turn handoff가 아직 LLM 실행을 시작하기 전이다, Then input은 새 Turn을 시작하지 않고 준비된 continuation Turn에 delivered 된다.
-- Given approval이 `failed`, `canceled`, 또는 `expired` terminal 상태다, When `resumeHumanApproval(id)`가 호출된다, Then runtime은 `blocked`가 아니라 `failed` resume result를 반환한다.
+- Given resume 중 completion 전 transient 예외가 발생한다, When runtime이 approval을 failed로 기록한다, Then failure는 retryable이며 이후 `resumeHumanApproval(id)`가 다시 lease를 획득할 수 있다.
+- Given 같은 conversation에 active Human Approval이 2개 있다, When 그 중 하나가 completed/canceled 된다, Then 나머지 approval blocker는 conversation blocker lookup에 남아 inbound를 계속 block한다.
+- Given approval이 non-retryable `failed`, `canceled`, 또는 `expired` 상태다, When `resumeHumanApproval(id)`가 호출된다, Then runtime은 `blocked`가 아니라 `failed` resume result를 반환한다.
 - Given 두 resume worker가 같은 ready approval을 처리하려 한다, When 둘 다 lease 획득을 시도한다, Then 하나만 handler를 실행하고 다른 하나는 existing completion 또는 lease conflict로 수렴한다.

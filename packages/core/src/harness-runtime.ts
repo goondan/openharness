@@ -1156,13 +1156,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               const failed = await this._humanApprovalStore!.markApprovalFailed({
                 humanApprovalId: id,
                 reason: error.message,
-                retryable: false,
+                retryable: true,
                 leaseOwner: "runtime",
               } as any);
               this._runtimeEvents.emit("humanApproval.failed", {
                 type: "humanApproval.failed",
                 humanApprovalId: id,
-                retryable: false,
+                retryable: true,
                 reason: error.message,
               } as any);
               return {

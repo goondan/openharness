@@ -883,7 +883,17 @@ describe("durable inbound and Human Approval integration", () => {
       humanApprovalId: tasks[0].humanApprovalId,
       leaseOwner: "runtime",
       reason: "completion write failed",
+      retryable: true,
     }));
+    expect(resumed?.approval.failure?.retryable).toBe(true);
+
+    const reacquired = await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: tasks[0].humanApprovalId,
+      leaseOwner: "worker-retry",
+      leaseTtlMs: 10_000,
+    });
+    expect(reacquired?.status).toBe("resuming");
+    expect(reacquired?.lease?.owner).toBe("worker-retry");
 
     await runtime.close();
   });
@@ -951,6 +961,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(capturedSignal?.aborted).toBe(true);
     expect(resumed.status).toBe("failed");
     expect(resumed.approval.failure?.reason).toBe("abort resume");
+    expect(resumed.approval.failure?.retryable).toBe(true);
 
     await runtime.close();
   });
@@ -1171,6 +1182,72 @@ describe("durable inbound and Human Approval integration", () => {
     expect(reacquired?.status).toBe("resuming");
     expect(reacquired?.lease?.owner).toBe("worker-2");
     expect(blockedAfterHandlerStarted).toBeNull();
+  });
+
+  it("keeps conversation blocked while another Human Approval in the same conversation is active", async () => {
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const first = await humanApprovalStore.createApproval({
+      humanApprovalId: "approval-shared-1",
+      toolCall: {
+        turnId: "turn-shared-1",
+        agentName: "default",
+        conversationId: "conv-shared-blocker",
+        stepNumber: 1,
+        toolCallId: "call-shared-1",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-shared-1", type: "approval", required: true }],
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    const second = await humanApprovalStore.createApproval({
+      humanApprovalId: "approval-shared-2",
+      toolCall: {
+        turnId: "turn-shared-2",
+        agentName: "default",
+        conversationId: "conv-shared-blocker",
+        stepNumber: 1,
+        toolCallId: "call-shared-2",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-shared-2", type: "approval", required: true }],
+      now: "2026-01-01T00:00:01.000Z",
+    });
+
+    await humanApprovalStore.submitResult({
+      humanTaskId: first.tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-shared-1",
+      now: "2026-01-01T00:00:02.000Z",
+    });
+    await humanApprovalStore.acquireApprovalForResume({
+      humanApprovalId: first.approval.id,
+      leaseOwner: "worker-1",
+      now: "2026-01-01T00:00:03.000Z",
+    });
+    await humanApprovalStore.markApprovalCompleted({
+      humanApprovalId: first.approval.id,
+      leaseOwner: "worker-1",
+      now: "2026-01-01T00:00:04.000Z",
+    });
+    const blockerAfterFirstCompletion = await humanApprovalStore.getConversationBlocker({
+      agentName: "default",
+      conversationId: "conv-shared-blocker",
+    });
+
+    await humanApprovalStore.cancelApproval({
+      humanApprovalId: second.approval.id,
+      reason: "operator cancel",
+      now: "2026-01-01T00:00:05.000Z",
+    });
+    const blockerAfterSecondCancel = await humanApprovalStore.getConversationBlocker({
+      agentName: "default",
+      conversationId: "conv-shared-blocker",
+    });
+
+    expect(blockerAfterFirstCompletion?.id).toBe(second.approval.id);
+    expect(blockerAfterSecondCancel).toBeNull();
   });
 
   it("keeps resuming and failed Human Approvals from being reopened by late task submissions", async () => {
