@@ -9,8 +9,7 @@ import type {
   ToolDefinition,
 } from "@goondan/openharness-types";
 import { createHarness } from "../create-harness.js";
-import { createInMemoryDurableInboundStore } from "../inbound/memory-store.js";
-import { createInMemoryHumanApprovalStore } from "../hitl/memory-store.js";
+import { createInMemoryDurableInboundStore, createInMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 
 let currentClient: LlmClient;
 

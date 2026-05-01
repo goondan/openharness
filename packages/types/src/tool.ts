@@ -1,5 +1,5 @@
 import type { Schema } from "ai";
-import type { ConversationBlockerRef } from "./ingress.js";
+import type { ConversationBlockerRef, LeaseInfo } from "./ingress.js";
 
 // JsonSchema / primitive types
 export type JsonSchema = Record<string, unknown>;
@@ -46,7 +46,7 @@ export type HumanTaskStatus =
   | "canceled"
   | "expired";
 
-export type HumanTaskType = "approval" | "text" | "form";
+export type HumanTaskType = "approval" | "text" | "form" | (string & {});
 
 export interface HumanTaskDefinition {
   type: HumanTaskType;
@@ -81,6 +81,40 @@ export interface ToolCallSnapshot {
   toolArgs: JsonObject;
 }
 
+export type HumanApprovalToolCallSnapshot = ToolCallSnapshot;
+
+export interface HumanTaskRecord {
+  id: string;
+  humanApprovalId: string;
+  taskType: HumanTaskType;
+  status: HumanTaskStatus;
+  title?: string;
+  prompt?: string;
+  required: boolean;
+  responseSchema?: JsonSchema;
+  result?: HumanResult;
+  resultIdempotencyKey?: string;
+  submittedBy?: string;
+  submittedAt?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HumanTaskView extends HumanTaskRecord {
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  toolCallId: string;
+  toolName: string;
+}
+
+export interface HumanApprovalFailureInfo {
+  reason: string;
+  retryable: boolean;
+  failedAt: string;
+}
+
 export interface HumanApprovalRecord {
   id: string;
   agentName: string;
@@ -89,57 +123,55 @@ export interface HumanApprovalRecord {
   toolCallId: string;
   status: HumanApprovalStatus;
   toolCall: ToolCallSnapshot;
+  prompt?: string;
+  expectedResultSchema?: JsonSchema;
+  conversationCursor?: string;
+  conversationSnapshot?: unknown;
   taskIds: string[];
-  requiredTaskIds: string[];
+  requiredTaskIds?: string[];
   blocker: ConversationBlockerRef;
   blockedInboundItemIds?: string[];
   handlerStartedAt?: string;
-  lease?: {
-    owner: string;
-    expiresAt: string;
-    token?: string;
-  };
+  lease?: LeaseInfo;
   result?: HumanResult;
-  failure?: {
-    reason: string;
-    retryable: boolean;
-  };
+  failure?: HumanApprovalFailureInfo;
+  completedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface HumanTaskView {
-  id: string;
-  humanApprovalId: string;
-  type: HumanTaskType;
-  status: HumanTaskStatus;
-  agentName: string;
-  conversationId: string;
-  turnId: string;
-  toolCallId: string;
-  toolName: string;
+export interface HumanTaskCreateInput {
+  humanTaskId?: string;
+  type?: HumanTaskType;
+  taskType?: HumanTaskType;
   title?: string;
   prompt?: string;
+  required?: boolean;
   responseSchema?: JsonSchema;
-  result?: HumanResult;
-  idempotencyKey?: string;
-  createdAt: string;
-  updatedAt: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface CreateHumanApprovalInput {
-  id: string;
+  id?: string;
+  humanApprovalId?: string;
   toolCall: ToolCallSnapshot;
-  policy: HumanApprovalPolicy;
-  tasks: HumanTaskDefinition[];
+  policy?: HumanApprovalPolicy | unknown;
+  tasks: HumanTaskCreateInput[] | HumanTaskDefinition[];
+  prompt?: string;
+  expectedResultSchema?: JsonSchema;
+  conversationCursor?: string;
+  conversationSnapshot?: unknown;
   createdAt?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
+  now?: string;
 }
 
 export interface CreateHumanApprovalResult {
   approval: HumanApprovalRecord;
-  tasks: HumanTaskView[];
+  tasks: HumanTaskRecord[] | HumanTaskView[];
+  blocker?: ConversationBlockerRef;
+  created?: boolean;
   duplicate: boolean;
 }
 
@@ -148,6 +180,8 @@ export interface HumanTaskFilter {
   conversationId?: string;
   humanApprovalId?: string;
   status?: HumanTaskStatus | HumanTaskStatus[];
+  statuses?: HumanTaskStatus[];
+  taskTypes?: HumanTaskType[];
   limit?: number;
 }
 
@@ -159,26 +193,36 @@ export interface SubmitHumanResultInput {
   conversationId?: string;
   submittedAt?: string;
   submittedBy?: string;
+  now?: string;
 }
 
-export interface SubmitHumanResult {
-  accepted: true;
-  duplicate: boolean;
-  task: HumanTaskView;
-  approval: HumanApprovalRecord;
-}
+export type SubmitHumanResult =
+  | {
+      status: "accepted" | "duplicate";
+      accepted?: true;
+      duplicate: boolean;
+      task: HumanTaskRecord | HumanTaskView;
+      approval: HumanApprovalRecord;
+      approvalReady?: boolean;
+    }
+  | {
+      status: "notFound" | "invalid";
+      accepted?: false;
+      reason: string;
+    };
 
 export interface AcquireHumanApprovalInput {
   humanApprovalId: string;
   leaseOwner: string;
-  leaseExpiresAt: string;
+  leaseExpiresAt?: string;
+  leaseTtlMs?: number;
   now?: string;
 }
 
 export interface CompleteHumanApprovalInput {
   humanApprovalId: string;
   leaseOwner?: string;
-  turnId: string;
+  turnId?: string;
   blockedInboundItemIds?: string[];
   now?: string;
 }
@@ -201,6 +245,7 @@ export interface CancelHumanApprovalInput {
   humanApprovalId: string;
   reason?: string;
   expired?: boolean;
+  status?: Extract<HumanApprovalStatus, "canceled" | "expired">;
   now?: string;
 }
 
@@ -208,6 +253,7 @@ export interface HumanApprovalRecoveryFilter {
   agentName?: string;
   conversationId?: string;
   status?: HumanApprovalStatus | HumanApprovalStatus[];
+  includeFailed?: boolean;
   limit?: number;
 }
 
@@ -221,12 +267,15 @@ export interface HumanApprovalStore {
   markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord>;
   cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
   listRecoverableApprovals(filter?: HumanApprovalRecoveryFilter): Promise<HumanApprovalRecord[]>;
+}
+
+export interface HumanApprovalReferenceStore extends HumanApprovalStore {
+  getApproval(id: string): Promise<HumanApprovalRecord | null>;
+  getTask(id: string): Promise<HumanTaskRecord | null>;
   getConversationBlocker(input: {
     agentName: string;
     conversationId: string;
   }): Promise<ConversationBlockerRef | null>;
-  getApproval(id: string): Promise<HumanApprovalRecord | null>;
-  getTask(id: string): Promise<HumanTaskView | null>;
 }
 
 // ToolDefinition

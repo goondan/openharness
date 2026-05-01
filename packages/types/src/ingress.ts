@@ -59,6 +59,8 @@ export type InboundItemStatus =
   | "failed"
   | "deadLetter";
 
+export type DurableInboundItemStatus = InboundItemStatus;
+
 export type IngressDisposition =
   | "started"
   | "delivered"
@@ -66,11 +68,15 @@ export type IngressDisposition =
   | "duplicate"
   | "steered";
 
+export type DurableIngressDisposition = IngressDisposition;
+
 export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
 export interface ConversationBlockerRef {
-  type: ConversationBlockerType;
+  type: ConversationBlockerType | (string & {});
   id: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface LeaseInfo {
@@ -88,6 +94,14 @@ export interface InboundSource {
   metadata?: Record<string, unknown>;
 }
 
+export type DurableInboundSource = InboundSource;
+
+export interface InboundFailureInfo {
+  reason: string;
+  retryable: boolean;
+  failedAt: string;
+}
+
 export interface DurableInboundItem {
   id: string;
   agentName: string;
@@ -103,6 +117,7 @@ export interface DurableInboundItem {
   lease?: LeaseInfo;
   attempt: number;
   lastError?: string;
+  failure?: InboundFailureInfo;
   createdAt: string;
   updatedAt: string;
 }
@@ -112,21 +127,25 @@ export interface AppendInboundInput {
   conversationId: string;
   envelope: InboundEnvelope;
   source: InboundSource;
-  idempotencyKey: string;
+  idempotencyKey?: string;
   receivedAt?: string;
+  now?: string;
   turnId?: string;
 }
 
 export interface AppendInboundResult {
   item: DurableInboundItem;
+  appended?: boolean;
   duplicate: boolean;
+  disposition?: "pending" | "duplicate";
 }
 
 export interface AcquireInboundInput {
   agentName: string;
   conversationId: string;
   leaseOwner: string;
-  leaseExpiresAt: string;
+  leaseExpiresAt?: string;
+  leaseTtlMs?: number;
   now?: string;
 }
 
@@ -140,13 +159,15 @@ export interface MarkInboundDeliveredInput {
 export interface MarkInboundBlockedInput {
   id: string;
   blockedBy: ConversationBlockerRef;
+  leaseOwner?: string;
   now?: string;
 }
 
 export interface MarkInboundConsumedInput {
   id: string;
-  turnId: string;
+  turnId?: string;
   commitRef: string;
+  leaseOwner?: string;
   now?: string;
 }
 
@@ -154,6 +175,7 @@ export interface FailInboundInput {
   id: string;
   reason: string;
   retryable: boolean;
+  leaseOwner?: string;
   now?: string;
 }
 
@@ -161,7 +183,8 @@ export interface InboundItemFilter {
   agentName?: string;
   conversationId?: string;
   status?: InboundItemStatus | InboundItemStatus[];
-  blockedBy?: ConversationBlockerRef;
+  statuses?: InboundItemStatus[];
+  blockedBy?: ConversationBlockerRef | Partial<ConversationBlockerRef>;
   limit?: number;
 }
 
@@ -177,18 +200,30 @@ export interface ReleaseInboundItemInput {
   now?: string;
 }
 
+export interface ReleaseBlockedInboundInput {
+  agentName?: string;
+  conversationId?: string;
+  blockedBy?: Partial<ConversationBlockerRef>;
+  now?: string;
+}
+
 export interface DurableInboundStore {
   append(input: AppendInboundInput): Promise<AppendInboundResult>;
   acquireNext(input: AcquireInboundInput): Promise<DurableInboundItem | null>;
   markDelivered(input: MarkInboundDeliveredInput): Promise<DurableInboundItem>;
   markBlocked(input: MarkInboundBlockedInput): Promise<DurableInboundItem>;
   markConsumed(input: MarkInboundConsumedInput): Promise<DurableInboundItem>;
-  markFailed?(input: FailInboundInput): Promise<DurableInboundItem>;
   releaseExpiredLeases(now: string): Promise<number>;
   listInboundItems(filter: InboundItemFilter): Promise<DurableInboundItem[]>;
   retryInboundItem(id: string): Promise<DurableInboundItem>;
   releaseInboundItem?(input: ReleaseInboundItemInput): Promise<DurableInboundItem>;
   deadLetterInboundItem(input: DeadLetterInboundInput): Promise<DurableInboundItem>;
+}
+
+export interface DurableInboundReferenceStore extends DurableInboundStore {
+  markFailed(input: FailInboundInput): Promise<DurableInboundItem>;
+  releaseBlockedInboundItems(input: ReleaseBlockedInboundInput): Promise<DurableInboundItem[]>;
+  getInboundItem(id: string): Promise<DurableInboundItem | null>;
 }
 
 export interface IngressAcceptResult {
