@@ -3,6 +3,7 @@ import { executeToolCall } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { createInMemoryHumanApprovalStore } from "../../hitl/memory-store.js";
 import type {
   ToolCallContext,
   ToolResult,
@@ -323,5 +324,63 @@ describe("executeToolCall", () => {
     expect(donePayload.type).toBe("tool.done");
     expect(donePayload.toolCallId).toBe("call-8");
     expect(donePayload.result).toEqual(result);
+  });
+
+  it("does not re-emit human approval created events for duplicate gate creation", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register({
+      ...makeTool("my_tool"),
+      humanApproval: { required: true, prompt: "Approve?" },
+    });
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const eventBus = new EventBus();
+    const gateCreated = vi.fn();
+    const taskCreated = vi.fn();
+    eventBus.on("humanApproval.created", gateCreated);
+    eventBus.on("humanTask.created", taskCreated);
+
+    const ctx = makeToolCallContext({ toolName: "my_tool", toolArgs: { value: "hello" } });
+    const deps = { ...makeDeps({ toolRegistry, eventBus }), humanApprovalStore };
+
+    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Approval/);
+    await expect(executeToolCall("call-duplicate-gate", ctx, deps)).rejects.toThrow(/Human Approval/);
+
+    expect(gateCreated).toHaveBeenCalledOnce();
+    expect(taskCreated).toHaveBeenCalledOnce();
+  });
+
+  it("emits human approval created events from public store result fields", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register({
+      ...makeTool("my_tool"),
+      humanApproval: { required: true, prompt: "Approve?" },
+    });
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const createApproval = humanApprovalStore.createApproval.bind(humanApprovalStore);
+    vi.spyOn(humanApprovalStore, "createApproval").mockImplementation(async (input) => {
+      const result = await createApproval(input as any);
+      return {
+        approval: result.approval,
+        duplicate: result.duplicate,
+        tasks: result.tasks.map((task) => {
+          const { taskType, ...publicTask } = task as any;
+          return { ...publicTask, type: taskType };
+        }),
+      } as any;
+    });
+    const eventBus = new EventBus();
+    const gateCreated = vi.fn();
+    const taskCreated = vi.fn();
+    eventBus.on("humanApproval.created", gateCreated);
+    eventBus.on("humanTask.created", taskCreated);
+
+    const ctx = makeToolCallContext({ toolName: "my_tool", toolArgs: { value: "hello" } });
+    const deps = { ...makeDeps({ toolRegistry, eventBus }), humanApprovalStore };
+
+    await expect(executeToolCall("call-public-store", ctx, deps as any)).rejects.toThrow(/Human Approval/);
+
+    expect(gateCreated).toHaveBeenCalledOnce();
+    expect(taskCreated).toHaveBeenCalledOnce();
+    expect(taskCreated.mock.calls[0][0].taskType).toBe("approval");
   });
 });

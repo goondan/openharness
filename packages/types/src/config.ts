@@ -1,6 +1,6 @@
 import type { Extension } from "./extension.js";
-import type { ToolDefinition } from "./tool.js";
-import type { Connector, RoutingRule } from "./ingress.js";
+import type { HumanApprovalStore, ToolDefinition } from "./tool.js";
+import type { Connector, DurableInboundStore, RoutingRule } from "./ingress.js";
 
 // -----------------------------------------------------------------------
 // EnvRef — branded type for deferred environment variable resolution
@@ -49,6 +49,18 @@ export interface ConnectionConfig {
   rules: RoutingRule[];
 }
 
+export interface DurableInboundConfig {
+  enabled?: boolean;
+  store: DurableInboundStore;
+  leaseMs?: number;
+  maxAttempts?: number;
+}
+
+export interface HumanApprovalConfig {
+  store: HumanApprovalStore;
+  resumeLeaseMs?: number;
+}
+
 // -----------------------------------------------------------------------
 // Top-level harness config
 // -----------------------------------------------------------------------
@@ -56,6 +68,8 @@ export interface ConnectionConfig {
 export interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
+  durableInbound?: DurableInboundConfig;
+  humanApproval?: HumanApprovalConfig;
 }
 
 // -----------------------------------------------------------------------
@@ -64,6 +78,9 @@ export interface HarnessConfig {
 
 export interface ProcessTurnOptions {
   conversationId?: string;
+  idempotencyKey?: string;
+  receivedAt?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // -----------------------------------------------------------------------

@@ -2,7 +2,24 @@ import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharn
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { HumanApprovalReferenceStore } from "../hitl/types.js";
 import { normalizeToolArgs } from "../tool-args.js";
+
+export class HumanApprovalPendingError extends Error {
+  readonly humanApprovalId: string;
+
+  constructor(humanApprovalId: string) {
+    super(`Human Approval is waiting for human input: ${humanApprovalId}`);
+    this.name = "HumanApprovalPendingError";
+    this.humanApprovalId = humanApprovalId;
+  }
+}
+
+export function isHumanApprovalPendingError(error: unknown): error is HumanApprovalPendingError {
+  return error instanceof HumanApprovalPendingError || (
+    error instanceof Error && error.name === "HumanApprovalPendingError"
+  );
+}
 
 /**
  * Execute a single tool call with full middleware chain, validation, event emission.
@@ -21,9 +38,11 @@ export async function executeToolCall(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    humanApprovalStore?: HumanApprovalReferenceStore;
+    skipHumanApproval?: boolean;
   }
 ): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore, skipHumanApproval } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -52,6 +71,72 @@ export async function executeToolCall(
     const validation = toolRegistry.validate(toolName, normalizedToolArgs);
     if (!validation.valid) {
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
+    }
+
+    const humanApproval = tool.humanApproval;
+    if (!skipHumanApproval && humanApproval && humanApproval.required !== false) {
+      if (!humanApprovalStore) {
+        return { type: "error", error: `Tool "${toolName}" requires a Human Approval store` };
+      }
+
+      const created = await humanApprovalStore.createApproval({
+        id: `${turnId}:${toolCallId}:humanApproval`,
+        humanApprovalId: `${turnId}:${toolCallId}:humanApproval`,
+        toolCall: {
+          turnId,
+          agentName,
+          conversationId,
+          stepNumber,
+          toolCallId,
+          toolName,
+          toolArgs: normalizedToolArgs,
+        },
+        policy: humanApproval,
+        prompt: humanApproval.prompt,
+        expectedResultSchema: humanApproval.responseSchema,
+        tasks: (humanApproval.tasks?.length
+          ? humanApproval.tasks.map((task, index) => ({
+              humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
+              type: task.type,
+              taskType: task.type,
+              title: task.title,
+              prompt: task.prompt ?? humanApproval.prompt,
+              required: task.required,
+              responseSchema: task.responseSchema,
+            }))
+          : [{
+              humanTaskId: `${turnId}:${toolCallId}:task:1`,
+              type: "approval" as const,
+              taskType: "approval" as const,
+              prompt: humanApproval.prompt,
+              required: true,
+              responseSchema: humanApproval.responseSchema,
+            }]),
+      });
+
+      const approvalCreated = (created as any).created ?? !created.duplicate;
+      if (approvalCreated) {
+        eventBus.emit("humanApproval.created", {
+          type: "humanApproval.created",
+          humanApprovalId: created.approval.id,
+          agentName,
+          conversationId,
+          turnId,
+          toolCallId,
+        });
+        for (const task of created.tasks) {
+          eventBus.emit("humanTask.created", {
+            type: "humanTask.created",
+            humanApprovalId: created.approval.id,
+            humanTaskId: task.id,
+            taskType: ((task as any).taskType ?? (task as any).type) as "approval" | "text" | "form",
+            agentName,
+            conversationId,
+          });
+        }
+      }
+
+      throw new HumanApprovalPendingError(created.approval.id);
     }
 
     // Build the simpler ToolContext that the handler receives
@@ -87,6 +172,9 @@ export async function executeToolCall(
 
     return result;
   } catch (err) {
+    if (isHumanApprovalPendingError(err)) {
+      throw err;
+    }
     const error = err instanceof Error ? err : new Error(String(err));
 
     // Emit tool.error on failure

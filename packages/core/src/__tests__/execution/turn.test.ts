@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { executeTurn } from "../../execution/turn.js";
+import { executeTurn, type TurnSteeringController } from "../../execution/turn.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
@@ -217,6 +217,65 @@ describe("executeTurn", () => {
     expect(llmClient.chat).toHaveBeenCalledTimes(2);
     expect(capturedMessages[1].some((message) =>
       messageRole(message) === "user" && messageContent(message) === "mid-turn input",
+    )).toBe(true);
+  });
+
+  it("continues instead of completing when steering receives input during completion", async () => {
+    const capturedMessages: Message[][] = [];
+    const llmClient: LlmClient = {
+      chat: vi.fn(async (messages) => {
+        capturedMessages.push([...(messages as Message[])]);
+        return capturedMessages.length === 1
+          ? { text: "first answer", finishReason: "stop" as const }
+          : { text: "answer after late steer", finishReason: "stop" as const };
+      }),
+    };
+    const deps = makeDeps({ llmClient });
+    let queuedInputs: Array<{
+      envelope: InboundEnvelope;
+      inboundItem: { id: string };
+      commitRef: string;
+    }> = [];
+    let injectedDuringClose = false;
+    const consumedInboundIds: string[] = [];
+    const steering: TurnSteeringController = {
+      drain: () => {
+        const inputs = queuedInputs;
+        queuedInputs = [];
+        return inputs as any;
+      },
+      consume: (input) => {
+        if (input.inboundItem) {
+          consumedInboundIds.push(input.inboundItem.id);
+        }
+      },
+      tryCloseIfEmpty: () => {
+        if (!injectedDuringClose) {
+          injectedDuringClose = true;
+          queuedInputs.push({
+            envelope: makeEnvelope("late input"),
+            inboundItem: { id: "inbound-late" },
+            commitRef: "commit-late",
+          });
+          return false;
+        }
+        return queuedInputs.length === 0;
+      },
+      close: vi.fn(),
+    };
+
+    const result = await executeTurn("agent-1", "original input", undefined, {
+      ...deps,
+      steering,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("answer after late steer");
+    expect(result.steps).toHaveLength(2);
+    expect(llmClient.chat).toHaveBeenCalledTimes(2);
+    expect(consumedInboundIds).toEqual(["inbound-late"]);
+    expect(capturedMessages[1].some((message) =>
+      messageRole(message) === "user" && messageContent(message) === "late input",
     )).toBe(true);
   });
 

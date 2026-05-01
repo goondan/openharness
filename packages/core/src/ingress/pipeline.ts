@@ -42,7 +42,17 @@ export interface IngressPipelineConfig {
     agentName: string,
     envelope: InboundEnvelope,
     conversationId: string,
-  ) => { turnId: string; disposition: IngressDisposition };
+  ) => Promise<{
+    turnId?: string;
+    disposition: IngressDisposition;
+    inboundItemId?: string;
+    blocker?: IngressAcceptResult["blocker"];
+  }> | {
+    turnId?: string;
+    disposition: IngressDisposition;
+    inboundItemId?: string;
+    blocker?: IngressAcceptResult["blocker"];
+  };
 }
 
 // -----------------------------------------------------------------------
@@ -275,7 +285,7 @@ export class IngressPipeline implements IngressApi {
     }
 
     // Dispatch: fire turn AFTER route chain completes successfully (INGRESS-CONST-004)
-    const dispatchOutcome = dispatchTurn(
+    const dispatchOutcome = await dispatchTurn(
       result.turnId,
       result.agentName,
       envelope,
@@ -290,6 +300,8 @@ export class IngressPipeline implements IngressApi {
       eventName: result.eventName,
       turnId: dispatchOutcome.turnId,
       disposition: dispatchOutcome.disposition,
+      inboundItemId: dispatchOutcome.inboundItemId,
+      blocker: dispatchOutcome.blocker,
     };
 
     // Emit ingress.accepted
@@ -300,6 +312,9 @@ export class IngressPipeline implements IngressApi {
       conversationId: acceptResult.conversationId,
       turnId: acceptResult.turnId,
       disposition: acceptResult.disposition,
+      eventName: acceptResult.eventName,
+      inboundItemId: acceptResult.inboundItemId,
+      blocker: acceptResult.blocker,
     });
 
     return acceptResult;

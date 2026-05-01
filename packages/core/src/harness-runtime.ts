@@ -8,6 +8,9 @@ import type {
   TurnResult,
   LlmClient,
   EventPayload,
+  DurableInboundStore,
+  DurableInboundItem,
+  HumanApprovalStore,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
@@ -15,9 +18,11 @@ import type { MiddlewareRegistry } from "./middleware-chain.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
-import { executeTurn, type TurnSteeringController } from "./execution/turn.js";
+import { executeToolCall } from "./execution/tool-call.js";
+import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
+import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
 
 const CLOSE_TIMEOUT_MS = 5000;
 
@@ -46,11 +51,23 @@ interface InFlightTurn {
   steeringInbox: SteeringInbox;
 }
 
-class SteeringInbox implements TurnSteeringController {
-  private _queue: InboundEnvelope[] = [];
-  private _closed = false;
+interface PreparedContinuationTurn {
+  turnId: string;
+  promise: Promise<TurnResult>;
+  start: () => Promise<TurnResult>;
+  discard: () => void;
+}
 
-  enqueue(input: InboundEnvelope): boolean {
+class SteeringInbox implements TurnSteeringController {
+  private _queue: Array<InboundEnvelope | TurnSteeredInput> = [];
+  private _closed = false;
+  private _consume?: (input: TurnSteeredInput) => Promise<void> | void;
+
+  constructor(consume?: (input: TurnSteeredInput) => Promise<void> | void) {
+    this._consume = consume;
+  }
+
+  enqueue(input: InboundEnvelope | TurnSteeredInput): boolean {
     if (this._closed) {
       return false;
     }
@@ -58,15 +75,29 @@ class SteeringInbox implements TurnSteeringController {
     return true;
   }
 
-  drain(): InboundEnvelope[] {
+  drain(): Array<InboundEnvelope | TurnSteeredInput> {
     const inputs = this._queue;
     this._queue = [];
     return inputs;
   }
 
+  async consume(input: TurnSteeredInput): Promise<void> {
+    await this._consume?.(input);
+  }
+
+  tryCloseIfEmpty(): boolean {
+    if (this._closed) {
+      return true;
+    }
+    if (this._queue.length > 0) {
+      return false;
+    }
+    this._closed = true;
+    return true;
+  }
+
   close(): void {
     this._closed = true;
-    this._queue = [];
   }
 }
 
@@ -84,6 +115,105 @@ function createDeferred<T>(): {
   return { promise, resolve, reject };
 }
 
+function turnResultForDurableDuplicate(
+  item: DurableInboundItem & { failure?: { reason?: string } },
+  agentName: string,
+  conversationId: string,
+  cached?: TurnResult,
+): TurnResult {
+  const turnId = item.turnId ?? `turn-${randomUUID()}`;
+  const base = {
+    turnId,
+    agentName,
+    conversationId,
+    steps: [],
+  };
+
+  switch (item.status) {
+    case "blocked":
+      return {
+        ...base,
+        status: "waitingForHuman",
+      };
+    case "consumed":
+      if (cached) {
+        return cached;
+      }
+      return {
+        ...base,
+        status: "aborted",
+        error: new Error(
+          `Durable inbound item "${item.id}" is consumed but has no cached turn result; duplicate caller must use recovery state instead of assuming completion.`,
+        ),
+      };
+    case "pending":
+    case "leased":
+    case "delivered":
+      return {
+        ...base,
+        status: "aborted",
+        error: new Error(
+          `Durable inbound item "${item.id}" is ${item.status}; duplicate caller must wait for recovery or the active turn.`,
+        ),
+      };
+    case "failed":
+    case "deadLetter": {
+      const reason = item.failure?.reason ?? item.lastError ?? `Durable inbound item "${item.id}" is ${item.status}.`;
+      return {
+        ...base,
+        status: "error",
+        error: new Error(reason),
+      };
+    }
+  }
+}
+
+function toPublicHumanTaskView(task: any): any {
+  if (!task) {
+    return task;
+  }
+  return {
+    ...task,
+    type: task.type ?? task.taskType,
+    idempotencyKey: task.idempotencyKey ?? task.resultIdempotencyKey,
+  };
+}
+
+async function toPublicHumanApprovalRecord(approval: any, store?: HumanApprovalStore): Promise<any> {
+  if (!approval) {
+    return approval;
+  }
+  const toolCall = approval.toolCall ?? {};
+  const taskIds = approval.taskIds ?? [];
+  let requiredTaskIds = approval.requiredTaskIds;
+  if (!requiredTaskIds && store && taskIds.length > 0) {
+    const tasks = await Promise.all(
+      taskIds.map((taskId: string) => (store as any).getTask?.(taskId)),
+    );
+    const required = tasks
+      .filter((task) => task && task.required !== false)
+      .map((task) => task.id);
+    requiredTaskIds = tasks.some(Boolean) ? required : taskIds;
+  }
+
+  return {
+    ...approval,
+    agentName: approval.agentName ?? toolCall.agentName,
+    conversationId: approval.conversationId ?? toolCall.conversationId,
+    turnId: approval.turnId ?? toolCall.turnId,
+    toolCallId: approval.toolCallId ?? toolCall.toolCallId,
+    requiredTaskIds: requiredTaskIds ?? taskIds,
+  };
+}
+
+function humanApprovalResumeStatus(approval: any): "completed" | "failed" | "blocked" {
+  const status = approval?.status;
+  if (status === "completed") {
+    return "completed";
+  }
+  return ["failed", "canceled", "expired"].includes(status) ? "failed" : "blocked";
+}
+
 // ---------------------------------------------------------------------------
 // HarnessRuntimeImpl
 // ---------------------------------------------------------------------------
@@ -93,24 +223,71 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _conversations: Map<string, ConversationStateImpl> = new Map();
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
   private readonly _activeTurnByConversation: Map<string, InFlightTurn> = new Map();
+  private readonly _turnResultByInboundItem: Map<string, TurnResult> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
   private readonly _runtimeEvents: EventBus;
+  private readonly _durableInboundStore?: DurableInboundStore;
+  private readonly _humanApprovalStore?: HumanApprovalStore;
+  private readonly _humanApprovalResumeLeaseMs: number;
   private _closed = false;
 
-  constructor(agents: Map<string, AgentDeps>, ingressPipeline: IngressPipeline, runtimeEvents: EventBus) {
+  constructor(
+    agents: Map<string, AgentDeps>,
+    ingressPipeline: IngressPipeline,
+    runtimeEvents: EventBus,
+    durableInboundStore?: DurableInboundStore,
+    humanApprovalStore?: HumanApprovalStore,
+    humanApprovalResumeLeaseMs = 30_000,
+  ) {
     this._agents = agents;
     this._ingressPipeline = ingressPipeline;
     this._runtimeEvents = runtimeEvents;
+    this._durableInboundStore = durableInboundStore;
+    this._humanApprovalStore = humanApprovalStore;
+    this._humanApprovalResumeLeaseMs = humanApprovalResumeLeaseMs;
   }
 
   private _conversationKey(agentName: string, conversationId: string): string {
     return `${agentName}::${conversationId}`;
   }
 
+  private _getConversationState(agentName: string, conversationId: string): ConversationStateImpl {
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    let conversationState = this._conversations.get(conversationKey);
+    if (!conversationState) {
+      conversationState = createConversationState();
+      this._conversations.set(conversationKey, conversationState);
+    }
+    return conversationState;
+  }
+
+  private _createSteeringInbox(turnId: string): SteeringInbox {
+    return new SteeringInbox(async (steered) => {
+      if (!this._durableInboundStore || !steered.inboundItem || !steered.commitRef) {
+        return;
+      }
+      await this._durableInboundStore.markConsumed({
+        id: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      } as any);
+      this._runtimeEvents.emit("inbound.consumed", {
+        type: "inbound.consumed",
+        inboundItemId: steered.inboundItem.id,
+        turnId,
+        commitRef: steered.commitRef,
+      });
+    });
+  }
+
   private async _processTurnInternal(
     agentName: string,
     input: string | InboundEnvelope,
     options?: (ProcessTurnOptions & { turnId?: string }),
+    durable?: {
+      item: any;
+      commitRef: string;
+    },
   ): Promise<TurnResult> {
     if (this._closed) {
       throw new HarnessError("Runtime is closed");
@@ -129,15 +306,11 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     const conversationKey = this._conversationKey(agentName, conversationId);
 
-    let conversationState = this._conversations.get(conversationKey);
-    if (!conversationState) {
-      conversationState = createConversationState();
-      this._conversations.set(conversationKey, conversationState);
-    }
+    const conversationState = this._getConversationState(agentName, conversationId);
 
     const abortController = new AbortController();
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
-    const steeringInbox = new SteeringInbox();
+    const steeringInbox = this._createSteeringInbox(turnId);
     const trackedTurn = createDeferred<TurnResult>();
 
     const inFlightTurn: InFlightTurn = {
@@ -153,6 +326,22 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     this._activeTurnByConversation.set(conversationKey, inFlightTurn);
 
     try {
+      let inboundItem = durable?.item;
+      if (inboundItem && this._durableInboundStore) {
+        const wasDelivered = inboundItem.status === "delivered";
+        inboundItem = await this._durableInboundStore.markDelivered({
+          id: inboundItem.id,
+          turnId,
+        } as any);
+        if (!wasDelivered && inboundItem.status === "delivered") {
+          this._runtimeEvents.emit("inbound.delivered", {
+            type: "inbound.delivered",
+            inboundItemId: inboundItem.id,
+            turnId,
+            sequence: inboundItem.sequence,
+          } as any);
+        }
+      }
       const turnPromise = executeTurn(agentName, input, { ...options, conversationId, turnId }, {
         llmClient: agentDeps.llmClient,
         toolRegistry: agentDeps.toolRegistry,
@@ -162,6 +351,39 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         maxSteps: agentDeps.maxSteps,
         abortController,
         steering: steeringInbox,
+        humanApprovalStore: this._humanApprovalStore as any,
+        inboundItem,
+        inboundCommitRef: durable?.commitRef,
+        consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          await this._durableInboundStore.markConsumed({
+            id: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          } as any);
+          this._runtimeEvents.emit("inbound.consumed", {
+            type: "inbound.consumed",
+            inboundItemId: item.id,
+            turnId: consumedTurnId,
+            commitRef,
+          });
+        },
+        blockInboundItem: async ({ item, blocker }) => {
+          if (!this._durableInboundStore) {
+            return;
+          }
+          const blocked = await this._durableInboundStore.markBlocked({
+            id: item.id,
+            blockedBy: blocker,
+          } as any);
+          this._runtimeEvents.emit("inbound.blocked", {
+            type: "inbound.blocked",
+            inboundItemId: blocked.id,
+            blockedBy: blocker,
+          } as any);
+        },
       });
       void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
     } catch (err) {
@@ -179,6 +401,276 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     }
   }
 
+  private async _continueTurnInternal(
+    agentName: string,
+    conversationId: string,
+  ): Promise<TurnResult> {
+    const continuation = this._prepareContinuationTurn(agentName, conversationId);
+    return continuation.start();
+  }
+
+  private _prepareContinuationTurn(
+    agentName: string,
+    conversationId: string,
+  ): PreparedContinuationTurn {
+    if (this._closed) {
+      throw new HarnessError("Runtime is closed");
+    }
+
+    const agentDeps = this._agents.get(agentName);
+    if (!agentDeps) {
+      throw new ConfigError(`Unknown agent: "${agentName}"`);
+    }
+
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const conversationState = this._getConversationState(agentName, conversationId);
+    const abortController = new AbortController();
+    const turnId = `turn-${randomUUID()}`;
+    const steeringInbox = this._createSteeringInbox(turnId);
+    const trackedTurn = createDeferred<TurnResult>();
+    let started = false;
+    let cleanedUp = false;
+
+    const inFlightTurn: InFlightTurn = {
+      turnId,
+      agentName,
+      conversationId,
+      abortController,
+      promise: trackedTurn.promise,
+      steeringInbox,
+    };
+
+    this._inFlightTurns.set(turnId, inFlightTurn);
+    this._activeTurnByConversation.set(conversationKey, inFlightTurn);
+
+    const resumeEnvelope: InboundEnvelope = {
+      name: "humanApproval.resume",
+      content: [],
+      properties: {},
+      conversationId,
+      source: {
+        connector: "humanApproval",
+        connectionName: "humanApproval",
+        receivedAt: new Date().toISOString(),
+      },
+      metadata: {
+        __createdBy: "core",
+        __humanApprovalContinuation: true,
+      },
+    };
+
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      steeringInbox.close();
+      this._inFlightTurns.delete(turnId);
+      if (this._activeTurnByConversation.get(conversationKey)?.turnId === turnId) {
+        this._activeTurnByConversation.delete(conversationKey);
+      }
+    };
+
+    return {
+      turnId,
+      promise: trackedTurn.promise,
+      start: async () => {
+        if (!started) {
+          started = true;
+          try {
+            const turnPromise = executeTurn(agentName, resumeEnvelope, { conversationId, turnId }, {
+              llmClient: agentDeps.llmClient,
+              toolRegistry: agentDeps.toolRegistry,
+              middlewareRegistry: agentDeps.middlewareRegistry,
+              eventBus: agentDeps.eventBus,
+              conversationState,
+              maxSteps: agentDeps.maxSteps,
+              abortController,
+              steering: steeringInbox,
+              humanApprovalStore: this._humanApprovalStore as any,
+              skipInputAppend: true,
+              consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
+                if (!this._durableInboundStore) {
+                  return;
+                }
+                await this._durableInboundStore.markConsumed({
+                  id: item.id,
+                  turnId: consumedTurnId,
+                  commitRef,
+                } as any);
+                this._runtimeEvents.emit("inbound.consumed", {
+                  type: "inbound.consumed",
+                  inboundItemId: item.id,
+                  turnId: consumedTurnId,
+                  commitRef,
+                });
+              },
+              blockInboundItem: async ({ item, blocker }) => {
+                if (!this._durableInboundStore) {
+                  return;
+                }
+                const blocked = await this._durableInboundStore.markBlocked({
+                  id: item.id,
+                  blockedBy: blocker,
+                } as any);
+                this._runtimeEvents.emit("inbound.blocked", {
+                  type: "inbound.blocked",
+                  inboundItemId: blocked.id,
+                  blockedBy: blocker,
+                } as any);
+              },
+            });
+            void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
+          } catch (err) {
+            trackedTurn.reject(err);
+          }
+        }
+
+        try {
+          return await trackedTurn.promise;
+        } finally {
+          cleanup();
+        }
+      },
+      discard: () => {
+        if (!started) {
+          trackedTurn.resolve({
+            turnId,
+            agentName,
+            conversationId,
+            status: "aborted",
+            steps: [],
+          });
+        }
+        cleanup();
+      },
+    };
+  }
+
+  private _scheduleDurableInboundItemInBackground(item: DurableInboundItem): void {
+    void this._scheduleDurableInboundItem(item).catch((err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this._runtimeEvents.emit("inbound.failed", {
+        type: "inbound.failed",
+        inboundItemId: item.id,
+        attempt: item.attempt,
+        retryable: true,
+        reason: error.message,
+      });
+    });
+  }
+
+  private async _deadLetterInboundItem(input: any): Promise<DurableInboundItem> {
+    if (!this._durableInboundStore) {
+      throw new HarnessError("Durable inbound store is not configured.");
+    }
+
+    const item = await this._durableInboundStore.deadLetterInboundItem(input);
+    this._runtimeEvents.emit("inbound.deadLettered", {
+      type: "inbound.deadLettered",
+      inboundItemId: item.id,
+      reason: (item as any).failure?.reason ?? input.reason,
+    });
+    return item as any;
+  }
+
+  async deliverInboundToActiveTurn(
+    agentName: string,
+    conversationId: string,
+    envelope: InboundEnvelope,
+    item: DurableInboundItem,
+  ): Promise<{ turnId: string; item: DurableInboundItem; promise: Promise<TurnResult> } | null> {
+    if (!this._durableInboundStore) {
+      return null;
+    }
+
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    if (!activeTurn) {
+      return null;
+    }
+
+    const delivered = await this._durableInboundStore.markDelivered({
+      id: item.id,
+      turnId: activeTurn.turnId,
+    } as any);
+    const commitRef = inboundUserMessageCommitRef(delivered.id);
+    const enqueued = activeTurn.steeringInbox.enqueue({
+      envelope,
+      inboundItem: delivered as any,
+      commitRef,
+    });
+    if (!enqueued) {
+      await this._durableInboundStore.retryInboundItem(delivered.id);
+      return null;
+    }
+
+    this._runtimeEvents.emit("inbound.delivered", {
+      type: "inbound.delivered",
+      inboundItemId: delivered.id,
+      turnId: activeTurn.turnId,
+      sequence: delivered.sequence,
+    });
+    const deliveredPromise = activeTurn.promise.then((result) => {
+      this._turnResultByInboundItem.set(delivered.id, result);
+      return result;
+    });
+    void deliveredPromise.catch(() => undefined);
+    return { turnId: activeTurn.turnId, item: delivered, promise: deliveredPromise };
+  }
+
+  private async _scheduleDurableInboundItem(item: DurableInboundItem): Promise<void> {
+    if (!this._durableInboundStore) {
+      return;
+    }
+
+    const blocker = await (this._humanApprovalStore as any)?.getConversationBlocker?.({
+      agentName: item.agentName,
+      conversationId: item.conversationId,
+    });
+    if (blocker) {
+      const blocked = await this._durableInboundStore.markBlocked({
+        id: item.id,
+        blockedBy: blocker,
+      } as any);
+      this._runtimeEvents.emit("inbound.blocked", {
+        type: "inbound.blocked",
+        inboundItemId: blocked.id,
+        blockedBy: blocker,
+      } as any);
+      return;
+    }
+
+    const delivered = await this.deliverInboundToActiveTurn(
+      item.agentName,
+      item.conversationId,
+      item.envelope,
+      item,
+    );
+    if (delivered) {
+      return;
+    }
+
+    const turnId = `turn-${randomUUID()}`;
+    this.dispatchTurn(item.agentName, item.envelope, { conversationId: item.conversationId, turnId }, {
+      item,
+      commitRef: inboundUserMessageCommitRef(item.id),
+    } as any)
+      .then((result) => {
+        this._turnResultByInboundItem.set(item.id, result);
+      })
+      .catch((err) => {
+        this._runtimeEvents.emit("turn.error", {
+          type: "turn.error",
+          turnId,
+          agentName: item.agentName,
+          conversationId: item.conversationId,
+          status: "error",
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      });
+  }
+
   // -----------------------------------------------------------------------
   // processTurn
   // -----------------------------------------------------------------------
@@ -188,6 +680,94 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     input: string | InboundEnvelope,
     options?: ProcessTurnOptions,
   ): Promise<TurnResult> {
+    if (this._durableInboundStore) {
+      const conversationId =
+        options?.conversationId ??
+        (typeof input !== "string" && input.conversationId ? input.conversationId : randomUUID());
+      const envelope = typeof input === "string"
+        ? {
+            name: "text",
+            content: [{ type: "text" as const, text: input }],
+            properties: {},
+            conversationId,
+            source: {
+              connector: "programmatic",
+              connectionName: "programmatic",
+              receivedAt: options?.receivedAt ?? new Date().toISOString(),
+            },
+            metadata: options?.metadata,
+          }
+        : { ...input, conversationId };
+      const appended = await this._durableInboundStore.append({
+        agentName,
+        conversationId,
+        envelope,
+        source: {
+          kind: "direct",
+          receivedAt: options?.receivedAt ?? new Date().toISOString(),
+          metadata: options?.metadata,
+        },
+        idempotencyKey:
+          options?.idempotencyKey ??
+          `direct:${agentName}:${conversationId}:${JSON.stringify(envelope.content)}:${envelope.source.receivedAt}`,
+      });
+      this._runtimeEvents.emit(appended.duplicate ? "inbound.duplicate" : "inbound.appended", {
+        type: appended.duplicate ? "inbound.duplicate" : "inbound.appended",
+        inboundItemId: appended.item.id,
+        agentName,
+        conversationId,
+        sequence: appended.item.sequence,
+        idempotencyKey: appended.item.idempotencyKey,
+          status: appended.item.status,
+      } as any);
+      if (appended.duplicate) {
+        if (appended.item.turnId) {
+          const active = this._inFlightTurns.get(appended.item.turnId);
+          if (active) {
+            return active.promise;
+          }
+        }
+        return turnResultForDurableDuplicate(
+          appended.item,
+          agentName,
+          conversationId,
+          this._turnResultByInboundItem.get(appended.item.id),
+        );
+      }
+      const blocker = await (this._humanApprovalStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+      if (blocker) {
+        const blocked = await this._durableInboundStore.markBlocked({
+          id: appended.item.id,
+          blockedBy: blocker,
+        } as any);
+        this._runtimeEvents.emit("inbound.blocked", {
+          type: "inbound.blocked",
+          inboundItemId: blocked.id,
+          blockedBy: blocker,
+        });
+        return {
+          turnId: `turn-${randomUUID()}`,
+          agentName,
+          conversationId,
+          status: "waitingForHuman",
+          steps: [],
+        };
+      }
+      const conversationKey = this._conversationKey(agentName, conversationId);
+      const activeTurn = this._activeTurnByConversation.get(conversationKey);
+      if (activeTurn) {
+        const delivered = await this.deliverInboundToActiveTurn(agentName, conversationId, envelope, appended.item as any);
+        if (delivered) {
+          return delivered.promise;
+        }
+      }
+      const result = await this._processTurnInternal(agentName, envelope, { ...options, conversationId }, {
+        item: appended.item,
+        commitRef: inboundUserMessageCommitRef(appended.item.id),
+      });
+      this._turnResultByInboundItem.set(appended.item.id, result);
+      return result;
+    }
     return this._processTurnInternal(agentName, input, options);
   }
 
@@ -195,13 +775,17 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     agentName: string,
     input: InboundEnvelope,
     options: { conversationId: string; turnId: string },
+    durable?: {
+      item: any;
+      commitRef: string;
+    },
   ): Promise<TurnResult> {
-    return this._processTurnInternal(agentName, input, options);
+    return this._processTurnInternal(agentName, input, options, durable);
   }
 
   steerTurn(
     agentName: string,
-    input: InboundEnvelope,
+    input: InboundEnvelope | TurnSteeredInput,
     conversationId: string,
   ): { turnId: string; disposition: "steered" } | null {
     const conversationKey = this._conversationKey(agentName, conversationId);
@@ -219,6 +803,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       turnId: activeTurn.turnId,
       disposition: "steered",
     };
+  }
+
+  getActiveTurn(agentName: string, conversationId: string): { turnId: string } | null {
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    const activeTurn = this._activeTurnByConversation.get(conversationKey);
+    return activeTurn ? { turnId: activeTurn.turnId } : null;
   }
 
   // -----------------------------------------------------------------------
@@ -265,6 +855,439 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           reason: input.reason,
         };
       },
+      listInboundItems: this._durableInboundStore
+        ? async (filter = {}) => this._durableInboundStore!.listInboundItems(filter)
+        : undefined,
+      retryInboundItem: this._durableInboundStore
+        ? async (id: string) => {
+            const item = await this._durableInboundStore!.retryInboundItem(id);
+            this._scheduleDurableInboundItemInBackground(item as any);
+            return item;
+          }
+        : undefined,
+      releaseInboundItem: this._durableInboundStore?.releaseInboundItem
+        ? async (input: any) => {
+            const item = await this._durableInboundStore!.releaseInboundItem!(
+              typeof input === "string" ? { id: input } : input,
+            );
+            this._scheduleDurableInboundItemInBackground(item as any);
+            return item;
+          }
+        : undefined,
+      deadLetterInboundItem: this._durableInboundStore
+        ? async (input: any) => this._deadLetterInboundItem(
+            typeof input === "string" ? { id: input, reason: "dead-lettered by operator" } : input,
+          )
+        : undefined,
+      listHumanTasks: this._humanApprovalStore
+        ? async (filter = {}) => {
+            const tasks = await this._humanApprovalStore!.listTasks(filter as any);
+            return tasks.map(toPublicHumanTaskView) as any;
+          }
+        : undefined,
+      submitHumanResult: this._humanApprovalStore
+        ? async (input: any) => {
+            const result = await this._humanApprovalStore!.submitResult(input);
+            const resultStatus = (result as any).status;
+            const accepted = resultStatus === "accepted" || resultStatus === "duplicate" || (result as any).accepted;
+            if (!accepted) {
+              throw new HarnessError((result as any).reason ?? "Human result submission was rejected.");
+            }
+            const duplicate = resultStatus === "duplicate" || (result as any).duplicate === true;
+            if (!duplicate) {
+              const status = (result as any).task?.status;
+              const task = (result as any).task;
+              const gate = (result as any).approval;
+              this._runtimeEvents.emit(status === "rejected" ? "humanTask.rejected" : "humanTask.resolved", {
+                type: status === "rejected" ? "humanTask.rejected" : "humanTask.resolved",
+                humanTaskId: task.id,
+                humanApprovalId: task.humanApprovalId,
+                idempotencyKey: input.idempotencyKey,
+              } as any);
+              if ((result as any).approvalReady || gate?.status === "ready") {
+                this._runtimeEvents.emit("humanApproval.ready", {
+                  type: "humanApproval.ready",
+                  humanApprovalId: gate.id,
+                  taskIds: gate.taskIds,
+                } as any);
+              }
+            }
+            const publicApproval = await toPublicHumanApprovalRecord((result as any).approval, this._humanApprovalStore);
+            return {
+              accepted: true,
+              duplicate,
+              task: toPublicHumanTaskView((result as any).task),
+              approval: publicApproval,
+            } as any;
+          }
+        : undefined,
+      resumeHumanApproval: this._humanApprovalStore
+        ? async (id: string) => {
+            const leaseTtlMs = this._humanApprovalResumeLeaseMs;
+            const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
+            const gate = await this._humanApprovalStore!.acquireApprovalForResume({
+              humanApprovalId: id,
+              leaseOwner: "runtime",
+              leaseExpiresAt,
+              leaseTtlMs,
+            } as any);
+            if (!gate) {
+              const existing = await (this._humanApprovalStore as any).getApproval?.(id);
+              if (!existing) {
+                throw new HarnessError(`Unknown human approval: "${id}"`);
+              }
+              return {
+                humanApprovalId: id,
+                status: humanApprovalResumeStatus(existing),
+                approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
+              } as any;
+            }
+            this._runtimeEvents.emit("humanApproval.resuming", {
+              type: "humanApproval.resuming",
+              humanApprovalId: id,
+              leaseOwner: "runtime",
+              turnId: (gate as any).toolCall.turnId,
+            } as any);
+            let completedGate: any;
+            let continuationTurn: PreparedContinuationTurn | undefined;
+            let resumeTurnId: string | undefined;
+            let resumeSteeringInbox: SteeringInbox | undefined;
+            let resumeTracked: ReturnType<typeof createDeferred<TurnResult>> | undefined;
+            let resumeToolCall: any;
+            try {
+              const toolCall = (gate as any).toolCall;
+              resumeToolCall = toolCall;
+              const agentDeps = this._agents.get(toolCall.agentName);
+              if (!agentDeps) {
+                throw new ConfigError(`Unknown agent: "${toolCall.agentName}"`);
+              }
+              resumeTurnId = `${toolCall.turnId}:humanApproval:${id}:resume`;
+              const resumeAbortController = new AbortController();
+              resumeSteeringInbox = this._createSteeringInbox(resumeTurnId);
+              resumeTracked = createDeferred<TurnResult>();
+              const resumeInFlight: InFlightTurn = {
+                turnId: resumeTurnId,
+                agentName: toolCall.agentName,
+                conversationId: toolCall.conversationId,
+                abortController: resumeAbortController,
+                promise: resumeTracked.promise,
+                steeringInbox: resumeSteeringInbox,
+              };
+              const throwIfResumeAborted = (): void => {
+                if (resumeAbortController.signal.aborted) {
+                  const reason = (resumeAbortController.signal as any).reason ?? "Human approval resume aborted.";
+                  throw new Error(String(reason));
+                }
+              };
+              this._inFlightTurns.set(resumeTurnId, resumeInFlight);
+
+              const conversationKey = this._conversationKey(toolCall.agentName, toolCall.conversationId);
+              let conversationState = this._conversations.get(conversationKey);
+              if (!conversationState) {
+                conversationState = createConversationState();
+                this._conversations.set(conversationKey, conversationState);
+              }
+
+              const taskIds: string[] = (gate as any).taskIds ?? [];
+              const tasks = await Promise.all(
+                taskIds.map((taskId) => (this._humanApprovalStore as any).getTask?.(taskId)),
+              );
+              const rejectedTask = tasks.find((task) => task?.status === "rejected" || task?.result?.type === "rejection");
+              const tool = agentDeps.toolRegistry.get(toolCall.toolName);
+              let toolResult: any;
+
+              if (rejectedTask) {
+                toolResult = {
+                  type: "error",
+                  error: rejectedTask.result?.reason ?? "Human rejected tool call",
+                };
+              } else {
+                if (!tool) {
+                  toolResult = { type: "error", error: `Tool "${toolCall.toolName}" not found` };
+                } else {
+                  const argsPatch = tasks.find((task) => task?.result?.type === "approval")?.result?.argsPatch;
+                  const formData = tasks.find((task) => task?.result?.type === "form")?.result?.data;
+                  const finalArgs = {
+                    ...toolCall.toolArgs,
+                    ...(argsPatch ?? {}),
+                    ...(formData ?? {}),
+                  };
+                  const validation = agentDeps.toolRegistry.validate(toolCall.toolName, finalArgs);
+                  if (!validation.valid) {
+                    toolResult = { type: "error", error: `Invalid arguments: ${validation.errors}` };
+                  } else {
+                    throwIfResumeAborted();
+                    await this._humanApprovalStore!.markApprovalHandlerStarted({
+                      humanApprovalId: id,
+                      leaseOwner: "runtime",
+                    } as any);
+                    throwIfResumeAborted();
+                    toolResult = await executeToolCall(toolCall.toolCallId, {
+                      turnId: toolCall.turnId,
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      conversation: conversationState,
+                      input: {
+                        name: "humanApproval.resume",
+                        content: [],
+                        properties: {
+                          humanApprovalId: id,
+                          toolCallId: toolCall.toolCallId,
+                        },
+                        conversationId: toolCall.conversationId,
+                        source: {
+                          connector: "humanApproval",
+                          connectionName: "humanApproval",
+                          receivedAt: new Date().toISOString(),
+                        },
+                      },
+                      llm: agentDeps.llmClient,
+                      stepNumber: toolCall.stepNumber,
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      toolArgs: finalArgs,
+                      abortSignal: resumeAbortController.signal,
+                    }, {
+                      toolRegistry: agentDeps.toolRegistry,
+                      middlewareRegistry: agentDeps.middlewareRegistry,
+                      eventBus: agentDeps.eventBus,
+                      humanApprovalStore: this._humanApprovalStore as any,
+                      skipHumanApproval: true,
+                    });
+                    throwIfResumeAborted();
+                  }
+                }
+              }
+              throwIfResumeAborted();
+
+              const blockedInboundItemIds: string[] = [];
+              const drainBlockedInboundItemsForApproval = async (): Promise<void> => {
+                const blockedItems = this._durableInboundStore
+                  ? await this._durableInboundStore.listInboundItems({
+                      agentName: toolCall.agentName,
+                      conversationId: toolCall.conversationId,
+                      status: ["blocked"],
+                      statuses: ["blocked"],
+                      blockedBy: (gate as any).blocker,
+                    } as any)
+                  : [];
+
+                for (const item of blockedItems.sort((a: any, b: any) => a.sequence - b.sequence)) {
+                  const commitRef = inboundUserMessageCommitRef(item.id);
+                  const exists = conversationState.messages.some(
+                    (message) => message.metadata?.__inboundCommitRef === commitRef,
+                  );
+                  if (!exists) {
+                    const text = item.envelope.content
+                      .filter((part: any) => part.type === "text")
+                      .map((part: any) => part.text)
+                      .join("\n");
+                    conversationState.emit({
+                      type: "appendMessage",
+                      message: {
+                        id: `msg-${item.id}`,
+                        data: { role: "user", content: text },
+                        metadata: {
+                          __createdBy: "core",
+                          __inboundItemId: item.id,
+                          __inboundCommitRef: commitRef,
+                          __blockedBy: (gate as any).blocker,
+                        },
+                      },
+                    });
+                  }
+                  await this._durableInboundStore?.markConsumed({
+                    id: item.id,
+                    turnId: toolCall.turnId,
+                    commitRef,
+                  } as any);
+                  if (!blockedInboundItemIds.includes(item.id)) {
+                    blockedInboundItemIds.push(item.id);
+                  }
+                  this._runtimeEvents.emit("inbound.consumed", {
+                    type: "inbound.consumed",
+                    inboundItemId: item.id,
+                    turnId: toolCall.turnId,
+                    commitRef,
+                  });
+                }
+              };
+              conversationState._turnActive = true;
+              try {
+                conversationState.emit({
+                  type: "appendMessage",
+                  message: {
+                    id: `tool-result-${toolCall.toolCallId}`,
+                    data: {
+                      role: "tool",
+                      content: [
+                        {
+                          type: "tool-result",
+                          toolCallId: toolCall.toolCallId,
+                          toolName: toolCall.toolName,
+                          output: toolResult.type === "text"
+                            ? { type: "text", value: toolResult.text }
+                            : toolResult.type === "json"
+                              ? { type: "json", value: toolResult.data }
+                              : { type: "error-text", value: toolResult.error },
+                        },
+                      ],
+                    },
+                    metadata: {
+                      __createdBy: "core",
+                      __humanApprovalId: id,
+                    },
+                  },
+                });
+
+                await drainBlockedInboundItemsForApproval();
+                continuationTurn = this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
+                completedGate = await this._humanApprovalStore!.markApprovalCompleted({
+                  humanApprovalId: id,
+                  leaseOwner: "runtime",
+                  turnId: toolCall.turnId,
+                  blockedInboundItemIds,
+                } as any);
+                await drainBlockedInboundItemsForApproval();
+              } finally {
+                conversationState._turnActive = false;
+              }
+              this._runtimeEvents.emit("humanApproval.completed", {
+                type: "humanApproval.completed",
+                humanApprovalId: id,
+                turnId: toolCall.turnId,
+                blockedInboundItemIds: (completedGate as any).blockedInboundItemIds ?? blockedInboundItemIds,
+              } as any);
+              const continuation = await continuationTurn!.start();
+              return {
+                humanApprovalId: id,
+                status: "completed",
+                approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
+                continuation,
+              } as any;
+            } catch (err) {
+              const error = err instanceof Error ? err : new Error(String(err));
+              if (continuationTurn) {
+                continuationTurn.discard();
+              }
+              if (completedGate) {
+                const toolCall = (completedGate as any).toolCall;
+                return {
+                  humanApprovalId: id,
+                  status: "completed",
+                  approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
+                  continuation: {
+                    turnId: `turn-${randomUUID()}`,
+                    agentName: toolCall.agentName,
+                    conversationId: toolCall.conversationId,
+                    status: "error",
+                    steps: [],
+                    error,
+                  },
+                } as any;
+              }
+              try {
+                const failed = await this._humanApprovalStore!.markApprovalFailed({
+                  humanApprovalId: id,
+                  reason: error.message,
+                  retryable: true,
+                  leaseOwner: "runtime",
+                } as any);
+                this._runtimeEvents.emit("humanApproval.failed", {
+                  type: "humanApproval.failed",
+                  humanApprovalId: id,
+                  retryable: true,
+                  reason: error.message,
+                } as any);
+                return {
+                  humanApprovalId: id,
+                  status: "failed",
+                  approval: await toPublicHumanApprovalRecord(failed, this._humanApprovalStore),
+                } as any;
+              } catch (markError) {
+                const existing = await (this._humanApprovalStore as any).getApproval?.(id);
+                const leaseMoved = existing &&
+                  (existing.status !== "resuming" || existing.lease?.owner !== "runtime");
+                if (!leaseMoved) {
+                  throw markError;
+                }
+                return {
+                  humanApprovalId: id,
+                  status: humanApprovalResumeStatus(existing),
+                  approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
+                } as any;
+              }
+            } finally {
+              if (resumeTurnId && resumeSteeringInbox && resumeTracked && resumeToolCall) {
+                resumeSteeringInbox.close();
+                this._inFlightTurns.delete(resumeTurnId);
+                resumeTracked.resolve({
+                  turnId: resumeTurnId,
+                  agentName: resumeToolCall.agentName,
+                  conversationId: resumeToolCall.conversationId,
+                  status: "completed",
+                  steps: [],
+                });
+              }
+            }
+          }
+        : undefined,
+      cancelHumanApproval: this._humanApprovalStore
+        ? async (input: any) => {
+            const cancelInput = typeof input === "string" ? { humanApprovalId: input } : input;
+            const existingApproval = await (this._humanApprovalStore as any).getApproval?.(cancelInput.humanApprovalId);
+            const gate = await this._humanApprovalStore!.cancelApproval(cancelInput) as any;
+            const transitioned = existingApproval
+              ? existingApproval.status !== gate.status && ["canceled", "expired"].includes(gate.status)
+              : ["canceled", "expired"].includes(gate.status);
+            if (transitioned) {
+              this._runtimeEvents.emit("humanApproval.canceled", {
+                type: "humanApproval.canceled",
+                humanApprovalId: gate.id,
+                reason: cancelInput.reason,
+              } as any);
+            }
+            if (transitioned && this._durableInboundStore) {
+              if (gate.status === "expired") {
+                const blockedItems = await this._durableInboundStore.listInboundItems({
+                  agentName: gate.toolCall.agentName,
+                  conversationId: gate.toolCall.conversationId,
+                  status: ["blocked"],
+                  statuses: ["blocked"],
+                  blockedBy: gate.blocker,
+                } as any);
+                await Promise.all(blockedItems.map((item: any) => this._deadLetterInboundItem({
+                  id: item.id,
+                  reason: cancelInput.reason ?? `Human approval "${gate.id}" expired.`,
+                })));
+              } else {
+                let releasedItems: DurableInboundItem[] = [];
+                if ((this._durableInboundStore as any).releaseBlockedInboundItems) {
+                  releasedItems = await (this._durableInboundStore as any).releaseBlockedInboundItems({
+                    agentName: gate.toolCall.agentName,
+                    conversationId: gate.toolCall.conversationId,
+                    blockedBy: gate.blocker,
+                  });
+                } else {
+                  const blockedItems = await this._durableInboundStore.listInboundItems({
+                    agentName: gate.toolCall.agentName,
+                    conversationId: gate.toolCall.conversationId,
+                    status: ["blocked"],
+                    statuses: ["blocked"],
+                    blockedBy: gate.blocker,
+                  } as any);
+                  releasedItems = await Promise.all(blockedItems.map((item: any) =>
+                    this._durableInboundStore!.releaseInboundItem
+                      ? this._durableInboundStore!.releaseInboundItem({ id: item.id } as any)
+                      : this._durableInboundStore!.retryInboundItem(item.id),
+                  ));
+                }
+                await Promise.all(releasedItems.map((item) => this._scheduleDurableInboundItem(item as any)));
+              }
+            }
+            return await toPublicHumanApprovalRecord(gate, this._humanApprovalStore);
+          }
+        : undefined,
     };
   }
 

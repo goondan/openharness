@@ -9,7 +9,8 @@ import type {
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import { executeToolCall } from "./tool-call.js";
+import type { HumanApprovalReferenceStore } from "../hitl/types.js";
+import { executeToolCall, isHumanApprovalPendingError } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 
 function toToolResultOutput(toolResult: ToolResult) {
@@ -44,9 +45,10 @@ export async function executeStep(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    humanApprovalStore?: HumanApprovalReferenceStore;
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus } = deps;
+  const { llmClient, toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -178,6 +180,7 @@ export async function executeStep(
             toolRegistry,
             middlewareRegistry,
             eventBus,
+            humanApprovalStore,
           }));
 
         if (tc.malformedResult) {
@@ -265,6 +268,10 @@ export async function executeStep(
 
     return result;
   } catch (err) {
+    if (isHumanApprovalPendingError(err)) {
+      throw err;
+    }
+
     const error = err instanceof Error ? err : new Error(String(err));
 
     // 5. Emit step.error on failure

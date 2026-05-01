@@ -96,6 +96,8 @@
 interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
+  durableInbound?: DurableInboundConfig;
+  humanApproval?: HumanApprovalConfig;
 }
 
 interface AgentConfig {
@@ -103,6 +105,18 @@ interface AgentConfig {
   extensions?: Extension[];
   tools?: ToolDefinition[];
   maxSteps?: number;
+}
+
+interface DurableInboundConfig {
+  enabled?: boolean;
+  store: DurableInboundStore;
+  leaseMs?: number;
+  maxAttempts?: number;
+}
+
+interface HumanApprovalConfig {
+  store: HumanApprovalStore;
+  resumeLeaseMs?: number;
 }
 
 interface HarnessRuntime {
@@ -118,11 +132,35 @@ interface HarnessRuntime {
       agentName?: string;
       reason?: string;
     }): Promise<AbortResult>;
+    listHumanTasks?(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
+    submitHumanResult?(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
+    resumeHumanApproval?(id: string): Promise<HumanApprovalResumeResult>;
+    cancelHumanApproval?(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
   };
   close(): Promise<void>;
 }
 
-type IngressDisposition = "started" | "steered";
+interface HumanTaskView {
+  id: string;
+  humanApprovalId: string;
+  type: "approval" | "text" | "form";
+  status: "waitingForHuman" | "resolved" | "rejected" | "canceled" | "expired";
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  toolCallId: string;
+  toolName: string;
+  idempotencyKey?: string;
+}
+
+interface SubmitHumanResult {
+  accepted: true;
+  duplicate: boolean;
+  task: HumanTaskView;
+  approval: HumanApprovalRecord;
+}
+
+type IngressDisposition = "started" | "delivered" | "blocked" | "duplicate" | "steered";
 
 interface IngressAcceptResult {
   accepted: true;

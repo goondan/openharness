@@ -26,6 +26,8 @@ export interface TurnContext {
   conversation: ConversationState;
   abortSignal: AbortSignal;
   input: InboundEnvelope;
+  inboundItemId?: string;
+  inboundCommitRef?: string;
   /** LLM client bound to the current agent's model configuration. */
   llm: LlmClient;
 }
@@ -40,6 +42,7 @@ export interface StepContext extends TurnContext {
  * ToolContext is simpler: { conversationId, agentName, abortSignal }
  */
 export interface ToolCallContext extends StepContext {
+  toolCallId?: string;
   toolName: string;
   toolArgs: JsonObject;
 }
@@ -91,7 +94,7 @@ export interface TurnResult {
   turnId: string;
   agentName: string;
   conversationId: string;
-  status: "completed" | "aborted" | "error" | "maxStepsReached";
+  status: "completed" | "aborted" | "error" | "maxStepsReached" | "waitingForHuman";
   text?: string;
   /** Finish reason from the last LLM step in this turn. */
   finishReason?: LlmFinishReason;
