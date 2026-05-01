@@ -445,8 +445,12 @@ describe("durable inbound and Human Approval integration", () => {
 
   it("marks active-turn delivery in the durable store before notifying memory steering", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
-    const markDelivered = vi.fn(async () => {
-      throw new Error("markDelivered failed");
+    const originalMarkDelivered = inboundStore.markDelivered.bind(inboundStore);
+    const markDelivered = vi.fn(async (input: any) => {
+      if (markDelivered.mock.calls.length === 2) {
+        throw new Error("markDelivered failed");
+      }
+      return originalMarkDelivered(input);
     });
     const store = new Proxy(inboundStore, {
       get(target, property, receiver) {
@@ -495,7 +499,11 @@ describe("durable inbound and Human Approval integration", () => {
     await expect(turnPromise).resolves.toMatchObject({ status: "completed" });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(markDelivered).toHaveBeenCalledOnce();
+    expect(markDelivered).toHaveBeenCalledTimes(2);
+    expect(markDelivered.mock.invocationCallOrder[0]).toBeLessThan(chat.mock.invocationCallOrder[0]);
+    expect(markDelivered.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      turnId: expect.stringMatching(/^turn-/),
+    }));
     expect(chat).toHaveBeenCalledTimes(1);
 
     await runtime.close();

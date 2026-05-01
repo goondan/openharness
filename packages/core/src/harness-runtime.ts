@@ -326,6 +326,22 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     this._activeTurnByConversation.set(conversationKey, inFlightTurn);
 
     try {
+      let inboundItem = durable?.item;
+      if (inboundItem && this._durableInboundStore) {
+        const wasDelivered = inboundItem.status === "delivered";
+        inboundItem = await this._durableInboundStore.markDelivered({
+          id: inboundItem.id,
+          turnId,
+        } as any);
+        if (!wasDelivered && inboundItem.status === "delivered") {
+          this._runtimeEvents.emit("inbound.delivered", {
+            type: "inbound.delivered",
+            inboundItemId: inboundItem.id,
+            turnId,
+            sequence: inboundItem.sequence,
+          } as any);
+        }
+      }
       const turnPromise = executeTurn(agentName, input, { ...options, conversationId, turnId }, {
         llmClient: agentDeps.llmClient,
         toolRegistry: agentDeps.toolRegistry,
@@ -336,7 +352,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         abortController,
         steering: steeringInbox,
         humanApprovalStore: this._humanApprovalStore as any,
-        inboundItem: durable?.item,
+        inboundItem,
         inboundCommitRef: durable?.commitRef,
         consumeInboundItem: async ({ item, turnId: consumedTurnId, commitRef }) => {
           if (!this._durableInboundStore) {
