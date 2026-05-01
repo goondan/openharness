@@ -118,6 +118,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
   - process crash after `markApprovalHandlerStarted()`: runtime은 자동 재획득/handler 재실행을 하지 않고 operator 확인 대상으로 남긴다.
   - abort/close during resumed handler: runtime은 abort signal을 tool handler에 전달하고 approval을 completed로 닫지 않는다.
   - resume 중 completion 전 예외: runtime은 획득한 resume `leaseOwner`로 `failed` 전환을 기록하고, 명시적으로 non-retryable로 분류된 정책 오류가 아니면 `retryable=true` event를 발행한다.
+  - cancel/expire가 resume 실패 기록보다 먼저 commit되어 lease가 사라진 경우, runtime은 failure mark lease error를 caller에게 누출하지 않고 현재 approval terminal 상태로 수렴한 `HumanApprovalResumeResult`를 반환한다.
 
 #### Flow ID: HA-CANCEL-01
 

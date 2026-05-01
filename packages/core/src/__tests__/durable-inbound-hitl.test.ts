@@ -1245,6 +1245,66 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("converges when Human Approval cancel wins before resume failure marking", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    let runtime: Awaited<ReturnType<typeof createHarness>>;
+    vi.spyOn(humanApprovalStore, "markApprovalCompleted").mockRejectedValueOnce(
+      new Error("completion write failed"),
+    );
+    const originalMarkFailed = humanApprovalStore.markApprovalFailed.bind(humanApprovalStore);
+    const markFailed = vi.spyOn(humanApprovalStore, "markApprovalFailed").mockImplementationOnce(async (input) => {
+      await runtime.control.cancelHumanApproval!({
+        humanApprovalId: input.humanApprovalId,
+        reason: "operator canceled",
+      });
+      return originalMarkFailed(input);
+    });
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: vi.fn(async () => ({ type: "text" as const, text: "secret" })),
+    };
+    currentClient = mockClient({
+      text: "need tool",
+      toolCalls: [{ toolCallId: "call-cancel-resume-race", toolName: "guarded", args: {} }],
+    });
+
+    runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-cancel-resume-race",
+      idempotencyKey: "direct-human-cancel-resume-race",
+    });
+    expect(result.status).toBe("waitingForHuman");
+
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-cancel-resume-race" });
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-cancel-resume-race",
+    });
+    const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
+
+    expect(markFailed).toHaveBeenCalledOnce();
+    expect(resumed?.status).toBe("failed");
+    expect(resumed?.approval.status).toBe("canceled");
+    expect(resumed?.approval.failure?.retryable).toBe(false);
+
+    await runtime.close();
+  });
+
   it("aborts in-flight resumed Human Approval tool execution through runtime control", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();

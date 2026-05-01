@@ -206,6 +206,14 @@ async function toPublicHumanApprovalRecord(approval: any, store?: HumanApprovalS
   };
 }
 
+function humanApprovalResumeStatus(approval: any): "completed" | "failed" | "blocked" {
+  const status = approval?.status;
+  if (status === "completed") {
+    return "completed";
+  }
+  return ["failed", "canceled", "expired"].includes(status) ? "failed" : "blocked";
+}
+
 // ---------------------------------------------------------------------------
 // HarnessRuntimeImpl
 // ---------------------------------------------------------------------------
@@ -912,14 +920,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               if (!existing) {
                 throw new HarnessError(`Unknown human approval: "${id}"`);
               }
-              const existingStatus = (existing as any).status;
               return {
                 humanApprovalId: id,
-                status: existingStatus === "completed"
-                  ? "completed"
-                  : ["failed", "canceled", "expired"].includes(existingStatus)
-                    ? "failed"
-                    : "blocked",
+                status: humanApprovalResumeStatus(existing),
                 approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
               } as any;
             }
@@ -1167,23 +1170,37 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   },
                 } as any;
               }
-              const failed = await this._humanApprovalStore!.markApprovalFailed({
-                humanApprovalId: id,
-                reason: error.message,
-                retryable: true,
-                leaseOwner: "runtime",
-              } as any);
-              this._runtimeEvents.emit("humanApproval.failed", {
-                type: "humanApproval.failed",
-                humanApprovalId: id,
-                retryable: true,
-                reason: error.message,
-              } as any);
-              return {
-                humanApprovalId: id,
-                status: "failed",
-                approval: await toPublicHumanApprovalRecord(failed, this._humanApprovalStore),
-              } as any;
+              try {
+                const failed = await this._humanApprovalStore!.markApprovalFailed({
+                  humanApprovalId: id,
+                  reason: error.message,
+                  retryable: true,
+                  leaseOwner: "runtime",
+                } as any);
+                this._runtimeEvents.emit("humanApproval.failed", {
+                  type: "humanApproval.failed",
+                  humanApprovalId: id,
+                  retryable: true,
+                  reason: error.message,
+                } as any);
+                return {
+                  humanApprovalId: id,
+                  status: "failed",
+                  approval: await toPublicHumanApprovalRecord(failed, this._humanApprovalStore),
+                } as any;
+              } catch (markError) {
+                const existing = await (this._humanApprovalStore as any).getApproval?.(id);
+                const leaseMoved = existing &&
+                  (existing.status !== "resuming" || existing.lease?.owner !== "runtime");
+                if (!leaseMoved) {
+                  throw markError;
+                }
+                return {
+                  humanApprovalId: id,
+                  status: humanApprovalResumeStatus(existing),
+                  approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
+                } as any;
+              }
             } finally {
               if (resumeTurnId && resumeSteeringInbox && resumeTracked && resumeToolCall) {
                 resumeSteeringInbox.close();
