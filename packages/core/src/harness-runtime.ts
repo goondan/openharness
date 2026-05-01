@@ -193,7 +193,7 @@ async function toPublicHumanApprovalRecord(approval: any, store?: HumanApprovalS
     const required = tasks
       .filter((task) => task && task.required !== false)
       .map((task) => task.id);
-    requiredTaskIds = required.length > 0 ? required : taskIds;
+    requiredTaskIds = tasks.some(Boolean) ? required : taskIds;
   }
 
   return {

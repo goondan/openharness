@@ -1597,6 +1597,40 @@ describe("durable inbound and Human Approval integration", () => {
     expect(blockerAfterSecondCancel).toBeNull();
   });
 
+  it("preserves empty required task lists in public Human Approval records", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    await humanApprovalStore.createApproval({
+      humanApprovalId: "approval-optional-only",
+      toolCall: {
+        turnId: "turn-optional-only",
+        agentName: "default",
+        conversationId: "conv-optional-only",
+        stepNumber: 1,
+        toolCallId: "call-optional-only",
+        toolName: "guarded",
+        toolArgs: {},
+      },
+      tasks: [{ humanTaskId: "task-optional-only", type: "text", title: "Optional note", required: false }],
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const submitResult = await runtime.control.submitHumanResult!({
+      humanTaskId: "task-optional-only",
+      result: { type: "text", text: "note" },
+      idempotencyKey: "optional-only-result",
+    });
+
+    expect(submitResult.approval.taskIds).toEqual(["task-optional-only"]);
+    expect(submitResult.approval.requiredTaskIds).toEqual([]);
+
+    await runtime.close();
+  });
+
   it("keeps resuming and failed Human Approvals from being reopened by late task submissions", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({

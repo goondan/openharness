@@ -81,6 +81,7 @@ OpenHarness는 사람이 승인하거나 입력해야 하는 ToolCall을 `humanA
 - Outputs:
   - `SubmitHumanResult`: `{ accepted: true, duplicate: boolean, task: HumanTaskView, approval: HumanApprovalRecord }`
   - returned `approval`은 top-level `agentName`, `conversationId`, `turnId`, `toolCallId`, `requiredTaskIds`를 포함하는 public shape이다.
+  - task metadata가 조회 가능한 경우 `requiredTaskIds`는 `required !== false` task만 포함하며, 모든 task가 optional이면 빈 배열을 그대로 반환한다.
 - Failure Modes:
   - schema/scope 실패: durable state를 바꾸지 않는다.
   - resume lease 실패: result는 저장하고 다른 worker가 resume할 수 있게 둔다.
