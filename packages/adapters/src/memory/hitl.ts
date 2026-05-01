@@ -18,8 +18,8 @@ import type {
   MarkHumanApprovalHandlerStartedInput,
   SubmitHumanResult,
   SubmitHumanResultInput,
-} from "./types.js";
-import type { ConversationBlockerRef } from "../inbound/types.js";
+  ConversationBlockerRef,
+} from "@goondan/openharness-types";
 
 export interface InMemoryHumanApprovalStoreOptions {
   defaultLeaseTtlMs?: number;
@@ -52,7 +52,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
 
     if (duplicateGateId) {
       const gate = this._mustGetGate(duplicateGateId);
-      const tasks = gate.taskIds.map((taskId) => this._mustGetTask(taskId));
+      const tasks = gate.taskIds.map((taskId: string) => this._mustGetTask(taskId));
       return {
         approval: cloneValue(gate),
         tasks: tasks.map(cloneValue),
@@ -64,9 +64,13 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
 
     const now = input.now ?? this._now();
     const blocker: ConversationBlockerRef = createHumanApprovalBlockerRef(gateId);
-    const taskIds = input.tasks.map((task, index) => task.humanTaskId ?? defaultHumanTaskId(gateId, index));
+    const taskIds = (input.tasks as any[]).map((task, index) => task.humanTaskId ?? defaultHumanTaskId(gateId, index));
     const approval: HumanApprovalRecord = {
       id: gateId,
+      agentName: input.toolCall.agentName,
+      conversationId: input.toolCall.conversationId,
+      turnId: input.toolCall.turnId,
+      toolCallId: input.toolCall.toolCallId,
       status: "waitingForHuman",
       toolCall: cloneValue(input.toolCall),
       prompt: input.prompt,
@@ -78,7 +82,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       createdAt: now,
       updatedAt: now,
     };
-    const tasks: HumanTaskRecord[] = input.tasks.map((task, index) => ({
+    const tasks: HumanTaskRecord[] = input.tasks.map((task: any, index) => ({
       id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
       humanApprovalId: gateId,
       taskType: task.taskType ?? task.type ?? "approval",
@@ -172,6 +176,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       if (task.resultIdempotencyKey === input.idempotencyKey) {
         return {
           status: "duplicate",
+          duplicate: true,
           task: cloneValue(task),
           approval: cloneValue(gate),
           approvalReady: gate.status === "ready",
@@ -209,6 +214,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
 
     return {
       status: "accepted",
+      duplicate: false,
       task: cloneValue(task),
       approval: cloneValue(gate),
       approvalReady,
@@ -393,7 +399,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   private _allRequiredTasksSettled(approval: HumanApprovalRecord): boolean {
-    return approval.taskIds.every((taskId) => {
+    return approval.taskIds.every((taskId: string) => {
       const task = this._mustGetTask(taskId);
       if (!task.required) {
         return true;

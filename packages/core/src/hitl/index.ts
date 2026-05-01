@@ -21,15 +21,7 @@ export type {
   HumanTaskView,
   SubmitHumanResult,
   SubmitHumanResultInput,
-} from "./types.js";
-export {
-  InMemoryHumanApprovalStore,
-  createHumanApprovalBlockerRef,
-  createInMemoryHumanApprovalStore,
-  defaultHumanApprovalId,
-  defaultHumanTaskId,
-  isHumanApprovalBlockerRef,
-} from "./memory-store.js";
+} from "@goondan/openharness-types";
 export type {
   HumanApprovalResumeCoordinatorOptions,
   HumanApprovalResumeResult,

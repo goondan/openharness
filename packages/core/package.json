@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@goondan/openharness-types": "workspace:*",
+    "@goondan/openharness-adapters": "workspace:*",
     "ai": "^6.0.159",
     "ajv": "^8.17.0",
     "ajv-formats": "^3.0.1"

@@ -13,7 +13,7 @@ import type {
   MarkInboundDeliveredInput,
   ReleaseBlockedInboundInput,
   ReleaseInboundItemInput,
-} from "./types.js";
+} from "@goondan/openharness-types";
 
 export interface InMemoryDurableInboundStoreOptions {
   idPrefix?: string;
