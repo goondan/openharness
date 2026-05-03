@@ -1302,6 +1302,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             const cancelInput: CancelHumanApprovalInput = typeof input === "string"
               ? { id: input }
               : input;
+            if (typeof cancelInput.id !== "string" || cancelInput.id.length === 0) {
+              throw new HarnessError(
+                "cancelHumanApproval input requires `id` (was previously named humanApprovalId). " +
+                  "Update the call site to pass `id`.",
+              );
+            }
             const existingApproval = await this._humanApprovalStore!.getApproval(cancelInput.id);
             const gate = await this._humanApprovalStore!.cancelApproval(cancelInput);
             const isTerminal = gate.status === "canceled" || gate.status === "expired";

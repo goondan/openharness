@@ -43,6 +43,12 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     if (input.tasks.length === 0) {
       throw new Error("Human approval requires at least one human task.");
     }
+    if (typeof input.id !== "string" || input.id.length === 0) {
+      throw new Error(
+        "CreateHumanApprovalInput.id is required (was previously named humanApprovalId). " +
+          "Update the call site to pass `id`.",
+      );
+    }
 
     const gateId = input.id;
     const toolCallKey = humanApprovalToolCallKey(input);
@@ -542,11 +548,14 @@ const KNOWN_HUMAN_TASK_TYPES: ReadonlySet<HumanTaskType> = new Set([
 ]);
 
 function normalizeHumanTaskType(value: unknown): HumanTaskType {
-  if (value === undefined) {
-    return "approval";
-  }
   if (typeof value === "string" && (KNOWN_HUMAN_TASK_TYPES as ReadonlySet<string>).has(value)) {
     return value as HumanTaskType;
+  }
+  if (value === undefined) {
+    throw new Error(
+      'HumanTaskCreateInput.taskType is required (was previously named "type"). ' +
+        "Update the call site to pass `taskType`.",
+    );
   }
   throw new Error(
     `Unsupported human task type: ${JSON.stringify(value)}. Expected one of "approval" | "text" | "form".`,
