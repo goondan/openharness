@@ -212,6 +212,13 @@ export interface AcquireHumanApprovalInput {
   now?: string;
 }
 
+export interface ResumeHumanApprovalInput {
+  id: string;
+  leaseOwner?: string;
+  leaseTtlMs?: number;
+  now?: string;
+}
+
 export interface CompleteHumanApprovalInput {
   id: string;
   leaseOwner?: string;

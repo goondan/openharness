@@ -13,6 +13,7 @@ import type {
   MarkInboundDeliveredInput,
   ReleaseBlockedInboundInput,
   ReleaseInboundItemInput,
+  RetryInboundInput,
 } from "@goondan/openharness-types";
 
 export interface InMemoryDurableInboundStoreOptions {
@@ -219,6 +220,11 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
   }
 
   async listInboundItems(filter: InboundItemFilter = {}): Promise<DurableInboundItem[]> {
+    if ("statuses" in (filter as Record<string, unknown>)) {
+      throw new Error(
+        "InboundItemFilter.statuses was removed; use status (single | array).",
+      );
+    }
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
       : undefined;
@@ -243,13 +249,13 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
     return limited.map(cloneInboundItem);
   }
 
-  async retryInboundItem(id: string): Promise<DurableInboundItem> {
-    const item = this._mustGet(id);
+  async retryInboundItem(input: RetryInboundInput): Promise<DurableInboundItem> {
+    const item = this._mustGet(input.id);
     if (!["failed", "deadLetter", "blocked", "delivered"].includes(item.status)) {
-      throw new Error(`Cannot retry inbound item "${id}" from status "${item.status}".`);
+      throw new Error(`Cannot retry inbound item "${input.id}" from status "${item.status}".`);
     }
 
-    return this._releaseToPending(item, this._now());
+    return this._releaseToPending(item, input.now ?? this._now());
   }
 
   async releaseInboundItem(input: ReleaseInboundItemInput): Promise<DurableInboundItem> {

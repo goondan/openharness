@@ -129,6 +129,17 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async listTasks(filter: HumanTaskFilter = {}): Promise<HumanTaskView[]> {
+    const filterRecord = filter as Record<string, unknown>;
+    if ("statuses" in filterRecord) {
+      throw new Error(
+        "HumanTaskFilter.statuses was removed; use status (single | array).",
+      );
+    }
+    if ("taskTypes" in filterRecord) {
+      throw new Error(
+        "HumanTaskFilter.taskTypes was removed; use taskType (single | array).",
+      );
+    }
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
       : undefined;
@@ -319,6 +330,11 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord> {
+    if ("expired" in (input as unknown as Record<string, unknown>)) {
+      throw new Error(
+        'CancelHumanApprovalInput.expired was removed; use status: "expired" instead.',
+      );
+    }
     const gate = this._mustGetGate(input.id);
     if (isTerminalGateStatus(gate.status)) {
       return cloneValue(gate);

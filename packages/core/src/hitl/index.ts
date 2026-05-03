@@ -23,7 +23,7 @@ export type {
 } from "@goondan/openharness-types";
 export type {
   HumanApprovalResumeCoordinatorOptions,
-  HumanApprovalResumeResult,
+  HumanApprovalResumeOutcome,
   ResumeHumanApprovalHandlerInput,
   ResumeHumanApprovalHandlerResult,
 } from "./resume.js";

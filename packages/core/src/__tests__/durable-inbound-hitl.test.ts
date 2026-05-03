@@ -112,7 +112,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(items[0].status).toBe("delivered");
     expect(items[0].turnId).toBe("turn-delivered");
 
-    const retried = await inboundStore.retryInboundItem(appended.item.id);
+    const retried = await inboundStore.retryInboundItem({ id: appended.item.id });
     expect(retried.status).toBe("pending");
     expect(retried.turnId).toBeUndefined();
 

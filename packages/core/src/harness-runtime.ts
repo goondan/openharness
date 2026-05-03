@@ -12,12 +12,14 @@ import type {
   DurableInboundItem,
   DeadLetterInboundInput,
   ReleaseInboundItemInput,
+  RetryInboundInput,
   HumanApprovalReferenceStore,
   HumanApprovalRecord,
   HumanTaskRecord,
   HumanTaskView,
   SubmitHumanResultInput,
   CancelHumanApprovalInput,
+  ResumeHumanApprovalInput,
   HumanResult,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
@@ -639,7 +641,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       commitRef,
     });
     if (!enqueued) {
-      await this._durableInboundStore.retryInboundItem(delivered.id);
+      await this._durableInboundStore.retryInboundItem({ id: delivered.id });
       return null;
     }
 
@@ -904,8 +906,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         ? async (filter = {}) => this._durableInboundStore!.listInboundItems(filter)
         : undefined,
       retryInboundItem: this._durableInboundStore
-        ? async (id: string) => {
-            const item = await this._durableInboundStore!.retryInboundItem(id);
+        ? async (input: string | RetryInboundInput) => {
+            const retryInput: RetryInboundInput = typeof input === "string" ? { id: input } : input;
+            if (typeof retryInput.id !== "string" || retryInput.id.length === 0) {
+              throw new HarnessError("retryInboundItem input requires `id`.");
+            }
+            const item = await this._durableInboundStore!.retryInboundItem(retryInput);
             this._scheduleDurableInboundItemInBackground(item);
             return item;
           }
@@ -976,14 +982,28 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           }
         : undefined,
       resumeHumanApproval: this._humanApprovalStore
-        ? async (id: string) => {
-            const leaseTtlMs = this._humanApprovalResumeLeaseMs;
-            const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
+        ? async (input: string | ResumeHumanApprovalInput) => {
+            const resumeInput: ResumeHumanApprovalInput = typeof input === "string"
+              ? { id: input }
+              : input;
+            if (typeof resumeInput.id !== "string" || resumeInput.id.length === 0) {
+              throw new HarnessError(
+                "resumeHumanApproval input requires `id` (was previously a positional id parameter). " +
+                  "Update the call site to pass a string or `{ id }`.",
+              );
+            }
+            const id = resumeInput.id;
+            const leaseOwner = resumeInput.leaseOwner ?? "runtime";
+            const leaseTtlMs = resumeInput.leaseTtlMs ?? this._humanApprovalResumeLeaseMs;
+            const leaseExpiresAt = new Date(
+              Date.parse(resumeInput.now ?? new Date().toISOString()) + leaseTtlMs,
+            ).toISOString();
             const gate = await this._humanApprovalStore!.acquireApprovalForResume({
               id,
-              leaseOwner: "runtime",
+              leaseOwner,
               leaseExpiresAt,
               leaseTtlMs,
+              now: resumeInput.now,
             });
             if (!gate) {
               const existing = await this._humanApprovalStore!.getApproval(id);
@@ -999,7 +1019,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             this._runtimeEvents.emit("humanApproval.resuming", {
               type: "humanApproval.resuming",
               humanApprovalId: id,
-              leaseOwner: "runtime",
+              leaseOwner,
               turnId: gate.toolCall.turnId,
             });
             let completedGate: HumanApprovalRecord | undefined;
@@ -1084,7 +1104,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     throwIfResumeAborted();
                     await this._humanApprovalStore!.markApprovalHandlerStarted({
                       id,
-                      leaseOwner: "runtime",
+                      leaseOwner,
                     });
                     throwIfResumeAborted();
                     toolResult = await executeToolCall(toolCall.toolCallId, {
@@ -1209,7 +1229,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 continuationTurn = this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
                 completedGate = await this._humanApprovalStore!.markApprovalCompleted({
                   id,
-                  leaseOwner: "runtime",
+                  leaseOwner,
                   turnId: toolCall.turnId,
                   blockedInboundItemIds,
                 });
@@ -1256,7 +1276,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   id,
                   reason: error.message,
                   retryable: true,
-                  leaseOwner: "runtime",
+                  leaseOwner,
                 });
                 this._runtimeEvents.emit("humanApproval.failed", {
                   type: "humanApproval.failed",
@@ -1272,7 +1292,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               } catch (markError) {
                 const existing = await this._humanApprovalStore!.getApproval(id);
                 const leaseMoved = existing &&
-                  (existing.status !== "resuming" || existing.lease?.owner !== "runtime");
+                  (existing.status !== "resuming" || existing.lease?.owner !== leaseOwner);
                 if (!leaseMoved) {
                   throw markError;
                 }
@@ -1352,7 +1372,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   releasedItems = await Promise.all(blockedItems.map((item) =>
                     this._durableInboundStore!.releaseInboundItem
                       ? this._durableInboundStore!.releaseInboundItem({ id: item.id })
-                      : this._durableInboundStore!.retryInboundItem(item.id),
+                      : this._durableInboundStore!.retryInboundItem({ id: item.id }),
                   ));
                 }
                 await Promise.all(releasedItems.map((item) => this._scheduleDurableInboundItem(item)));
