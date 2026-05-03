@@ -15,6 +15,7 @@ import type {
   ReleaseInboundItemInput,
   RetryInboundInput,
 } from "@goondan/openharness-types";
+import { stableHash } from "./idempotency-key.js";
 
 export interface InMemoryDurableInboundStoreOptions {
   idPrefix?: string;
@@ -360,7 +361,14 @@ export function createInMemoryDurableInboundStore(
 }
 
 export function defaultInboundIdempotencyKey(input: AppendInboundInput): string {
-  const externalPart = input.source.externalId ?? stableStringify(input.envelope);
+  const externalPart =
+    input.source.externalId ??
+    stableHash({
+      kind: input.source.kind,
+      connectionName: input.source.connectionName ?? "direct",
+      receivedAt: input.source.receivedAt,
+      envelope: input.envelope,
+    });
   return [
     input.source.kind,
     input.source.connectionName ?? "direct",
@@ -412,24 +420,4 @@ function cloneValue<T>(value: T): T {
   } catch {
     return JSON.parse(JSON.stringify(value)) as T;
   }
-}
-
-function stableStringify(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeys);
-  }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-
-  const record = value as Record<string, unknown>;
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = sortKeys(record[key]);
-  }
-  return sorted;
 }

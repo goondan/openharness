@@ -69,7 +69,7 @@ export type IngressDisposition =
 export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
 export interface ConversationBlockerRef {
-  type: ConversationBlockerType | (string & {});
+  type: string;
   id: string;
   reason?: string;
   metadata?: Record<string, unknown>;
@@ -84,7 +84,7 @@ export interface ConversationBlockerRef {
  * if accepted, so they are intentionally excluded.
  */
 export interface ConversationBlockerSelector {
-  type?: ConversationBlockerType | (string & {});
+  type?: string;
   id?: string;
 }
 

@@ -33,6 +33,7 @@ import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from 
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
 import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
+import { stableHash } from "./idempotency-key.js";
 
 const CLOSE_TIMEOUT_MS = 5000;
 
@@ -738,7 +739,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             metadata: options?.metadata,
           }
         : { ...input, conversationId };
-      const appended = await this._durableInboundStore.append({
+        const appended = await this._durableInboundStore.append({
         agentName,
         conversationId,
         envelope,
@@ -749,7 +750,10 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         },
         idempotencyKey:
           options?.idempotencyKey ??
-          `direct:${agentName}:${conversationId}:${JSON.stringify(envelope.content)}:${envelope.source.receivedAt}`,
+          `direct:${agentName}:${conversationId}:${stableHash({
+            receivedAt: envelope.source.receivedAt,
+            content: envelope.content,
+          })}`,
       });
       if (appended.duplicate) {
         this._runtimeEvents.emit("inbound.duplicate", {
