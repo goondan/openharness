@@ -57,7 +57,9 @@ function emit(
   event: string,
   payload: unknown,
 ) {
-  eventListeners.get(event)?.forEach((l) => l(payload));
+  eventListeners.get(event)?.forEach((l) => {
+    l(payload);
+  });
 }
 
 // ---------------------------------------------------------------------------

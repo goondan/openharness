@@ -1048,7 +1048,7 @@ describe("durable inbound and Human Approval integration", () => {
     humanApprovalId = tasks[0].humanApprovalId;
     const publicTasks = await runtime.control.listHumanTasks!({ conversationId: "conv-human" });
     expect(publicTasks).toHaveLength(1);
-    expect(publicTasks[0].type).toBe("approval");
+    expect(publicTasks[0].taskType).toBe("approval");
     expect(publicTasks[0].humanApprovalId).toBe(tasks[0].humanApprovalId);
 
     const blocked = await runtime.ingress.dispatch({
@@ -1084,10 +1084,20 @@ describe("durable inbound and Human Approval integration", () => {
     });
     const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
 
+    if (!("approval" in submitResult)) {
+      throw new Error(
+        `expected accepted submit result, got ${submitResult.status}: ${submitResult.reason}`,
+      );
+    }
+    if (!("approval" in duplicateSubmitResult)) {
+      throw new Error(
+        `expected accepted duplicate submit result, got ${duplicateSubmitResult.status}: ${duplicateSubmitResult.reason}`,
+      );
+    }
     expect(submitResult.accepted).toBe(true);
     expect(submitResult.duplicate).toBe(false);
-    expect(submitResult.task.type).toBe("approval");
-    expect(submitResult.task.idempotencyKey).toBe("approve-1");
+    expect(submitResult.task.taskType).toBe("approval");
+    expect(submitResult.task.resultIdempotencyKey).toBe("approve-1");
     expect(submitResult.approval.id).toBe(tasks[0].humanApprovalId);
     expect(submitResult.approval.agentName).toBe("default");
     expect(submitResult.approval.conversationId).toBe("conv-human");
@@ -1096,7 +1106,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(submitResult.approval.requiredTaskIds).toEqual([tasks[0].id]);
     expect(duplicateSubmitResult.accepted).toBe(true);
     expect(duplicateSubmitResult.duplicate).toBe(true);
-    expect(duplicateSubmitResult.task.type).toBe("approval");
+    expect(duplicateSubmitResult.task.taskType).toBe("approval");
     expect(resumed?.status).toBe("completed");
     expect(markCompleted).toHaveBeenCalledWith(expect.objectContaining({
       humanApprovalId: tasks[0].humanApprovalId,
@@ -1692,6 +1702,11 @@ describe("durable inbound and Human Approval integration", () => {
       idempotencyKey: "optional-only-result",
     });
 
+    if (!("approval" in submitResult)) {
+      throw new Error(
+        `expected accepted submit result, got ${submitResult.status}: ${submitResult.reason}`,
+      );
+    }
     expect(submitResult.approval.taskIds).toEqual(["task-optional-only"]);
     expect(submitResult.approval.requiredTaskIds).toEqual([]);
 
