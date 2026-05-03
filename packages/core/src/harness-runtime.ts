@@ -980,7 +980,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             const leaseTtlMs = this._humanApprovalResumeLeaseMs;
             const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
             const gate = await this._humanApprovalStore!.acquireApprovalForResume({
-              humanApprovalId: id,
+              id,
               leaseOwner: "runtime",
               leaseExpiresAt,
               leaseTtlMs,
@@ -991,7 +991,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 throw new HarnessError(`Unknown human approval: "${id}"`);
               }
               return {
-                humanApprovalId: id,
+                id,
                 status: humanApprovalResumeStatus(existing),
                 approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
               };
@@ -1083,7 +1083,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   } else {
                     throwIfResumeAborted();
                     await this._humanApprovalStore!.markApprovalHandlerStarted({
-                      humanApprovalId: id,
+                      id,
                       leaseOwner: "runtime",
                     });
                     throwIfResumeAborted();
@@ -1126,14 +1126,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               throwIfResumeAborted();
 
               const blockedInboundItemIds: string[] = [];
+              const blockerSelector = { type: gate.blocker.type, id: gate.blocker.id };
               const drainBlockedInboundItemsForApproval = async (): Promise<void> => {
                 const blockedItems = this._durableInboundStore
                   ? await this._durableInboundStore.listInboundItems({
                       agentName: toolCall.agentName,
                       conversationId: toolCall.conversationId,
                       status: ["blocked"],
-                      statuses: ["blocked"],
-                      blockedBy: gate.blocker,
+                      blockedBy: blockerSelector,
                     })
                   : [];
 
@@ -1208,7 +1208,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                 await drainBlockedInboundItemsForApproval();
                 continuationTurn = this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
                 completedGate = await this._humanApprovalStore!.markApprovalCompleted({
-                  humanApprovalId: id,
+                  id,
                   leaseOwner: "runtime",
                   turnId: toolCall.turnId,
                   blockedInboundItemIds,
@@ -1225,7 +1225,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               });
               const continuation = await continuationTurn!.start();
               return {
-                humanApprovalId: id,
+                id,
                 status: "completed",
                 approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
                 continuation,
@@ -1238,7 +1238,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               if (completedGate) {
                 const completedToolCall = completedGate.toolCall;
                 return {
-                  humanApprovalId: id,
+                  id,
                   status: "completed",
                   approval: await toPublicHumanApprovalRecord(completedGate, this._humanApprovalStore),
                   continuation: {
@@ -1253,7 +1253,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               }
               try {
                 const failed = await this._humanApprovalStore!.markApprovalFailed({
-                  humanApprovalId: id,
+                  id,
                   reason: error.message,
                   retryable: true,
                   leaseOwner: "runtime",
@@ -1265,7 +1265,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   reason: error.message,
                 });
                 return {
-                  humanApprovalId: id,
+                  id,
                   status: "failed",
                   approval: await toPublicHumanApprovalRecord(failed, this._humanApprovalStore),
                 };
@@ -1277,7 +1277,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   throw markError;
                 }
                 return {
-                  humanApprovalId: id,
+                  id,
                   status: humanApprovalResumeStatus(existing),
                   approval: await toPublicHumanApprovalRecord(existing, this._humanApprovalStore),
                 };
@@ -1300,9 +1300,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       cancelHumanApproval: this._humanApprovalStore
         ? async (input: string | CancelHumanApprovalInput) => {
             const cancelInput: CancelHumanApprovalInput = typeof input === "string"
-              ? { humanApprovalId: input }
+              ? { id: input }
               : input;
-            const existingApproval = await this._humanApprovalStore!.getApproval(cancelInput.humanApprovalId);
+            const existingApproval = await this._humanApprovalStore!.getApproval(cancelInput.id);
             const gate = await this._humanApprovalStore!.cancelApproval(cancelInput);
             const isTerminal = gate.status === "canceled" || gate.status === "expired";
             const transitioned = existingApproval
@@ -1316,13 +1316,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               });
             }
             if (transitioned && this._durableInboundStore) {
+              const blockerSelector = { type: gate.blocker.type, id: gate.blocker.id };
               if (gate.status === "expired") {
                 const blockedItems = await this._durableInboundStore.listInboundItems({
                   agentName: gate.toolCall.agentName,
                   conversationId: gate.toolCall.conversationId,
                   status: ["blocked"],
-                  statuses: ["blocked"],
-                  blockedBy: gate.blocker,
+                  blockedBy: blockerSelector,
                 });
                 await Promise.all(blockedItems.map((item) => this._deadLetterInboundItem({
                   id: item.id,
@@ -1334,15 +1334,14 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   releasedItems = await this._durableInboundStore.releaseBlockedInboundItems({
                     agentName: gate.toolCall.agentName,
                     conversationId: gate.toolCall.conversationId,
-                    blockedBy: gate.blocker,
+                    blockedBy: blockerSelector,
                   });
                 } else {
                   const blockedItems = await this._durableInboundStore.listInboundItems({
                     agentName: gate.toolCall.agentName,
                     conversationId: gate.toolCall.conversationId,
                     status: ["blocked"],
-                    statuses: ["blocked"],
-                    blockedBy: gate.blocker,
+                    blockedBy: blockerSelector,
                   });
                   releasedItems = await Promise.all(blockedItems.map((item) =>
                     this._durableInboundStore!.releaseInboundItem

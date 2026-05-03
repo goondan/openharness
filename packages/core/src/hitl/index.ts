@@ -11,7 +11,6 @@ export type {
   HumanApprovalReferenceStore,
   HumanApprovalStatus,
   HumanApprovalStore,
-  HumanApprovalToolCallSnapshot,
   HumanResult,
   HumanTaskCreateInput,
   HumanTaskFilter,

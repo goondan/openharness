@@ -44,7 +44,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       throw new Error("Human approval requires at least one human task.");
     }
 
-    const gateId = input.humanApprovalId ?? input.id ?? defaultHumanApprovalId(input);
+    const gateId = input.id;
     const toolCallKey = humanApprovalToolCallKey(input);
     const duplicateGateId = this._gates.has(gateId)
       ? gateId
@@ -57,7 +57,6 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
         approval: cloneValue(gate),
         tasks: tasks.map(cloneValue),
         blocker: cloneValue(gate.blocker),
-        created: false,
         duplicate: true,
       };
     }
@@ -86,9 +85,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       updatedAt: now,
     };
     const tasks: HumanTaskRecord[] = input.tasks.map((task, index) => {
-      const explicitTaskType = "taskType" in task ? task.taskType : undefined;
-      const candidateTaskType = explicitTaskType ?? task.type;
-      const taskType = normalizeHumanTaskType(candidateTaskType);
+      const taskType = normalizeHumanTaskType(task.taskType);
       const metadata = "metadata" in task ? task.metadata : undefined;
       return {
         id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
@@ -121,7 +118,6 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       approval: cloneValue(approval),
       tasks: tasks.map(cloneValue),
       blocker: cloneValue(blocker),
-      created: true,
       duplicate: false,
     };
   }
@@ -129,9 +125,12 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   async listTasks(filter: HumanTaskFilter = {}): Promise<HumanTaskView[]> {
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
-      : filter.statuses;
+      : undefined;
     const statuses = statusValues ? new Set<HumanTaskStatus>(statusValues) : null;
-    const taskTypes = filter.taskTypes ? new Set(filter.taskTypes) : null;
+    const taskTypeValues = filter.taskType
+      ? (Array.isArray(filter.taskType) ? filter.taskType : [filter.taskType])
+      : undefined;
+    const taskTypes = taskTypeValues ? new Set<HumanTaskType>(taskTypeValues) : null;
     const views: HumanTaskView[] = [];
 
     for (const task of this._orderedTasks()) {
@@ -231,7 +230,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async acquireApprovalForResume(input: AcquireHumanApprovalInput): Promise<HumanApprovalRecord | null> {
-    const gate = this._gates.get(input.humanApprovalId);
+    const gate = this._gates.get(input.id);
     if (!gate) {
       return null;
     }
@@ -263,7 +262,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalHandlerStarted(input: MarkHumanApprovalHandlerStartedInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status !== "resuming") {
       throw new Error(`Cannot mark human approval "${gate.id}" handler started from status "${gate.status}".`);
@@ -277,7 +276,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalCompleted(input: CompleteHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status === "completed") {
       return cloneValue(gate);
@@ -298,7 +297,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     const now = input.now ?? this._now();
 
@@ -314,13 +313,13 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     if (isTerminalGateStatus(gate.status)) {
       return cloneValue(gate);
     }
 
     const now = input.now ?? this._now();
-    const status = input.status ?? (input.expired ? "expired" : "canceled");
+    const status = input.status ?? "canceled";
     gate.status = status;
     gate.lease = undefined;
     gate.failure = input.reason

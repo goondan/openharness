@@ -4,8 +4,8 @@ import type {
   AppendInboundResult,
   DeadLetterInboundInput,
   DurableInboundItem,
-  DurableInboundItemStatus,
   DurableInboundReferenceStore,
+  InboundItemStatus,
   FailInboundInput,
   InboundItemFilter,
   MarkInboundBlockedInput,
@@ -48,7 +48,6 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
       const existing = this._mustGet(existingId);
       return {
         item: cloneInboundItem(existing),
-        appended: false,
         duplicate: true,
         disposition: "duplicate",
       };
@@ -77,7 +76,6 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
 
     return {
       item: cloneInboundItem(item),
-      appended: true,
       duplicate: false,
       disposition: "pending",
     };
@@ -223,8 +221,8 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
   async listInboundItems(filter: InboundItemFilter = {}): Promise<DurableInboundItem[]> {
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
-      : filter.statuses;
-    const statuses = statusValues ? new Set<DurableInboundItemStatus>(statusValues) : null;
+      : undefined;
+    const statuses = statusValues ? new Set<InboundItemStatus>(statusValues) : null;
     const items = this._orderedItems().filter((item) => {
       if (filter.agentName && item.agentName !== filter.agentName) {
         return false;

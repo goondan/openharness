@@ -59,16 +59,12 @@ export type InboundItemStatus =
   | "failed"
   | "deadLetter";
 
-export type DurableInboundItemStatus = InboundItemStatus;
-
 export type IngressDisposition =
   | "started"
   | "delivered"
   | "blocked"
   | "duplicate"
   | "steered";
-
-export type DurableIngressDisposition = IngressDisposition;
 
 export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
@@ -106,8 +102,6 @@ export interface InboundSource {
   receivedAt: string;
   metadata?: Record<string, unknown>;
 }
-
-export type DurableInboundSource = InboundSource;
 
 export interface InboundFailureInfo {
   reason: string;
@@ -148,7 +142,6 @@ export interface AppendInboundInput {
 
 export interface AppendInboundResult {
   item: DurableInboundItem;
-  appended?: boolean;
   duplicate: boolean;
   disposition?: "pending" | "duplicate";
 }
@@ -196,7 +189,6 @@ export interface InboundItemFilter {
   agentName?: string;
   conversationId?: string;
   status?: InboundItemStatus | InboundItemStatus[];
-  statuses?: InboundItemStatus[];
   blockedBy?: ConversationBlockerSelector;
   limit?: number;
 }
@@ -268,7 +260,7 @@ export interface InboundAcceptedHandle {
   agentName: string;
   conversationId: string;
   sequence: number;
-  disposition: DurableIngressDisposition;
+  disposition: IngressDisposition;
   turnId?: string;
   blocker?: ConversationBlockerRef;
 }

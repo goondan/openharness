@@ -42,7 +42,7 @@ export class HumanApprovalResumeCoordinator {
   async resumeHumanApproval(humanApprovalId: string): Promise<HumanApprovalResumeResult> {
     const now = this._options.now?.() ?? new Date().toISOString();
     const gate = await this._options.store.acquireApprovalForResume({
-      humanApprovalId,
+      id: humanApprovalId,
       leaseOwner: this._options.leaseOwner,
       leaseTtlMs: this._options.leaseTtlMs,
       now,
@@ -60,7 +60,7 @@ export class HumanApprovalResumeCoordinator {
       const resumeResult = await this._options.resumeApproval({ approval: gate });
       const blockedInboundItemIds = resumeResult.blockedInboundItemIds ?? [];
       const completed = await this._options.store.markApprovalCompleted({
-        humanApprovalId,
+        id: humanApprovalId,
         leaseOwner: this._options.leaseOwner,
         blockedInboundItemIds,
         now: this._options.now?.() ?? new Date().toISOString(),
@@ -73,7 +73,7 @@ export class HumanApprovalResumeCoordinator {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const failed = await this._options.store.markApprovalFailed({
-        humanApprovalId,
+        id: humanApprovalId,
         reason,
         retryable: true,
         leaseOwner: this._options.leaseOwner,

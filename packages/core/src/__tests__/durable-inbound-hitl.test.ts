@@ -1109,7 +1109,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(duplicateSubmitResult.task.taskType).toBe("approval");
     expect(resumed?.status).toBe("completed");
     expect(markCompleted).toHaveBeenCalledWith(expect.objectContaining({
-      humanApprovalId: tasks[0].humanApprovalId,
+      id: tasks[0].humanApprovalId,
       leaseOwner: "runtime",
     }));
     expect(resumed?.continuation?.status).toBe("completed");
@@ -1123,7 +1123,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumeLeaseExpiresAt).toBe("2026-01-01T00:00:01.234Z");
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-human",
-      statuses: ["consumed"],
+      status: ["consumed"],
     });
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
 
@@ -1244,7 +1244,7 @@ describe("durable inbound and Human Approval integration", () => {
 
     expect(resumed?.status).toBe("failed");
     expect(markFailed).toHaveBeenCalledWith(expect.objectContaining({
-      humanApprovalId: tasks[0].humanApprovalId,
+      id: tasks[0].humanApprovalId,
       leaseOwner: "runtime",
       reason: "completion write failed",
       retryable: true,
@@ -1252,7 +1252,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumed?.approval.failure?.retryable).toBe(true);
 
     const reacquired = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: tasks[0].humanApprovalId,
+      id: tasks[0].humanApprovalId,
       leaseOwner: "worker-retry",
       leaseTtlMs: 10_000,
     });
@@ -1272,7 +1272,7 @@ describe("durable inbound and Human Approval integration", () => {
     const originalMarkFailed = humanApprovalStore.markApprovalFailed.bind(humanApprovalStore);
     const markFailed = vi.spyOn(humanApprovalStore, "markApprovalFailed").mockImplementationOnce(async (input) => {
       await runtime.control.cancelHumanApproval!({
-        humanApprovalId: input.humanApprovalId,
+        id: input.id,
         reason: "operator canceled",
       });
       return originalMarkFailed(input);
@@ -1459,7 +1459,7 @@ describe("durable inbound and Human Approval integration", () => {
     const resumed = await runtime.control.resumeHumanApproval!(tasks[0].humanApprovalId);
     const consumed = await inboundStore.listInboundItems({
       conversationId: "conv-completion-race",
-      statuses: ["consumed"],
+      status: ["consumed"],
     });
 
     expect(resumed.status).toBe("completed");
@@ -1535,7 +1535,7 @@ describe("durable inbound and Human Approval integration", () => {
     const resumed = await runtime.control.resumeHumanApproval!(tasks[0].humanApprovalId);
     const handoffItems = await inboundStore.listInboundItems({
       conversationId: "conv-handoff-delivered",
-      statuses: ["consumed"],
+      status: ["consumed"],
     });
 
     expect(handoffDispatch?.disposition).toBe("delivered");
@@ -1550,7 +1550,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("reacquires resuming Human Approvals after resume lease expiry", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({
-      humanApprovalId: "gate-resume-expiry",
+      id: "gate-resume-expiry",
       toolCall: {
         turnId: "turn-resume-expiry",
         agentName: "default",
@@ -1560,7 +1560,7 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-resume-expiry", type: "approval", required: true }],
+      tasks: [{ humanTaskId: "task-resume-expiry", taskType: "approval", required: true }],
       now: "2026-01-01T00:00:00.000Z",
     });
     await humanApprovalStore.submitResult({
@@ -1571,30 +1571,30 @@ describe("durable inbound and Human Approval integration", () => {
     });
 
     const first = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-1",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:02.000Z",
     });
     const blockedByActiveLease = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-2",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:02.500Z",
     });
     const reacquired = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-2",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:03.001Z",
     });
     await humanApprovalStore.markApprovalHandlerStarted({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-2",
       now: "2026-01-01T00:00:03.002Z",
     });
     const blockedAfterHandlerStarted = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-3",
       leaseTtlMs: 1_000,
       now: "2026-01-01T00:00:04.003Z",
@@ -1611,7 +1611,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("keeps conversation blocked while another Human Approval in the same conversation is active", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const first = await humanApprovalStore.createApproval({
-      humanApprovalId: "approval-shared-1",
+      id: "approval-shared-1",
       toolCall: {
         turnId: "turn-shared-1",
         agentName: "default",
@@ -1621,11 +1621,11 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-shared-1", type: "approval", required: true }],
+      tasks: [{ humanTaskId: "task-shared-1", taskType: "approval", required: true }],
       now: "2026-01-01T00:00:00.000Z",
     });
     const second = await humanApprovalStore.createApproval({
-      humanApprovalId: "approval-shared-2",
+      id: "approval-shared-2",
       toolCall: {
         turnId: "turn-shared-2",
         agentName: "default",
@@ -1635,7 +1635,7 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-shared-2", type: "approval", required: true }],
+      tasks: [{ humanTaskId: "task-shared-2", taskType: "approval", required: true }],
       now: "2026-01-01T00:00:01.000Z",
     });
 
@@ -1646,12 +1646,12 @@ describe("durable inbound and Human Approval integration", () => {
       now: "2026-01-01T00:00:02.000Z",
     });
     await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: first.approval.id,
+      id: first.approval.id,
       leaseOwner: "worker-1",
       now: "2026-01-01T00:00:03.000Z",
     });
     await humanApprovalStore.markApprovalCompleted({
-      humanApprovalId: first.approval.id,
+      id: first.approval.id,
       leaseOwner: "worker-1",
       now: "2026-01-01T00:00:04.000Z",
     });
@@ -1661,7 +1661,7 @@ describe("durable inbound and Human Approval integration", () => {
     });
 
     await humanApprovalStore.cancelApproval({
-      humanApprovalId: second.approval.id,
+      id: second.approval.id,
       reason: "operator cancel",
       now: "2026-01-01T00:00:05.000Z",
     });
@@ -1678,7 +1678,7 @@ describe("durable inbound and Human Approval integration", () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     await humanApprovalStore.createApproval({
-      humanApprovalId: "approval-optional-only",
+      id: "approval-optional-only",
       toolCall: {
         turnId: "turn-optional-only",
         agentName: "default",
@@ -1688,7 +1688,7 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-optional-only", type: "text", title: "Optional note", required: false }],
+      tasks: [{ humanTaskId: "task-optional-only", taskType: "text", title: "Optional note", required: false }],
       now: "2026-01-01T00:00:00.000Z",
     });
     const runtime = await createHarness(baseConfig({
@@ -1716,7 +1716,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("keeps resuming and failed Human Approvals from being reopened by late task submissions", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({
-      humanApprovalId: "approval-late-task",
+      id: "approval-late-task",
       toolCall: {
         turnId: "turn-late-task",
         agentName: "default",
@@ -1727,8 +1727,8 @@ describe("durable inbound and Human Approval integration", () => {
         toolArgs: {},
       },
       tasks: [
-        { humanTaskId: "task-required", type: "approval", title: "Required approval", required: true },
-        { humanTaskId: "task-optional", type: "text", title: "Optional note", required: false },
+        { humanTaskId: "task-required", taskType: "approval", title: "Required approval", required: true },
+        { humanTaskId: "task-optional", taskType: "text", title: "Optional note", required: false },
       ],
       now: "2026-01-01T00:00:00.000Z",
     });
@@ -1744,7 +1744,7 @@ describe("durable inbound and Human Approval integration", () => {
       now: "2026-01-01T00:00:01.000Z",
     });
     const resuming = await humanApprovalStore.acquireApprovalForResume({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-1",
       leaseTtlMs: 10_000,
       now: "2026-01-01T00:00:02.000Z",
@@ -1758,7 +1758,7 @@ describe("durable inbound and Human Approval integration", () => {
     const stillResuming = await humanApprovalStore.getApproval(created.approval.id);
 
     await humanApprovalStore.markApprovalFailed({
-      humanApprovalId: created.approval.id,
+      id: created.approval.id,
       leaseOwner: "worker-1",
       reason: "resume failed",
       retryable: true,
@@ -1782,7 +1782,7 @@ describe("durable inbound and Human Approval integration", () => {
   it("rejects human results that do not match the task type", async () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({
-      humanApprovalId: "approval-type-mismatch",
+      id: "approval-type-mismatch",
       toolCall: {
         turnId: "turn-type-mismatch",
         agentName: "default",
@@ -1792,7 +1792,7 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-approval-only", type: "approval", required: true }],
+      tasks: [{ humanTaskId: "task-approval-only", taskType: "approval", required: true }],
     });
 
     const invalid = await humanApprovalStore.submitResult({
@@ -1865,17 +1865,17 @@ describe("durable inbound and Human Approval integration", () => {
     const canceled = await runtime.control.cancelHumanApproval?.(tasks[0].humanApprovalId);
     const blockedItems = await inboundStore.listInboundItems({
       conversationId: "conv-cancel-human",
-      statuses: ["blocked"],
+      status: ["blocked"],
     });
     let consumedItems = await inboundStore.listInboundItems({
       conversationId: "conv-cancel-human",
-      statuses: ["consumed"],
+      status: ["consumed"],
     });
     for (let attempt = 0; attempt < 10 && !consumedItems.some((item) => item.id === blocked.inboundItemId); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
       consumedItems = await inboundStore.listInboundItems({
         conversationId: "conv-cancel-human",
-        statuses: ["consumed"],
+        status: ["consumed"],
       });
     }
 
@@ -1950,17 +1950,17 @@ describe("durable inbound and Human Approval integration", () => {
     expect(blocked.disposition).toBe("blocked");
 
     const expired = await runtime.control.cancelHumanApproval?.({
-      humanApprovalId: tasks[0].humanApprovalId,
-      expired: true,
+      id: tasks[0].humanApprovalId,
+      status: "expired",
       reason: "approval expired",
     });
     const pendingItems = await inboundStore.listInboundItems({
       conversationId: "conv-expire-human",
-      statuses: ["pending"],
+      status: ["pending"],
     });
     const deadLetterItems = await inboundStore.listInboundItems({
       conversationId: "conv-expire-human",
-      statuses: ["deadLetter"],
+      status: ["deadLetter"],
     });
 
     expect(expired?.status).toBe("expired");
@@ -2013,7 +2013,7 @@ describe("durable inbound and Human Approval integration", () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const created = await humanApprovalStore.createApproval({
-      humanApprovalId: "gate-canceled-terminal",
+      id: "gate-canceled-terminal",
       toolCall: {
         turnId: "turn-canceled-terminal",
         agentName: "default",
@@ -2023,9 +2023,9 @@ describe("durable inbound and Human Approval integration", () => {
         toolName: "guarded",
         toolArgs: {},
       },
-      tasks: [{ humanTaskId: "task-canceled-terminal", type: "approval", required: true }],
+      tasks: [{ humanTaskId: "task-canceled-terminal", taskType: "approval", required: true }],
     });
-    await humanApprovalStore.cancelApproval({ humanApprovalId: created.approval.id, reason: "operator canceled" });
+    await humanApprovalStore.cancelApproval({ id: created.approval.id, reason: "operator canceled" });
 
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },

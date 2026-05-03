@@ -60,7 +60,7 @@ export interface DurableControlApi extends ControlApi {
 }
 
 export interface HumanApprovalResumeResult {
-  humanApprovalId: string;
+  id: string;
   status: "completed" | "blocked" | "failed";
   approval: HumanApprovalRecord;
   continuation?: TurnResult;
