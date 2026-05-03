@@ -49,7 +49,7 @@ export type HumanTaskStatus =
 export type HumanTaskType = "approval" | "text" | "form";
 
 export interface HumanTaskDefinition {
-  type: HumanTaskType;
+  taskType: HumanTaskType;
   title?: string;
   prompt?: string;
   required?: boolean;
@@ -80,8 +80,6 @@ export interface ToolCallSnapshot {
   toolName: string;
   toolArgs: JsonObject;
 }
-
-export type HumanApprovalToolCallSnapshot = ToolCallSnapshot;
 
 export interface HumanTaskRecord {
   id: string;
@@ -142,8 +140,7 @@ export interface HumanApprovalRecord {
 
 export interface HumanTaskCreateInput {
   humanTaskId?: string;
-  type?: HumanTaskType;
-  taskType?: HumanTaskType;
+  taskType: HumanTaskType;
   title?: string;
   prompt?: string;
   required?: boolean;
@@ -152,10 +149,9 @@ export interface HumanTaskCreateInput {
 }
 
 export interface CreateHumanApprovalInput {
-  id?: string;
-  humanApprovalId?: string;
+  id: string;
   toolCall: ToolCallSnapshot;
-  tasks: HumanTaskCreateInput[] | HumanTaskDefinition[];
+  tasks: HumanTaskCreateInput[];
   prompt?: string;
   expectedResultSchema?: JsonSchema;
   conversationCursor?: string;
@@ -170,7 +166,6 @@ export interface CreateHumanApprovalResult {
   approval: HumanApprovalRecord;
   tasks: HumanTaskRecord[] | HumanTaskView[];
   blocker?: ConversationBlockerRef;
-  created?: boolean;
   duplicate: boolean;
 }
 
@@ -179,8 +174,7 @@ export interface HumanTaskFilter {
   conversationId?: string;
   humanApprovalId?: string;
   status?: HumanTaskStatus | HumanTaskStatus[];
-  statuses?: HumanTaskStatus[];
-  taskTypes?: HumanTaskType[];
+  taskType?: HumanTaskType | HumanTaskType[];
   limit?: number;
 }
 
@@ -211,15 +205,22 @@ export type SubmitHumanResult =
     };
 
 export interface AcquireHumanApprovalInput {
-  humanApprovalId: string;
+  id: string;
   leaseOwner: string;
   leaseExpiresAt?: string;
   leaseTtlMs?: number;
   now?: string;
 }
 
+export interface ResumeHumanApprovalInput {
+  id: string;
+  leaseOwner?: string;
+  leaseTtlMs?: number;
+  now?: string;
+}
+
 export interface CompleteHumanApprovalInput {
-  humanApprovalId: string;
+  id: string;
   leaseOwner?: string;
   turnId?: string;
   blockedInboundItemIds?: string[];
@@ -227,13 +228,13 @@ export interface CompleteHumanApprovalInput {
 }
 
 export interface MarkHumanApprovalHandlerStartedInput {
-  humanApprovalId: string;
+  id: string;
   leaseOwner?: string;
   now?: string;
 }
 
 export interface FailHumanApprovalInput {
-  humanApprovalId: string;
+  id: string;
   reason: string;
   retryable: boolean;
   leaseOwner?: string;
@@ -241,9 +242,8 @@ export interface FailHumanApprovalInput {
 }
 
 export interface CancelHumanApprovalInput {
-  humanApprovalId: string;
+  id: string;
   reason?: string;
-  expired?: boolean;
   status?: Extract<HumanApprovalStatus, "canceled" | "expired">;
   now?: string;
 }

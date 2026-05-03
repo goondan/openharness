@@ -28,6 +28,7 @@ import { IngressPipeline } from "./ingress/pipeline.js";
 import { HarnessRuntimeImpl, type AgentDeps } from "./harness-runtime.js";
 import { createConversationState } from "./conversation-state.js";
 import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
+import { stableHash } from "./idempotency-key.js";
 
 const DEFAULT_MAX_STEPS = 25;
 
@@ -77,10 +78,6 @@ function requireDurableInboundReferenceStore(
   return store;
 }
 
-function stableStringify(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
-
 function normalizeIngressExternalId(value: unknown): string | undefined {
   if (typeof value === "string") {
     const normalized = value.trim();
@@ -90,20 +87,6 @@ function normalizeIngressExternalId(value: unknown): string | undefined {
     return String(value);
   }
   return undefined;
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeys);
-  }
-  if (value && typeof value === "object") {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = sortKeys((value as Record<string, unknown>)[key]);
-    }
-    return sorted;
-  }
-  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,12 +293,12 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           agentName,
           conversationId,
           envelope.name,
-          externalId ?? [
-            "no-external-id",
-            envelope.source.receivedAt,
-            stableStringify(envelope.properties ?? {}),
-            stableStringify(envelope.content),
-          ].join(":"),
+          externalId ??
+            stableHash({
+              receivedAt: envelope.source.receivedAt,
+              properties: envelope.properties ?? {},
+              content: envelope.content,
+            }),
         ].join(":");
         const appended = await durableInboundStore.append({
           agentName,

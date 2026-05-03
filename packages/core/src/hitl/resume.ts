@@ -19,15 +19,24 @@ export interface ResumeHumanApprovalHandlerResult {
   blockedInboundItemIds?: string[];
 }
 
-export type HumanApprovalResumeResult =
+/**
+ * Internal outcome type for the resume coordinator.
+ *
+ * Distinct from the public `HumanApprovalResumeResult` exposed via
+ * `ControlApi.resumeHumanApproval` — this one only describes what the
+ * coordinator did to the approval record (and which inbound items it
+ * drained), not the continuation that the harness runtime triggers.
+ */
+export type HumanApprovalResumeOutcome =
   | {
       status: "completed";
+      id: string;
       approval: HumanApprovalRecord;
       blockedInboundItemIds: string[];
     }
   | {
       status: "notReady" | "failed";
-      humanApprovalId: string;
+      id: string;
       reason: string;
       approval?: HumanApprovalRecord;
     };
@@ -39,10 +48,10 @@ export class HumanApprovalResumeCoordinator {
     this._options = options;
   }
 
-  async resumeHumanApproval(humanApprovalId: string): Promise<HumanApprovalResumeResult> {
+  async resumeHumanApproval(id: string): Promise<HumanApprovalResumeOutcome> {
     const now = this._options.now?.() ?? new Date().toISOString();
     const gate = await this._options.store.acquireApprovalForResume({
-      humanApprovalId,
+      id,
       leaseOwner: this._options.leaseOwner,
       leaseTtlMs: this._options.leaseTtlMs,
       now,
@@ -51,7 +60,7 @@ export class HumanApprovalResumeCoordinator {
     if (!gate) {
       return {
         status: "notReady",
-        humanApprovalId,
+        id,
         reason: "Approval is missing, not ready, or currently leased by another worker.",
       };
     }
@@ -60,20 +69,21 @@ export class HumanApprovalResumeCoordinator {
       const resumeResult = await this._options.resumeApproval({ approval: gate });
       const blockedInboundItemIds = resumeResult.blockedInboundItemIds ?? [];
       const completed = await this._options.store.markApprovalCompleted({
-        humanApprovalId,
+        id,
         leaseOwner: this._options.leaseOwner,
         blockedInboundItemIds,
         now: this._options.now?.() ?? new Date().toISOString(),
       });
       return {
         status: "completed",
+        id,
         approval: completed,
         blockedInboundItemIds,
       };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const failed = await this._options.store.markApprovalFailed({
-        humanApprovalId,
+        id,
         reason,
         retryable: true,
         leaseOwner: this._options.leaseOwner,
@@ -81,7 +91,7 @@ export class HumanApprovalResumeCoordinator {
       });
       return {
         status: "failed",
-        humanApprovalId,
+        id,
         reason,
         approval: failed,
       };

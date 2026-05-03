@@ -7,6 +7,7 @@ import type {
   IngressAcceptResult,
   IngressApi,
   ReleaseInboundItemInput,
+  RetryInboundInput,
 } from "./ingress.js";
 import type { ProcessTurnOptions } from "./config.js";
 import type { EventPayload } from "./events.js";
@@ -15,6 +16,7 @@ import type {
   HumanApprovalRecord,
   HumanTaskFilter,
   HumanTaskView,
+  ResumeHumanApprovalInput,
   SubmitHumanResult,
   SubmitHumanResultInput,
 } from "./tool.js";
@@ -37,30 +39,30 @@ export interface ControlApi {
   }): Promise<AbortResult>;
 
   listInboundItems?(filter?: InboundItemFilter): Promise<DurableInboundItem[]>;
-  retryInboundItem?(id: string): Promise<DurableInboundItem>;
+  retryInboundItem?(input: string | RetryInboundInput): Promise<DurableInboundItem>;
   releaseInboundItem?(input: string | ReleaseInboundItemInput): Promise<DurableInboundItem>;
   deadLetterInboundItem?(input: string | DeadLetterInboundInput): Promise<DurableInboundItem>;
 
   listHumanTasks?(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitHumanResult?(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  resumeHumanApproval?(id: string): Promise<HumanApprovalResumeResult>;
+  resumeHumanApproval?(input: string | ResumeHumanApprovalInput): Promise<HumanApprovalResumeResult>;
   cancelHumanApproval?(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
 }
 
 export interface DurableControlApi extends ControlApi {
   listInboundItems(filter?: InboundItemFilter): Promise<DurableInboundItem[]>;
-  retryInboundItem(id: string): Promise<DurableInboundItem>;
+  retryInboundItem(input: string | RetryInboundInput): Promise<DurableInboundItem>;
   releaseInboundItem(input: string | ReleaseInboundItemInput): Promise<DurableInboundItem>;
   deadLetterInboundItem(input: string | DeadLetterInboundInput): Promise<DurableInboundItem>;
 
   listHumanTasks(filter?: HumanTaskFilter): Promise<HumanTaskView[]>;
   submitHumanResult(input: SubmitHumanResultInput): Promise<SubmitHumanResult>;
-  resumeHumanApproval(id: string): Promise<HumanApprovalResumeResult>;
+  resumeHumanApproval(input: string | ResumeHumanApprovalInput): Promise<HumanApprovalResumeResult>;
   cancelHumanApproval(input: string | CancelHumanApprovalInput): Promise<HumanApprovalRecord>;
 }
 
 export interface HumanApprovalResumeResult {
-  humanApprovalId: string;
+  id: string;
   status: "completed" | "blocked" | "failed";
   approval: HumanApprovalRecord;
   continuation?: TurnResult;

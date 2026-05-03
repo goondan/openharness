@@ -11,7 +11,6 @@ export type {
   HumanApprovalReferenceStore,
   HumanApprovalStatus,
   HumanApprovalStore,
-  HumanApprovalToolCallSnapshot,
   HumanResult,
   HumanTaskCreateInput,
   HumanTaskFilter,
@@ -24,7 +23,7 @@ export type {
 } from "@goondan/openharness-types";
 export type {
   HumanApprovalResumeCoordinatorOptions,
-  HumanApprovalResumeResult,
+  HumanApprovalResumeOutcome,
   ResumeHumanApprovalHandlerInput,
   ResumeHumanApprovalHandlerResult,
 } from "./resume.js";

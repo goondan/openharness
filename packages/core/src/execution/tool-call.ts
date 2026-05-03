@@ -85,7 +85,6 @@ export async function executeToolCall(
 
       const created = await humanApprovalStore.createApproval({
         id: `${turnId}:${toolCallId}:humanApproval`,
-        humanApprovalId: `${turnId}:${toolCallId}:humanApproval`,
         toolCall: {
           turnId,
           agentName,
@@ -100,8 +99,7 @@ export async function executeToolCall(
         tasks: (humanApproval.tasks?.length
           ? humanApproval.tasks.map((task, index) => ({
               humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
-              type: task.type,
-              taskType: task.type,
+              taskType: task.taskType,
               title: task.title,
               prompt: task.prompt ?? humanApproval.prompt,
               required: task.required,
@@ -109,7 +107,6 @@ export async function executeToolCall(
             }))
           : [{
               humanTaskId: `${turnId}:${toolCallId}:task:1`,
-              type: "approval" as const,
               taskType: "approval" as const,
               prompt: humanApproval.prompt,
               required: true,
@@ -117,8 +114,7 @@ export async function executeToolCall(
             }]),
       });
 
-      const approvalCreated = created.created ?? !created.duplicate;
-      if (approvalCreated) {
+      if (!created.duplicate) {
         eventBus.emit("humanApproval.created", {
           type: "humanApproval.created",
           humanApprovalId: created.approval.id,

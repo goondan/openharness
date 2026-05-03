@@ -10,6 +10,7 @@ import type {
   InboundEnvelope,
 } from "@goondan/openharness-types";
 import { defineHarness, env } from "@goondan/openharness-types";
+import { createInMemoryDurableInboundStore } from "@goondan/openharness-adapters";
 import { createHarness } from "../create-harness.js";
 import { HarnessError } from "../errors.js";
 
@@ -71,6 +72,39 @@ describe("createHarness", () => {
     // Control surface is functional
     expect(runtime.control).toBeDefined();
     expect(typeof runtime.control.abortConversation).toBe("function");
+
+    await runtime.close();
+  });
+
+  it("keeps direct idempotency keys compact", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const runtime = await createHarness(
+      minimalConfig({
+        durableInbound: {
+          enabled: true,
+          store: inboundStore,
+        },
+      }),
+    );
+
+    const conversationId = "conv-direct-idempotency";
+    const prompt = `payload-${"x".repeat(1200)}`;
+
+    await runtime.processTurn("default", prompt, {
+      conversationId,
+      receivedAt: "2026-05-03T00:00:00.000Z",
+    });
+
+    const [item] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId,
+    });
+
+    expect(item.idempotencyKey).toMatch(
+      /^direct:default:conv-direct-idempotency:[a-f0-9]{64}$/,
+    );
+    expect(item.idempotencyKey).not.toContain("payload-");
+    expect(item.idempotencyKey.length).toBeLessThan(128);
 
     await runtime.close();
   });

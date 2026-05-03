@@ -59,8 +59,6 @@ export type InboundItemStatus =
   | "failed"
   | "deadLetter";
 
-export type DurableInboundItemStatus = InboundItemStatus;
-
 export type IngressDisposition =
   | "started"
   | "delivered"
@@ -68,12 +66,10 @@ export type IngressDisposition =
   | "duplicate"
   | "steered";
 
-export type DurableIngressDisposition = IngressDisposition;
-
 export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
 export interface ConversationBlockerRef {
-  type: ConversationBlockerType | (string & {});
+  type: string;
   id: string;
   reason?: string;
   metadata?: Record<string, unknown>;
@@ -88,7 +84,7 @@ export interface ConversationBlockerRef {
  * if accepted, so they are intentionally excluded.
  */
 export interface ConversationBlockerSelector {
-  type?: ConversationBlockerType | (string & {});
+  type?: string;
   id?: string;
 }
 
@@ -106,8 +102,6 @@ export interface InboundSource {
   receivedAt: string;
   metadata?: Record<string, unknown>;
 }
-
-export type DurableInboundSource = InboundSource;
 
 export interface InboundFailureInfo {
   reason: string;
@@ -148,7 +142,6 @@ export interface AppendInboundInput {
 
 export interface AppendInboundResult {
   item: DurableInboundItem;
-  appended?: boolean;
   duplicate: boolean;
   disposition?: "pending" | "duplicate";
 }
@@ -196,7 +189,6 @@ export interface InboundItemFilter {
   agentName?: string;
   conversationId?: string;
   status?: InboundItemStatus | InboundItemStatus[];
-  statuses?: InboundItemStatus[];
   blockedBy?: ConversationBlockerSelector;
   limit?: number;
 }
@@ -210,6 +202,11 @@ export interface DeadLetterInboundInput {
 export interface ReleaseInboundItemInput {
   id: string;
   leaseOwner?: string;
+  now?: string;
+}
+
+export interface RetryInboundInput {
+  id: string;
   now?: string;
 }
 
@@ -228,7 +225,7 @@ export interface DurableInboundStore {
   markConsumed(input: MarkInboundConsumedInput): Promise<DurableInboundItem>;
   releaseExpiredLeases(now: string): Promise<number>;
   listInboundItems(filter: InboundItemFilter): Promise<DurableInboundItem[]>;
-  retryInboundItem(id: string): Promise<DurableInboundItem>;
+  retryInboundItem(input: RetryInboundInput): Promise<DurableInboundItem>;
   releaseInboundItem?(input: ReleaseInboundItemInput): Promise<DurableInboundItem>;
   deadLetterInboundItem(input: DeadLetterInboundInput): Promise<DurableInboundItem>;
 }
@@ -268,7 +265,7 @@ export interface InboundAcceptedHandle {
   agentName: string;
   conversationId: string;
   sequence: number;
-  disposition: DurableIngressDisposition;
+  disposition: IngressDisposition;
   turnId?: string;
   blocker?: ConversationBlockerRef;
 }

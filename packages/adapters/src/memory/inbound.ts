@@ -4,8 +4,8 @@ import type {
   AppendInboundResult,
   DeadLetterInboundInput,
   DurableInboundItem,
-  DurableInboundItemStatus,
   DurableInboundReferenceStore,
+  InboundItemStatus,
   FailInboundInput,
   InboundItemFilter,
   MarkInboundBlockedInput,
@@ -13,7 +13,9 @@ import type {
   MarkInboundDeliveredInput,
   ReleaseBlockedInboundInput,
   ReleaseInboundItemInput,
+  RetryInboundInput,
 } from "@goondan/openharness-types";
+import { stableHash } from "./idempotency-key.js";
 
 export interface InMemoryDurableInboundStoreOptions {
   idPrefix?: string;
@@ -48,7 +50,6 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
       const existing = this._mustGet(existingId);
       return {
         item: cloneInboundItem(existing),
-        appended: false,
         duplicate: true,
         disposition: "duplicate",
       };
@@ -77,7 +78,6 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
 
     return {
       item: cloneInboundItem(item),
-      appended: true,
       duplicate: false,
       disposition: "pending",
     };
@@ -221,10 +221,15 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
   }
 
   async listInboundItems(filter: InboundItemFilter = {}): Promise<DurableInboundItem[]> {
+    if ("statuses" in (filter as Record<string, unknown>)) {
+      throw new Error(
+        "InboundItemFilter.statuses was removed; use status (single | array).",
+      );
+    }
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
-      : filter.statuses;
-    const statuses = statusValues ? new Set<DurableInboundItemStatus>(statusValues) : null;
+      : undefined;
+    const statuses = statusValues ? new Set<InboundItemStatus>(statusValues) : null;
     const items = this._orderedItems().filter((item) => {
       if (filter.agentName && item.agentName !== filter.agentName) {
         return false;
@@ -245,13 +250,13 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
     return limited.map(cloneInboundItem);
   }
 
-  async retryInboundItem(id: string): Promise<DurableInboundItem> {
-    const item = this._mustGet(id);
+  async retryInboundItem(input: RetryInboundInput): Promise<DurableInboundItem> {
+    const item = this._mustGet(input.id);
     if (!["failed", "deadLetter", "blocked", "delivered"].includes(item.status)) {
-      throw new Error(`Cannot retry inbound item "${id}" from status "${item.status}".`);
+      throw new Error(`Cannot retry inbound item "${input.id}" from status "${item.status}".`);
     }
 
-    return this._releaseToPending(item, this._now());
+    return this._releaseToPending(item, input.now ?? this._now());
   }
 
   async releaseInboundItem(input: ReleaseInboundItemInput): Promise<DurableInboundItem> {
@@ -356,7 +361,14 @@ export function createInMemoryDurableInboundStore(
 }
 
 export function defaultInboundIdempotencyKey(input: AppendInboundInput): string {
-  const externalPart = input.source.externalId ?? stableStringify(input.envelope);
+  const externalPart =
+    input.source.externalId ??
+    stableHash({
+      kind: input.source.kind,
+      connectionName: input.source.connectionName ?? "direct",
+      receivedAt: input.source.receivedAt,
+      envelope: input.envelope,
+    });
   return [
     input.source.kind,
     input.source.connectionName ?? "direct",
@@ -408,24 +420,4 @@ function cloneValue<T>(value: T): T {
   } catch {
     return JSON.parse(JSON.stringify(value)) as T;
   }
-}
-
-function stableStringify(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeys);
-  }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-
-  const record = value as Record<string, unknown>;
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = sortKeys(record[key]);
-  }
-  return sorted;
 }

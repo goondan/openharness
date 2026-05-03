@@ -190,7 +190,7 @@ export async function drainBlockedInboundItems(
   const blockedItems = await input.store.listInboundItems({
     agentName: input.agentName,
     conversationId: input.conversationId,
-    statuses: ["blocked"],
+    status: ["blocked"],
     blockedBy: input.blockedBy,
   });
   const consumedItems: DurableInboundItem[] = [];

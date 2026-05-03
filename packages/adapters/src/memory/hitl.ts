@@ -43,8 +43,14 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
     if (input.tasks.length === 0) {
       throw new Error("Human approval requires at least one human task.");
     }
+    if (typeof input.id !== "string" || input.id.length === 0) {
+      throw new Error(
+        "CreateHumanApprovalInput.id is required (was previously named humanApprovalId). " +
+          "Update the call site to pass `id`.",
+      );
+    }
 
-    const gateId = input.humanApprovalId ?? input.id ?? defaultHumanApprovalId(input);
+    const gateId = input.id;
     const toolCallKey = humanApprovalToolCallKey(input);
     const duplicateGateId = this._gates.has(gateId)
       ? gateId
@@ -57,7 +63,6 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
         approval: cloneValue(gate),
         tasks: tasks.map(cloneValue),
         blocker: cloneValue(gate.blocker),
-        created: false,
         duplicate: true,
       };
     }
@@ -86,9 +91,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       updatedAt: now,
     };
     const tasks: HumanTaskRecord[] = input.tasks.map((task, index) => {
-      const explicitTaskType = "taskType" in task ? task.taskType : undefined;
-      const candidateTaskType = explicitTaskType ?? task.type;
-      const taskType = normalizeHumanTaskType(candidateTaskType);
+      const taskType = normalizeHumanTaskType(task.taskType);
       const metadata = "metadata" in task ? task.metadata : undefined;
       return {
         id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
@@ -121,17 +124,30 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       approval: cloneValue(approval),
       tasks: tasks.map(cloneValue),
       blocker: cloneValue(blocker),
-      created: true,
       duplicate: false,
     };
   }
 
   async listTasks(filter: HumanTaskFilter = {}): Promise<HumanTaskView[]> {
+    const filterRecord = filter as Record<string, unknown>;
+    if ("statuses" in filterRecord) {
+      throw new Error(
+        "HumanTaskFilter.statuses was removed; use status (single | array).",
+      );
+    }
+    if ("taskTypes" in filterRecord) {
+      throw new Error(
+        "HumanTaskFilter.taskTypes was removed; use taskType (single | array).",
+      );
+    }
     const statusValues = filter.status
       ? (Array.isArray(filter.status) ? filter.status : [filter.status])
-      : filter.statuses;
+      : undefined;
     const statuses = statusValues ? new Set<HumanTaskStatus>(statusValues) : null;
-    const taskTypes = filter.taskTypes ? new Set(filter.taskTypes) : null;
+    const taskTypeValues = filter.taskType
+      ? (Array.isArray(filter.taskType) ? filter.taskType : [filter.taskType])
+      : undefined;
+    const taskTypes = taskTypeValues ? new Set<HumanTaskType>(taskTypeValues) : null;
     const views: HumanTaskView[] = [];
 
     for (const task of this._orderedTasks()) {
@@ -231,7 +247,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async acquireApprovalForResume(input: AcquireHumanApprovalInput): Promise<HumanApprovalRecord | null> {
-    const gate = this._gates.get(input.humanApprovalId);
+    const gate = this._gates.get(input.id);
     if (!gate) {
       return null;
     }
@@ -263,7 +279,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalHandlerStarted(input: MarkHumanApprovalHandlerStartedInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status !== "resuming") {
       throw new Error(`Cannot mark human approval "${gate.id}" handler started from status "${gate.status}".`);
@@ -277,7 +293,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalCompleted(input: CompleteHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     if (gate.status === "completed") {
       return cloneValue(gate);
@@ -298,7 +314,7 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async markApprovalFailed(input: FailHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    const gate = this._mustGetGate(input.id);
     this._assertLeaseOwner(gate, input.leaseOwner);
     const now = input.now ?? this._now();
 
@@ -314,13 +330,18 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
   }
 
   async cancelApproval(input: CancelHumanApprovalInput): Promise<HumanApprovalRecord> {
-    const gate = this._mustGetGate(input.humanApprovalId);
+    if ("expired" in (input as unknown as Record<string, unknown>)) {
+      throw new Error(
+        'CancelHumanApprovalInput.expired was removed; use status: "expired" instead.',
+      );
+    }
+    const gate = this._mustGetGate(input.id);
     if (isTerminalGateStatus(gate.status)) {
       return cloneValue(gate);
     }
 
     const now = input.now ?? this._now();
-    const status = input.status ?? (input.expired ? "expired" : "canceled");
+    const status = input.status ?? "canceled";
     gate.status = status;
     gate.lease = undefined;
     gate.failure = input.reason
@@ -543,11 +564,14 @@ const KNOWN_HUMAN_TASK_TYPES: ReadonlySet<HumanTaskType> = new Set([
 ]);
 
 function normalizeHumanTaskType(value: unknown): HumanTaskType {
-  if (value === undefined) {
-    return "approval";
-  }
   if (typeof value === "string" && (KNOWN_HUMAN_TASK_TYPES as ReadonlySet<string>).has(value)) {
     return value as HumanTaskType;
+  }
+  if (value === undefined) {
+    throw new Error(
+      'HumanTaskCreateInput.taskType is required (was previously named "type"). ' +
+        "Update the call site to pass `taskType`.",
+    );
   }
   throw new Error(
     `Unsupported human task type: ${JSON.stringify(value)}. Expected one of "approval" | "text" | "form".`,
