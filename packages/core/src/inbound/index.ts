@@ -20,12 +20,7 @@ export type {
   MarkInboundConsumedInput,
   MarkInboundDeliveredInput,
   ReleaseBlockedInboundInput,
-} from "./types.js";
-export {
-  InMemoryDurableInboundStore,
-  createInMemoryDurableInboundStore,
-  defaultInboundIdempotencyKey,
-} from "./memory-store.js";
+} from "@goondan/openharness-types";
 export type {
   ActiveInboundTurn,
   DurableInboundSchedulerOptions,

@@ -1,7 +1,7 @@
 import type {
   HumanApprovalRecord,
   HumanApprovalStore,
-} from "./types.js";
+} from "@goondan/openharness-types";
 
 export interface HumanApprovalResumeCoordinatorOptions {
   store: HumanApprovalStore;

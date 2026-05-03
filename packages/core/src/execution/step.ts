@@ -5,11 +5,11 @@ import type {
   AssistantModelMessage,
   ToolModelMessage,
   ToolResult,
+  HumanApprovalReferenceStore,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import type { HumanApprovalReferenceStore } from "../hitl/types.js";
 import { executeToolCall, isHumanApprovalPendingError } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 

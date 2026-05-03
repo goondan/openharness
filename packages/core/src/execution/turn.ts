@@ -13,8 +13,11 @@ import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
-import type { ConversationBlockerRef, DurableInboundItem } from "../inbound/types.js";
-import type { HumanApprovalReferenceStore } from "../hitl/types.js";
+import type {
+  ConversationBlockerRef,
+  DurableInboundItem,
+  HumanApprovalReferenceStore,
+} from "@goondan/openharness-types";
 import { isHumanApprovalPendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";

@@ -3,7 +3,7 @@ import { executeToolCall } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
-import { createInMemoryHumanApprovalStore } from "../../hitl/memory-store.js";
+import { createInMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   ToolCallContext,
   ToolResult,
