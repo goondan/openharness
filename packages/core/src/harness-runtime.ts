@@ -987,10 +987,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : undefined,
       resumeHumanApproval: this._humanApprovalStore
         ? async (input: string | ResumeHumanApprovalInput) => {
-            const resumeInput: ResumeHumanApprovalInput = typeof input === "string"
-              ? { id: input }
-              : input;
-            if (typeof resumeInput.id !== "string" || resumeInput.id.length === 0) {
+            const resumeInput: ResumeHumanApprovalInput | undefined =
+              typeof input === "string"
+                ? { id: input }
+                : input && typeof input === "object"
+                  ? input
+                  : undefined;
+            if (!resumeInput || typeof resumeInput.id !== "string" || resumeInput.id.length === 0) {
               throw new HarnessError(
                 "resumeHumanApproval input requires `id` (was previously a positional id parameter). " +
                   "Update the call site to pass a string or `{ id }`.",

@@ -1992,6 +1992,21 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("rejects nullish resumeHumanApproval input with a HarnessError", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    await expect(
+      Promise.resolve().then(() => runtime.control.resumeHumanApproval?.(undefined as never)),
+    ).rejects.toThrow(/resumeHumanApproval input requires `id`/);
+
+    await runtime.close();
+  });
+
   it("rejects invalid Human Task submissions through the control API", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
