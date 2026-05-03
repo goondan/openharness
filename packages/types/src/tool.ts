@@ -46,7 +46,7 @@ export type HumanTaskStatus =
   | "canceled"
   | "expired";
 
-export type HumanTaskType = "approval" | "text" | "form" | (string & {});
+export type HumanTaskType = "approval" | "text" | "form";
 
 export interface HumanTaskDefinition {
   type: HumanTaskType;
@@ -155,7 +155,6 @@ export interface CreateHumanApprovalInput {
   id?: string;
   humanApprovalId?: string;
   toolCall: ToolCallSnapshot;
-  policy?: HumanApprovalPolicy | unknown;
   tasks: HumanTaskCreateInput[] | HumanTaskDefinition[];
   prompt?: string;
   expectedResultSchema?: JsonSchema;

@@ -95,7 +95,6 @@ export async function executeToolCall(
           toolName,
           toolArgs: normalizedToolArgs,
         },
-        policy: humanApproval,
         prompt: humanApproval.prompt,
         expectedResultSchema: humanApproval.responseSchema,
         tasks: (humanApproval.tasks?.length
@@ -133,7 +132,7 @@ export async function executeToolCall(
             type: "humanTask.created",
             humanApprovalId: created.approval.id,
             humanTaskId: task.id,
-            taskType: task.taskType as "approval" | "text" | "form",
+            taskType: task.taskType,
             agentName,
             conversationId,
           });

@@ -85,19 +85,25 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
       createdAt: now,
       updatedAt: now,
     };
-    const tasks: HumanTaskRecord[] = input.tasks.map((task: any, index) => ({
-      id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
-      humanApprovalId: gateId,
-      taskType: task.taskType ?? task.type ?? "approval",
-      status: "waitingForHuman",
-      title: task.title,
-      prompt: task.prompt,
-      required: task.required ?? true,
-      responseSchema: cloneValue(task.responseSchema),
-      metadata: cloneValue(task.metadata),
-      createdAt: now,
-      updatedAt: now,
-    }));
+    const tasks: HumanTaskRecord[] = input.tasks.map((task, index) => {
+      const explicitTaskType = "taskType" in task ? task.taskType : undefined;
+      const candidateTaskType = explicitTaskType ?? task.type;
+      const taskType = normalizeHumanTaskType(candidateTaskType);
+      const metadata = "metadata" in task ? task.metadata : undefined;
+      return {
+        id: taskIds[index] ?? defaultHumanTaskId(gateId, index),
+        humanApprovalId: gateId,
+        taskType,
+        status: "waitingForHuman",
+        title: task.title,
+        prompt: task.prompt,
+        required: task.required ?? true,
+        responseSchema: cloneValue(task.responseSchema),
+        metadata: cloneValue(metadata),
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
 
     const duplicateTaskId = tasks.find((task) => this._tasks.has(task.id));
     if (duplicateTaskId) {
@@ -527,7 +533,25 @@ function isHumanResultCompatibleWithTask(taskType: HumanTaskType, result: HumanR
   if (taskType === "form") {
     return result.type === "form";
   }
-  return true;
+  return false;
+}
+
+const KNOWN_HUMAN_TASK_TYPES: ReadonlySet<HumanTaskType> = new Set([
+  "approval",
+  "text",
+  "form",
+]);
+
+function normalizeHumanTaskType(value: unknown): HumanTaskType {
+  if (value === undefined) {
+    return "approval";
+  }
+  if (typeof value === "string" && (KNOWN_HUMAN_TASK_TYPES as ReadonlySet<string>).has(value)) {
+    return value as HumanTaskType;
+  }
+  throw new Error(
+    `Unsupported human task type: ${JSON.stringify(value)}. Expected one of "approval" | "text" | "form".`,
+  );
 }
 
 function isTerminalGateStatus(status: HumanApprovalStatus): boolean {

@@ -1,5 +1,5 @@
 import type { TurnResult, StepResult, StepSummary } from "./middleware.js";
-import type { ToolResult, JsonObject } from "./tool.js";
+import type { ToolResult, JsonObject, HumanTaskType } from "./tool.js";
 import type {
   ConversationBlockerRef,
   InboundItemStatus,
@@ -228,7 +228,7 @@ export interface HumanTaskCreatedPayload {
   type: "humanTask.created";
   humanApprovalId: string;
   humanTaskId: string;
-  taskType: "approval" | "text" | "form";
+  taskType: HumanTaskType;
   agentName: string;
   conversationId: string;
 }
