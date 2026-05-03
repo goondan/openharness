@@ -923,6 +923,21 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("rejects nullish retryInboundItem input with a HarnessError", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    await expect(
+      Promise.resolve().then(() => runtime.control.retryInboundItem?.(undefined as never)),
+    ).rejects.toThrow(/retryInboundItem input requires `id`/);
+
+    await runtime.close();
+  });
+
   it("emits inbound.deadLettered when operator dead-letters an inbound item", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const appended = await inboundStore.append({

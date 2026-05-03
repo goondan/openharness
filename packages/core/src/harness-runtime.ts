@@ -911,8 +911,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : undefined,
       retryInboundItem: this._durableInboundStore
         ? async (input: string | RetryInboundInput) => {
-            const retryInput: RetryInboundInput = typeof input === "string" ? { id: input } : input;
-            if (typeof retryInput.id !== "string" || retryInput.id.length === 0) {
+            const retryInput: RetryInboundInput | undefined =
+              typeof input === "string"
+                ? { id: input }
+                : input && typeof input === "object"
+                  ? input
+                  : undefined;
+            if (!retryInput || typeof retryInput.id !== "string" || retryInput.id.length === 0) {
               throw new HarnessError("retryInboundItem input requires `id`.");
             }
             const item = await this._durableInboundStore!.retryInboundItem(retryInput);
