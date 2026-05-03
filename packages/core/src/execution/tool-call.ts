@@ -1,8 +1,12 @@
-import type { ToolCallContext, ToolResult, ToolContext } from "@goondan/openharness-types";
+import type {
+  ToolCallContext,
+  ToolResult,
+  ToolContext,
+  HumanApprovalReferenceStore,
+} from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import type { HumanApprovalReferenceStore } from "../hitl/types.js";
 import { normalizeToolArgs } from "../tool-args.js";
 
 export class HumanApprovalPendingError extends Error {

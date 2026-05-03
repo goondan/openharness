@@ -64,7 +64,10 @@ export class InMemoryHumanApprovalStore implements HumanApprovalReferenceStore {
 
     const now = input.now ?? this._now();
     const blocker: ConversationBlockerRef = createHumanApprovalBlockerRef(gateId);
-    const taskIds = (input.tasks as any[]).map((task, index) => task.humanTaskId ?? defaultHumanTaskId(gateId, index));
+    const taskIds = input.tasks.map((task, index) => {
+      const explicitId = (task as { humanTaskId?: string }).humanTaskId;
+      return explicitId ?? defaultHumanTaskId(gateId, index);
+    });
     const approval: HumanApprovalRecord = {
       id: gateId,
       agentName: input.toolCall.agentName,

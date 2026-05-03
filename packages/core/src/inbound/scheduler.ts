@@ -6,7 +6,7 @@ import type {
   InboundItemFilter,
   InboundAcceptedHandle,
   InboundScheduleDecision,
-} from "./types.js";
+} from "@goondan/openharness-types";
 
 export interface DurableInboundSchedulerOptions {
   store: DurableInboundStore & {

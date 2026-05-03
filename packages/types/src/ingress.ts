@@ -226,6 +226,40 @@ export interface DurableInboundReferenceStore extends DurableInboundStore {
   getInboundItem(id: string): Promise<DurableInboundItem | null>;
 }
 
+export type InboundScheduleDecision =
+  | {
+      disposition: "started";
+      inboundItemId: string;
+      turnId: string;
+      item: DurableInboundItem;
+    }
+  | {
+      disposition: "delivered";
+      inboundItemId: string;
+      turnId: string;
+      item: DurableInboundItem;
+    }
+  | {
+      disposition: "blocked";
+      inboundItemId: string;
+      blocker: ConversationBlockerRef;
+      item: DurableInboundItem;
+    }
+  | {
+      disposition: "noop";
+      reason: "empty" | "leaseConflict" | "noStartTurn";
+    };
+
+export interface InboundAcceptedHandle {
+  inboundItemId: string;
+  agentName: string;
+  conversationId: string;
+  sequence: number;
+  disposition: DurableIngressDisposition;
+  turnId?: string;
+  blocker?: ConversationBlockerRef;
+}
+
 export interface IngressAcceptResult {
   accepted: true;
   connectionName: string;

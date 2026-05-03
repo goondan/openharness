@@ -3,21 +3,28 @@
   "version": "0.1.0",
   "description": "Reference adapters for OpenHarness",
   "type": "module",
-  "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "prepack": "pnpm clean && pnpm build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@goondan/openharness-types": "workspace:*",
-    "node-cache": "^5.1.2"
+    "@goondan/openharness-types": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }

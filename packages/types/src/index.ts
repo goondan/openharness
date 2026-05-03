@@ -96,6 +96,8 @@ export type {
   DurableInboundStore,
   DurableInboundReferenceStore,
   IngressAcceptResult,
+  InboundAcceptedHandle,
+  InboundScheduleDecision,
   ConnectionInfo,
   IngressApi,
 } from "./ingress.js";
