@@ -13,7 +13,9 @@ import type {
   ModelConfig,
   EventPayload,
   DurableInboundStore,
+  DurableInboundReferenceStore,
   HumanApprovalStore,
+  HumanApprovalReferenceStore,
 } from "@goondan/openharness-types";
 import { resolveEnvDeep } from "./env.js";
 import { ConfigError } from "./errors.js";
@@ -28,6 +30,52 @@ import { createConversationState } from "./conversation-state.js";
 import { inboundUserMessageCommitRef } from "./inbound/scheduler.js";
 
 const DEFAULT_MAX_STEPS = 25;
+
+function isHumanApprovalReferenceStore(
+  store: HumanApprovalStore,
+): store is HumanApprovalReferenceStore {
+  const candidate = store as Partial<HumanApprovalReferenceStore>;
+  return (
+    typeof candidate.getApproval === "function" &&
+    typeof candidate.getTask === "function" &&
+    typeof candidate.getConversationBlocker === "function"
+  );
+}
+
+function isDurableInboundReferenceStore(
+  store: DurableInboundStore,
+): store is DurableInboundReferenceStore {
+  const candidate = store as Partial<DurableInboundReferenceStore>;
+  return (
+    typeof candidate.markFailed === "function" &&
+    typeof candidate.releaseBlockedInboundItems === "function" &&
+    typeof candidate.getInboundItem === "function"
+  );
+}
+
+function requireHumanApprovalReferenceStore(
+  store: HumanApprovalStore | undefined,
+): HumanApprovalReferenceStore | undefined {
+  if (!store) return undefined;
+  if (!isHumanApprovalReferenceStore(store)) {
+    throw new ConfigError(
+      "humanApproval.store must implement HumanApprovalReferenceStore (getApproval, getTask, getConversationBlocker).",
+    );
+  }
+  return store;
+}
+
+function requireDurableInboundReferenceStore(
+  store: DurableInboundStore | undefined,
+): DurableInboundReferenceStore | undefined {
+  if (!store) return undefined;
+  if (!isDurableInboundReferenceStore(store)) {
+    throw new ConfigError(
+      "durableInbound.store must implement DurableInboundReferenceStore (markFailed, releaseBlockedInboundItems, getInboundItem).",
+    );
+  }
+  return store;
+}
 
 function stableStringify(value: unknown): string {
   return JSON.stringify(sortKeys(value));
@@ -225,10 +273,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   }
 
   const registeredAgents = new Set(Object.keys(config.agents));
-  const durableInboundStore = config.durableInbound?.enabled === false
-    ? undefined
-    : config.durableInbound?.store;
-  const humanApprovalStore = config.humanApproval?.store;
+  const durableInboundStore = requireDurableInboundReferenceStore(
+    config.durableInbound?.enabled === false ? undefined : config.durableInbound?.store,
+  );
+  const humanApprovalStore = requireHumanApprovalReferenceStore(config.humanApproval?.store);
   if (humanApprovalStore && !durableInboundStore) {
     throw new ConfigError("humanApproval requires durableInbound.store.");
   }
@@ -281,17 +329,15 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           },
           idempotencyKey: inboundEventIdempotencyKey,
         });
-        ingressEventBus.emit(appended.duplicate ? "inbound.duplicate" : "inbound.appended", {
-          type: appended.duplicate ? "inbound.duplicate" : "inbound.appended",
-          inboundItemId: appended.item.id,
-          agentName,
-          conversationId,
-          sequence: appended.item.sequence,
-          idempotencyKey: appended.item.idempotencyKey,
-          status: appended.item.status,
-        } as EventPayload);
-
         if (appended.duplicate) {
+          ingressEventBus.emit("inbound.duplicate", {
+            type: "inbound.duplicate",
+            inboundItemId: appended.item.id,
+            agentName,
+            conversationId,
+            idempotencyKey: appended.item.idempotencyKey,
+            status: appended.item.status,
+          });
           return {
             turnId: appended.item.turnId,
             disposition: "duplicate" as const,
@@ -299,8 +345,16 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
             blocker: appended.item.blockedBy,
           };
         }
+        ingressEventBus.emit("inbound.appended", {
+          type: "inbound.appended",
+          inboundItemId: appended.item.id,
+          agentName,
+          conversationId,
+          sequence: appended.item.sequence,
+          idempotencyKey: appended.item.idempotencyKey,
+        });
 
-        const blocker = await (humanApprovalStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+        const blocker = await humanApprovalStore?.getConversationBlocker({ agentName, conversationId });
         if (blocker) {
           const blocked = await durableInboundStore.markBlocked({
             id: appended.item.id,
@@ -324,7 +378,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
             agentName,
             conversationId,
             envelope,
-            appended.item as any,
+            appended.item,
           );
           if (delivered) {
             return {
@@ -339,7 +393,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           .dispatchTurn(agentName, envelope, { conversationId, turnId }, {
             item: appended.item,
             commitRef: inboundUserMessageCommitRef(appended.item.id),
-          } as any)
+          })
           .catch((err) => {
             ingressEventBus.emit("turn.error", {
               type: "turn.error",
@@ -353,7 +407,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
         return { turnId, disposition: "started" as const, inboundItemId: appended.item.id };
       }
 
-      const blocker = await (humanApprovalStore as any)?.getConversationBlocker?.({ agentName, conversationId });
+      const blocker = await humanApprovalStore?.getConversationBlocker({ agentName, conversationId });
       if (blocker) {
         throw new ConfigError(
           "Human Approval blocked ingress requires durableInbound.store so blocked envelopes are preserved.",
@@ -386,8 +440,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     agentDepsMap,
     ingressPipeline,
     runtimeEventBus,
-    durableInboundStore as DurableInboundStore | undefined,
-    humanApprovalStore as HumanApprovalStore | undefined,
+    durableInboundStore,
+    humanApprovalStore,
     config.humanApproval?.resumeLeaseMs,
   );
   runtimeRef = runtime;

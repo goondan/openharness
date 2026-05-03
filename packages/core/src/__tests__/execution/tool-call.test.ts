@@ -362,10 +362,7 @@ describe("executeToolCall", () => {
       return {
         approval: result.approval,
         duplicate: result.duplicate,
-        tasks: result.tasks.map((task) => {
-          const { taskType, ...publicTask } = task as any;
-          return { ...publicTask, type: taskType };
-        }),
+        tasks: result.tasks,
       } as any;
     });
     const eventBus = new EventBus();
