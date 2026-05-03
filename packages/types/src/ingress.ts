@@ -79,6 +79,19 @@ export interface ConversationBlockerRef {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Query selector for blocker-based filters and release operations.
+ *
+ * Distinct from `ConversationBlockerRef`, which represents a stored blocker
+ * identity. Selectors only support the fields the runtime matcher actually
+ * compares (`type` and `id`); `reason`/`metadata` would be silently ignored
+ * if accepted, so they are intentionally excluded.
+ */
+export interface ConversationBlockerSelector {
+  type?: ConversationBlockerType | (string & {});
+  id?: string;
+}
+
 export interface LeaseInfo {
   owner: string;
   expiresAt: string;
@@ -184,7 +197,7 @@ export interface InboundItemFilter {
   conversationId?: string;
   status?: InboundItemStatus | InboundItemStatus[];
   statuses?: InboundItemStatus[];
-  blockedBy?: ConversationBlockerRef | Partial<ConversationBlockerRef>;
+  blockedBy?: ConversationBlockerSelector;
   limit?: number;
 }
 
@@ -203,7 +216,7 @@ export interface ReleaseInboundItemInput {
 export interface ReleaseBlockedInboundInput {
   agentName?: string;
   conversationId?: string;
-  blockedBy?: Partial<ConversationBlockerRef>;
+  blockedBy?: ConversationBlockerSelector;
   now?: string;
 }
 
