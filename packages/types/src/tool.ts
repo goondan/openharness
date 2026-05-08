@@ -1,4 +1,4 @@
-import type { Schema } from "ai";
+import type { Schema, ToolResultPart } from "ai";
 import type { ConversationBlockerRef, LeaseInfo } from "./ingress.js";
 
 // JsonSchema / primitive types
@@ -15,9 +15,12 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 // ToolResult
+type ToolContentOutput = Extract<ToolResultPart["output"], { type: "content" }>;
+
 export type ToolResult =
   | { type: "text"; text: string }
   | { type: "json"; data: JsonValue }
+  | { type: "content"; content: ToolContentOutput["value"] }
   | { type: "error"; error: string };
 
 // ToolContext — used by tool handlers (distinct from ToolCallContext in middleware)

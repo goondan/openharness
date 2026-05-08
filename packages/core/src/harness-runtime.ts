@@ -1226,7 +1226,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                             ? { type: "text", value: toolResult.text }
                             : toolResult.type === "json"
                               ? { type: "json", value: toolResult.data }
-                              : { type: "error-text", value: toolResult.error },
+                              : toolResult.type === "content"
+                                ? { type: "content", value: toolResult.content }
+                                : { type: "error-text", value: toolResult.error },
                         },
                       ],
                     },

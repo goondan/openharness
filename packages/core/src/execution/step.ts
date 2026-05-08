@@ -18,7 +18,9 @@ function toToolResultOutput(toolResult: ToolResult) {
     ? { type: "text" as const, value: toolResult.text }
     : toolResult.type === "json"
       ? { type: "json" as const, value: toolResult.data }
-      : { type: "error-text" as const, value: toolResult.error };
+      : toolResult.type === "content"
+        ? { type: "content" as const, value: toolResult.content }
+        : { type: "error-text" as const, value: toolResult.error };
 }
 
 /**

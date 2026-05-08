@@ -453,6 +453,47 @@ describe("executeStep", () => {
     );
   });
 
+  it("appends multimodal content tool results as AI SDK content output", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(
+      makeTool("read_image", async () => ({
+        type: "content",
+        content: [
+          { type: "text", text: "[image] /tmp/a.png" },
+          { type: "media", mediaType: "image/png", data: "aW1hZ2U=" },
+        ],
+      })),
+    );
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "tc-image", toolName: "read_image", args: {} },
+      ],
+    });
+
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry });
+
+    await executeStep(ctx, deps);
+
+    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].data.content[0]).toEqual(
+      expect.objectContaining({
+        type: "tool-result",
+        toolCallId: "tc-image",
+        toolName: "read_image",
+        output: {
+          type: "content",
+          value: [
+            { type: "text", text: "[image] /tmp/a.png" },
+            { type: "media", mediaType: "image/png", data: "aW1hZ2U=" },
+          ],
+        },
+      })
+    );
+  });
+
   it("invalid tool calls are not executed and are returned as tool error results", async () => {
     const toolHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
     const toolRegistry = new ToolRegistry();
