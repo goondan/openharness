@@ -504,6 +504,53 @@ describe("AI SDK adapter streamChat()", () => {
     expect(response.toolCalls).toHaveLength(2);
   });
 
+  it("splits system messages into the streamText system option", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        streamText: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+          capturedArgs = args;
+          return {
+            fullStream: createMockFullStream([]),
+            text: Promise.resolve("ok"),
+            toolCalls: Promise.resolve([]),
+            finishReason: Promise.resolve("stop"),
+            rawFinishReason: Promise.resolve("stop"),
+          };
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/openai", () => ({
+      createOpenAI: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "gpt-4o" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient(
+      { provider: "openai", model: "gpt-4o", apiKey: "key" },
+      "sk-resolved",
+    );
+    const messages: Message[] = [
+      { id: "sys", data: { role: "system", content: "Stream safely" } },
+      { id: "usr", data: { role: "user", content: "Hi" } },
+    ];
+
+    await client.streamChat!(
+      messages,
+      [],
+      abortSignal,
+      {},
+    );
+
+    expect(capturedArgs).toBeDefined();
+    expect(capturedArgs!["system"]).toBe("Stream safely");
+    expect(capturedArgs!["messages"]).toEqual([{ role: "user", content: "Hi" }]);
+  });
+
   it("passes LlmChatOptions (temperature, maxTokens, model) to streamText", async () => {
     let capturedArgs: Record<string, unknown> | undefined;
 

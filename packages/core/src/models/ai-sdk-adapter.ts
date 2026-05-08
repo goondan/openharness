@@ -87,8 +87,30 @@ function toAiSdkTools(
 // Message conversion — extract ModelMessage from envelope
 // ---------------------------------------------------------------------------
 
-function toModelMessages(messages: Message[]): ModelMessage[] {
-  return messages.map((m) => m.data);
+function toAiSdkPrompt(messages: Message[]): {
+  messages: ModelMessage[];
+  system?: string;
+} {
+  const nonSystemMessages: ModelMessage[] = [];
+  const systemMessages: string[] = [];
+
+  for (const message of messages) {
+    const modelMessage = message.data;
+
+    if (modelMessage.role === "system") {
+      systemMessages.push(modelMessage.content);
+      continue;
+    }
+
+    nonSystemMessages.push(modelMessage);
+  }
+
+  return {
+    messages: nonSystemMessages,
+    ...(systemMessages.length > 0
+      ? { system: systemMessages.join("\n\n") }
+      : {}),
+  };
 }
 
 const LLM_FINISH_REASONS = new Set<LlmFinishReason>([
@@ -204,10 +226,11 @@ export function createAiSdkClient(
 
       const aiTools =
         tools.length > 0 ? toAiSdkTools(tools) : undefined;
+      const prompt = toAiSdkPrompt(messages);
 
       const result = await generateText({
         model,
-        messages: toModelMessages(messages),
+        ...prompt,
         ...(aiTools ? { tools: aiTools } : {}),
         ...(options?.temperature !== undefined
           ? { temperature: options.temperature }
@@ -251,10 +274,11 @@ export function createAiSdkClient(
 
       const aiTools =
         tools.length > 0 ? toAiSdkTools(tools) : undefined;
+      const prompt = toAiSdkPrompt(messages);
 
       const result = streamText({
         model,
-        messages: toModelMessages(messages),
+        ...prompt,
         ...(aiTools ? { tools: aiTools } : {}),
         ...(options?.temperature !== undefined
           ? { temperature: options.temperature }

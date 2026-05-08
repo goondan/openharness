@@ -419,7 +419,7 @@ describe("AI SDK adapter chat()", () => {
     });
   });
 
-  it("passes messages as ModelMessage[] to generateText", async () => {
+  it("splits system messages into the generateText system option", async () => {
     let capturedArgs: Record<string, unknown> | undefined;
     vi.doMock("ai", async (importOriginal) => {
       const actual = await importOriginal<typeof import("ai")>();
@@ -441,16 +441,16 @@ describe("AI SDK adapter chat()", () => {
     const client = createClient({ provider: "openai", model: "gpt-4o", apiKey: "key" }, "sk-resolved");
     const messages: Message[] = [
       { id: "sys", data: { role: "system", content: "You are helpful" } },
+      { id: "sys-2", data: { role: "system", content: "Follow project policy" } },
       { id: "usr", data: { role: "user", content: "Hi" } },
     ];
     await client.chat(messages, [], abortSignal);
 
-    // generateText should receive the raw ModelMessage data (msg.data)
     expect(capturedArgs).toBeDefined();
     const passedMessages = capturedArgs!["messages"] as Array<{ role: string; content: string }>;
-    expect(passedMessages).toHaveLength(2);
-    expect(passedMessages[0]).toEqual({ role: "system", content: "You are helpful" });
-    expect(passedMessages[1]).toEqual({ role: "user", content: "Hi" });
+    expect(capturedArgs!["system"]).toBe("You are helpful\n\nFollow project policy");
+    expect(passedMessages).toHaveLength(1);
+    expect(passedMessages[0]).toEqual({ role: "user", content: "Hi" });
   });
 
   it("converts tools to ai-sdk tool format", async () => {
