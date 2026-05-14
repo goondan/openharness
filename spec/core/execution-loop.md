@@ -46,8 +46,8 @@
   6. assistant 응답을 `appendMessage`로 기록한다.
   7. tool call이 있으면 모두 병렬로 ToolCall을 실행한다.
      - tool call 인자가 invalid JSON이거나 JSON object로 해석되지 않으면 실제 ToolCall 실행은 건너뛰고, provider-safe한 `{}` input의 assistant tool-call과 error tool-result를 기록해 다음 Step에서 모델이 재시도할 수 있게 한다.
-     - 어느 tool이라도 `HumanApprovalPendingError`를 던지면 모든 tool result `appendMessage`를 생략하고 LLM이 반환한 순서상 첫 번째 pending error를 상위로 전파한다.
-  8. 각 tool result를 LLM이 반환한 tool call 순서대로 `appendMessage`로 기록한다.
+     - 각 tool call의 결과는 LLM이 반환한 순서대로 `appendMessage`로 기록한다. `HumanApprovalPendingError`로 보류된 tool call은 이 step에서는 tool-result를 기록하지 않고, approval resume 경로에서 해당 tool의 결과가 append된다.
+  8. 병렬 실행이 모두 settle된 뒤, `HumanApprovalPendingError`가 하나라도 있었다면 LLM이 반환한 순서상 첫 pending error를 상위 Turn 루프로 전파한다.
   9. `step.done`을 발행하고 `StepResult`를 반환한다.
 - Failure:
   - LLM 오류는 `step.error`를 발행한 뒤 상위 Turn으로 전파된다.
@@ -94,7 +94,7 @@
 - 같은 Turn 안의 Step은 병렬이 아니다.
 - 한 Step 안의 tool call은 병렬로 실행된다. handler 부수효과의 동시 실행 안전성은 tool 작성자의 책임이다.
 - 병렬로 실행하더라도 `StepResult.toolCalls`와 conversation에 기록되는 tool-result `appendMessage` 순서는 LLM이 반환한 tool call 순서를 그대로 유지한다.
-- 어느 한 tool이라도 `HumanApprovalPendingError`를 던지면, 이미 완료된 다른 tool들의 result는 conversation에 append되지 않고 LLM 순서상 첫 pending error를 상위로 전파한다. Turn 재개 시 해당 Step이 다시 실행되며 미append된 tool은 다시 호출된다.
+- 어느 한 tool이 `HumanApprovalPendingError`를 던지면, 같은 step에서 함께 실행된 다른 tool들의 result는 LLM 순서대로 conversation에 append된다. 보류된 tool 자체의 tool-result는 approval resume 경로에서 추가되며, step.ts는 LLM 순서상 첫 pending error를 상위 Turn 루프로 전파한다.
 
 ### EXEC-CONST-004 - 스트리밍은 관찰용 부가기능이다
 

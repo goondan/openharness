@@ -710,15 +710,16 @@ describe("executeStep", () => {
     );
   });
 
-  // EXEC-CONST-003: HITL pending error from any parallel tool aborts tool-result
-  // appending and rethrows the FIRST pending error in LLM-returned order.
-  it("HumanApprovalPendingError from any parallel tool throws first-in-LLM-order and skips tool-result append", async () => {
+  // EXEC-CONST-003: HITL pending error from any parallel tool throws first-in-LLM-order
+  // but tool-results from non-pending siblings ARE still appended (the approval flow
+  // appends the pending tool's result on resume).
+  it("HumanApprovalPendingError throws first-in-LLM-order but preserves sibling tool-results", async () => {
     const okHandler = vi.fn(async () => ({ type: "text" as const, text: "ok-result" }));
 
     const toolRegistry = new ToolRegistry();
     toolRegistry.register(makeTool("ok_tool", okHandler));
-    // Two tools whose handlers throw pending errors. The second one (in LLM order)
-    // resolves its pending error first to prove ordering follows LLM order, not finish order.
+    // Two tools whose handlers throw pending errors. pending_b resolves before
+    // pending_a to prove ordering follows LLM order, not finish order.
     toolRegistry.register(
       makeTool("pending_a", async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -727,7 +728,6 @@ describe("executeStep", () => {
     );
     toolRegistry.register(
       makeTool("pending_b", async () => {
-        // Resolves first.
         throw new HumanApprovalPendingError("approval-b");
       }),
     );
@@ -754,13 +754,14 @@ describe("executeStep", () => {
     expect(caught).toBeInstanceOf(HumanApprovalPendingError);
     expect((caught as HumanApprovalPendingError).humanApprovalId).toBe("approval-a");
 
-    // All three handlers were invoked (parallel execution).
     expect(okHandler).toHaveBeenCalledOnce();
 
-    // No tool-result messages appended for this step — Turn resume will replay the step.
+    // Non-pending sibling's tool-result IS appended; pending tools wait for resume.
     const toolMessages = ctx.conversation.messages.filter(
       (m: Message) => m.data.role === "tool",
     );
-    expect(toolMessages).toHaveLength(0);
+    expect(toolMessages).toHaveLength(1);
+    const content = toolMessages[0].data.content as Array<{ toolCallId: string }>;
+    expect(content[0].toolCallId).toBe("call-ok");
   });
 });

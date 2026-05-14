@@ -232,22 +232,15 @@ export async function executeStep(
         }),
       );
 
-      // If any tool requires human approval, abort tool-result recording for the
-      // whole step and rethrow the first pending error in LLM-returned order.
-      const firstPending = settled.find((s) => s.kind === "pending");
-      if (firstPending && firstPending.kind === "pending") {
-        throw firstPending.error;
-      }
-      const firstUnexpected = settled.find((s) => s.kind === "error");
-      if (firstUnexpected && firstUnexpected.kind === "error") {
-        throw firstUnexpected.error;
-      }
-
-      // All settled successfully → append results in original order.
+      // Append tool-result messages for every settled handler in LLM-returned order.
+      // Pending tools (HumanApprovalPendingError) do NOT get a tool-result here — their
+      // result is appended on resume via the human-approval workflow. Appending the
+      // siblings preserves their work; without this, a parallel batch like
+      // [A(normal), B(requires approval)] would lose A's result on the continuation Turn.
       for (let i = 0; i < canonicalToolCalls.length; i++) {
         const tc = canonicalToolCalls[i];
         const entry = settled[i];
-        if (entry.kind !== "result") continue; // unreachable after the guards above
+        if (entry.kind !== "result") continue;
         const toolResult = entry.result;
 
         // FR-CORE-007: Record the tool result as a non-system message
@@ -279,6 +272,17 @@ export async function executeStep(
           ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
           result: toolResult,
         });
+      }
+
+      // If any tool requires human approval, rethrow the first pending error in
+      // LLM-returned order so the Turn loop can hand control to the approval flow.
+      const firstPending = settled.find((s) => s.kind === "pending");
+      if (firstPending && firstPending.kind === "pending") {
+        throw firstPending.error;
+      }
+      const firstUnexpected = settled.find((s) => s.kind === "error");
+      if (firstUnexpected && firstUnexpected.kind === "error") {
+        throw firstUnexpected.error;
       }
     }
 
