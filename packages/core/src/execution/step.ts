@@ -165,45 +165,91 @@ export async function executeStep(
       });
     }
 
-    // e. Execute tool calls in parallel (EXEC-CONST-003).
-    //    Result/appendMessage order still follows the LLM-returned tool call order.
-    //    If any tool throws HumanApprovalPendingError, skip all tool-result appendMessage
-    //    and rethrow the FIRST pending error (in LLM order) after all parallel work settles.
+    // e. Execute tool calls (EXEC-CONST-003).
+    //    - If ANY tool in the batch declares humanApproval, fall back to sequential
+    //      execution to preserve the current single-approval HITL invariants. Mixing
+    //      parallelism with HITL would require the runtime to handle multiple
+    //      concurrent pending approvals + blocked inbound steering, which it currently
+    //      does not. See PR discussion / codex review.
+    //    - Otherwise execute all handlers in parallel. Result/appendMessage order still
+    //      follows the LLM-returned tool call order.
     const toolCallResults: StepResult["toolCalls"] = [];
 
-    if (canonicalToolCalls.length > 0) {
-      type Settled =
-        | { kind: "result"; result: ToolResult }
-        | { kind: "pending"; error: unknown }
-        | { kind: "error"; error: unknown };
+    const emitMalformedEvents = (tc: (typeof canonicalToolCalls)[number]) => {
+      eventBus.emit("tool.start", {
+        type: "tool.start",
+        turnId,
+        agentName,
+        conversationId,
+        stepNumber,
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        args: tc.args,
+      });
+      // biome-ignore lint/style/noNonNullAssertion: only called when malformedResult exists
+      const result = tc.malformedResult!;
+      eventBus.emit("tool.done", {
+        type: "tool.done",
+        turnId,
+        agentName,
+        conversationId,
+        stepNumber,
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        args: tc.args,
+        result,
+      });
+    };
 
-      const settled = await Promise.all(
-        canonicalToolCalls.map(async (tc): Promise<Settled> => {
-          // Malformed args: skip the handler, but still emit tool.start/done so observers
-          // see one event pair per LLM-returned tool call.
+    const appendToolResult = (
+      tc: (typeof canonicalToolCalls)[number],
+      toolResult: ToolResult,
+    ) => {
+      stepCtx.conversation.emit({
+        type: "appendMessage",
+        message: {
+          id: `tool-result-${tc.toolCallId}`,
+          data: {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                output: toToolResultOutput(toolResult),
+              },
+            ],
+          } satisfies ToolModelMessage,
+          metadata: {
+            __createdBy: "core",
+          },
+        },
+      });
+      toolCallResults.push({
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        args: tc.args,
+        ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
+        result: toolResult,
+      });
+    };
+
+    if (canonicalToolCalls.length > 0) {
+      const batchRequiresApproval = canonicalToolCalls.some((tc) => {
+        if (tc.malformedResult) return false;
+        const tool = toolRegistry.get(tc.toolName);
+        return tool?.humanApproval && tool.humanApproval.required !== false;
+      });
+
+      if (batchRequiresApproval) {
+        // Sequential path — preserves existing HITL semantics: a single pending
+        // approval is exposed immediately, no concurrent approvals, no slow sibling
+        // delays the approval prompt.
+        for (const tc of canonicalToolCalls) {
           if (tc.malformedResult) {
-            eventBus.emit("tool.start", {
-              type: "tool.start",
-              turnId,
-              agentName,
-              conversationId,
-              stepNumber,
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: tc.args,
-            });
-            eventBus.emit("tool.done", {
-              type: "tool.done",
-              turnId,
-              agentName,
-              conversationId,
-              stepNumber,
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: tc.args,
-              result: tc.malformedResult,
-            });
-            return { kind: "result", result: tc.malformedResult };
+            emitMalformedEvents(tc);
+            appendToolResult(tc, tc.malformedResult);
+            continue;
           }
 
           const toolCallCtx = {
@@ -212,77 +258,49 @@ export async function executeStep(
             toolArgs: tc.args,
           };
 
-          try {
-            const result = await executeToolCall(tc.toolCallId, toolCallCtx, {
+          // HumanApprovalPendingError is allowed to propagate; non-pending errors
+          // are already normalized to ToolResult by executeToolCall.
+          const toolResult = await executeToolCall(tc.toolCallId, toolCallCtx, {
+            toolRegistry,
+            middlewareRegistry,
+            eventBus,
+            humanApprovalStore,
+          });
+
+          appendToolResult(tc, toolResult);
+        }
+      } else {
+        // Parallel path — no tool in this batch declares humanApproval, so we can
+        // run handlers concurrently without violating the single-approval invariant.
+        const results = await Promise.all(
+          canonicalToolCalls.map(async (tc) => {
+            if (tc.malformedResult) {
+              emitMalformedEvents(tc);
+              return tc.malformedResult;
+            }
+
+            const toolCallCtx = {
+              ...stepCtx,
+              toolName: tc.toolName,
+              toolArgs: tc.args,
+            };
+
+            // executeToolCall normalizes non-pending errors into ToolResult. A
+            // dynamic HumanApprovalPendingError (not declared via tool.humanApproval)
+            // would still propagate via the Promise rejection — Promise.all will
+            // reject as soon as it fires, matching the pre-parallel responsiveness.
+            return await executeToolCall(tc.toolCallId, toolCallCtx, {
               toolRegistry,
               middlewareRegistry,
               eventBus,
               humanApprovalStore,
             });
-            return { kind: "result", result };
-          } catch (err) {
-            if (isHumanApprovalPendingError(err)) {
-              return { kind: "pending", error: err };
-            }
-            // executeToolCall already normalizes non-pending errors into ToolResult,
-            // so reaching this branch means an unexpected throw — let it bubble up
-            // after the rest of the parallel batch has finished.
-            return { kind: "error", error: err };
-          }
-        }),
-      );
+          }),
+        );
 
-      // Append tool-result messages for every settled handler in LLM-returned order.
-      // Pending tools (HumanApprovalPendingError) do NOT get a tool-result here — their
-      // result is appended on resume via the human-approval workflow. Appending the
-      // siblings preserves their work; without this, a parallel batch like
-      // [A(normal), B(requires approval)] would lose A's result on the continuation Turn.
-      for (let i = 0; i < canonicalToolCalls.length; i++) {
-        const tc = canonicalToolCalls[i];
-        const entry = settled[i];
-        if (entry.kind !== "result") continue;
-        const toolResult = entry.result;
-
-        // FR-CORE-007: Record the tool result as a non-system message
-        stepCtx.conversation.emit({
-          type: "appendMessage",
-          message: {
-            id: `tool-result-${tc.toolCallId}`,
-            data: {
-              role: "tool",
-              content: [
-                {
-                  type: "tool-result",
-                  toolCallId: tc.toolCallId,
-                  toolName: tc.toolName,
-                  output: toToolResultOutput(toolResult),
-                },
-              ],
-            } satisfies ToolModelMessage,
-            metadata: {
-              __createdBy: "core",
-            },
-          },
-        });
-
-        toolCallResults.push({
-          toolCallId: tc.toolCallId,
-          toolName: tc.toolName,
-          args: tc.args,
-          ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
-          result: toolResult,
-        });
-      }
-
-      // If any tool requires human approval, rethrow the first pending error in
-      // LLM-returned order so the Turn loop can hand control to the approval flow.
-      const firstPending = settled.find((s) => s.kind === "pending");
-      if (firstPending && firstPending.kind === "pending") {
-        throw firstPending.error;
-      }
-      const firstUnexpected = settled.find((s) => s.kind === "error");
-      if (firstUnexpected && firstUnexpected.kind === "error") {
-        throw firstUnexpected.error;
+        for (let i = 0; i < canonicalToolCalls.length; i++) {
+          appendToolResult(canonicalToolCalls[i], results[i]);
+        }
       }
     }
 

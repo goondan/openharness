@@ -5,6 +5,7 @@ import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
 import { createConversationState } from "../../conversation-state.js";
+import { InMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   StepContext,
   StepResult,
@@ -710,38 +711,38 @@ describe("executeStep", () => {
     );
   });
 
-  // EXEC-CONST-003: HITL pending error from any parallel tool throws first-in-LLM-order
-  // but tool-results from non-pending siblings ARE still appended (the approval flow
-  // appends the pending tool's result on resume).
-  it("HumanApprovalPendingError throws first-in-LLM-order but preserves sibling tool-results", async () => {
-    const okHandler = vi.fn(async () => ({ type: "text" as const, text: "ok-result" }));
+  // EXEC-CONST-003: When ANY tool in the batch declares humanApproval, the step
+  // falls back to sequential execution. Non-approval siblings before the pending
+  // tool still have their results appended; the first approval-requiring tool
+  // throws HumanApprovalPendingError immediately (no slow-sibling delay), and
+  // tools after it never run.
+  it("HITL-declared tool in batch → sequential fallback, siblings before pending get appended", async () => {
+    const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
+    const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
 
     const toolRegistry = new ToolRegistry();
-    toolRegistry.register(makeTool("ok_tool", okHandler));
-    // Two tools whose handlers throw pending errors. pending_b resolves before
-    // pending_a to prove ordering follows LLM order, not finish order.
-    toolRegistry.register(
-      makeTool("pending_a", async () => {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        throw new HumanApprovalPendingError("approval-a");
-      }),
-    );
-    toolRegistry.register(
-      makeTool("pending_b", async () => {
-        throw new HumanApprovalPendingError("approval-b");
-      }),
-    );
+    toolRegistry.register(makeTool("ok_before", okHandlerBefore));
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", vi.fn(async () => ({ type: "text" as const, text: "should not run" }))),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+    toolRegistry.register(makeTool("ok_after", okHandlerAfter));
 
     const llmClient = makeLlmClient({
       toolCalls: [
-        { toolCallId: "call-ok", toolName: "ok_tool", args: { value: "x" } },
-        { toolCallId: "call-pa", toolName: "pending_a", args: { value: "a" } },
-        { toolCallId: "call-pb", toolName: "pending_b", args: { value: "b" } },
+        { toolCallId: "call-before", toolName: "ok_before", args: { value: "a" } },
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "b" } },
+        { toolCallId: "call-after", toolName: "ok_after", args: { value: "c" } },
       ],
     });
 
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
     const ctx = makeStepContext();
-    const deps = makeDeps({ llmClient, toolRegistry });
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry }),
+      humanApprovalStore,
+    };
 
     let caught: unknown;
     try {
@@ -750,18 +751,18 @@ describe("executeStep", () => {
       caught = err;
     }
 
-    // First-in-LLM-order pending error wins, even though pending_b rejected first.
+    // First (in LLM order) approval-requiring tool throws; trailing siblings never ran.
     expect(caught).toBeInstanceOf(HumanApprovalPendingError);
-    expect((caught as HumanApprovalPendingError).humanApprovalId).toBe("approval-a");
+    expect(okHandlerBefore).toHaveBeenCalledOnce();
+    expect(okHandlerAfter).not.toHaveBeenCalled();
 
-    expect(okHandler).toHaveBeenCalledOnce();
-
-    // Non-pending sibling's tool-result IS appended; pending tools wait for resume.
+    // ok_before's tool-result is appended; the approval tool's result is added
+    // by the resume flow, not here.
     const toolMessages = ctx.conversation.messages.filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(1);
     const content = toolMessages[0].data.content as Array<{ toolCallId: string }>;
-    expect(content[0].toolCallId).toBe("call-ok");
+    expect(content[0].toolCallId).toBe("call-before");
   });
 });
