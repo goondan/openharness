@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { executeStep } from "../../execution/step.js";
+import { HumanApprovalPendingError } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
 import { createConversationState } from "../../conversation-state.js";
+import { InMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   StepContext,
   StepResult,
@@ -397,15 +399,25 @@ describe("executeStep", () => {
     ]);
 
     expect(toolDoneListener).toHaveBeenCalledTimes(2);
-    expect(toolDoneListener.mock.calls[1][0]).toEqual(
-      expect.objectContaining({
-        toolCallId: "call-malformed",
-        args: {},
-        result: expect.objectContaining({
-          type: "error",
-          error: expect.stringContaining("Malformed tool arguments"),
+    // Parallel execution — tool.done order is not guaranteed across tools,
+    // but both events must be present with the right payloads.
+    const doneCalls = toolDoneListener.mock.calls.map((c) => c[0]);
+    expect(doneCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolCallId: "call-valid",
+          args: { value: "ok" },
+          result: { type: "text", text: "valid result" },
         }),
-      }),
+        expect.objectContaining({
+          toolCallId: "call-malformed",
+          args: {},
+          result: expect.objectContaining({
+            type: "error",
+            error: expect.stringContaining("Malformed tool arguments"),
+          }),
+        }),
+      ]),
     );
   });
 
@@ -603,29 +615,29 @@ describe("executeStep", () => {
     );
   });
 
-  // Test: Multiple tool calls execute sequentially, not concurrently
-  it("multiple tool calls in one step execute sequentially (not concurrently)", async () => {
-    const executionOrder: string[] = [];
+  // Test: Multiple tool calls in one step execute in parallel,
+  // but result + appendMessage order follows the LLM-returned order.
+  it("multiple tool calls in one step execute in parallel (EXEC-CONST-003)", async () => {
+    const startOrder: string[] = [];
     let concurrentCount = 0;
     let maxConcurrent = 0;
 
-    function makeSequentialTool(name: string) {
+    function makeParallelTool(name: string, delayMs: number) {
       return makeTool(name, async () => {
         concurrentCount++;
         maxConcurrent = Math.max(maxConcurrent, concurrentCount);
-        executionOrder.push(`start:${name}`);
-        // Simulate async work with a small delay
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        executionOrder.push(`end:${name}`);
+        startOrder.push(`start:${name}`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
         concurrentCount--;
         return { type: "text" as const, text: `${name} result` };
       });
     }
 
     const toolRegistry = new ToolRegistry();
-    toolRegistry.register(makeSequentialTool("tool_1"));
-    toolRegistry.register(makeSequentialTool("tool_2"));
-    toolRegistry.register(makeSequentialTool("tool_3"));
+    // Reverse the delays so finish order differs from LLM-returned order.
+    toolRegistry.register(makeParallelTool("tool_1", 30));
+    toolRegistry.register(makeParallelTool("tool_2", 10));
+    toolRegistry.register(makeParallelTool("tool_3", 20));
 
     const llmClient = makeLlmClient({
       toolCalls: [
@@ -640,21 +652,27 @@ describe("executeStep", () => {
 
     const result = await executeStep(ctx, deps);
 
-    // All tools should have been called
-    expect(result.toolCalls).toHaveLength(3);
+    // All tools ran in parallel.
+    expect(maxConcurrent).toBe(3);
+    // All three handlers started before any finished.
+    expect(startOrder).toEqual(["start:tool_1", "start:tool_2", "start:tool_3"]);
 
-    // Sequential execution: max concurrent should never exceed 1
-    expect(maxConcurrent).toBe(1);
-
-    // Order should be: start/end tool_1, start/end tool_2, start/end tool_3
-    expect(executionOrder).toEqual([
-      "start:tool_1",
-      "end:tool_1",
-      "start:tool_2",
-      "end:tool_2",
-      "start:tool_3",
-      "end:tool_3",
+    // Result order follows LLM-returned order even though tool_2 finished first.
+    expect(result.toolCalls.map((tc) => tc.toolCallId)).toEqual([
+      "call-1",
+      "call-2",
+      "call-3",
     ]);
+
+    // tool-result messages are appended in LLM-returned order.
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    const appendedToolCallIds = toolMessages.map((m) => {
+      const content = m.data.content as Array<{ toolCallId: string }>;
+      return content[0]?.toolCallId;
+    });
+    expect(appendedToolCallIds).toEqual(["call-1", "call-2", "call-3"]);
   });
 
   // LLM client receives current messages and available tools
@@ -691,5 +709,60 @@ describe("executeStep", () => {
       ]),
       expect.any(Object) // AbortSignal
     );
+  });
+
+  // EXEC-CONST-003: When ANY tool in the batch declares humanApproval, the step
+  // falls back to sequential execution. Non-approval siblings before the pending
+  // tool still have their results appended; the first approval-requiring tool
+  // throws HumanApprovalPendingError immediately (no slow-sibling delay), and
+  // tools after it never run.
+  it("HITL-declared tool in batch → sequential fallback, siblings before pending get appended", async () => {
+    const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
+    const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("ok_before", okHandlerBefore));
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", vi.fn(async () => ({ type: "text" as const, text: "should not run" }))),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+    toolRegistry.register(makeTool("ok_after", okHandlerAfter));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-before", toolName: "ok_before", args: { value: "a" } },
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "b" } },
+        { toolCallId: "call-after", toolName: "ok_after", args: { value: "c" } },
+      ],
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry }),
+      humanApprovalStore,
+    };
+
+    let caught: unknown;
+    try {
+      await executeStep(ctx, deps);
+    } catch (err) {
+      caught = err;
+    }
+
+    // First (in LLM order) approval-requiring tool throws; trailing siblings never ran.
+    expect(caught).toBeInstanceOf(HumanApprovalPendingError);
+    expect(okHandlerBefore).toHaveBeenCalledOnce();
+    expect(okHandlerAfter).not.toHaveBeenCalled();
+
+    // ok_before's tool-result is appended; the approval tool's result is added
+    // by the resume flow, not here.
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(1);
+    const content = toolMessages[0].data.content as Array<{ toolCallId: string }>;
+    expect(content[0].toolCallId).toBe("call-before");
   });
 });
