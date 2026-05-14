@@ -270,9 +270,19 @@ export async function executeStep(
           appendToolResult(tc, toolResult);
         }
       } else {
-        // Parallel path — no tool in this batch declares humanApproval, so we can
-        // run handlers concurrently without violating the single-approval invariant.
-        const results = await Promise.all(
+        // Parallel path — no tool in this batch declares humanApproval, so the
+        // single-approval invariant cannot be violated by static policy.
+        //
+        // We use Promise.allSettled (not Promise.all) so that if a non-pending
+        // error or a *dynamic* HumanApprovalPendingError (thrown by middleware
+        // not visible at pre-flight) bubbles out of one handler, the completed
+        // siblings still get their tool-result appended in LLM order. After the
+        // batch settles we surface the first error (HITL or otherwise) in LLM
+        // order. Multi-gate dynamic approvals in the same batch are an
+        // unsupported pattern; tools/extensions should declare `humanApproval`
+        // on the ToolDefinition so the pre-flight check routes the batch to the
+        // sequential path.
+        const settled = await Promise.allSettled(
           canonicalToolCalls.map(async (tc) => {
             if (tc.malformedResult) {
               emitMalformedEvents(tc);
@@ -285,10 +295,6 @@ export async function executeStep(
               toolArgs: tc.args,
             };
 
-            // executeToolCall normalizes non-pending errors into ToolResult. A
-            // dynamic HumanApprovalPendingError (not declared via tool.humanApproval)
-            // would still propagate via the Promise rejection — Promise.all will
-            // reject as soon as it fires, matching the pre-parallel responsiveness.
             return await executeToolCall(tc.toolCallId, toolCallCtx, {
               toolRegistry,
               middlewareRegistry,
@@ -298,8 +304,19 @@ export async function executeStep(
           }),
         );
 
+        // Append fulfilled results in LLM-returned order.
         for (let i = 0; i < canonicalToolCalls.length; i++) {
-          appendToolResult(canonicalToolCalls[i], results[i]);
+          const entry = settled[i];
+          if (entry.status === "fulfilled") {
+            appendToolResult(canonicalToolCalls[i], entry.value);
+          }
+        }
+
+        // Surface the first error (HITL pending or unexpected) in LLM order.
+        for (const entry of settled) {
+          if (entry.status === "rejected") {
+            throw entry.reason;
+          }
         }
       }
     }

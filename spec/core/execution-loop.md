@@ -99,6 +99,7 @@
   - 그 외에는 **모두 병렬 실행**한다.
 - `StepResult.toolCalls`와 conversation에 기록되는 tool-result `appendMessage` 순서는 두 경로 모두 LLM이 반환한 tool call 순서를 따른다.
 - 순차 경로에서 `HumanApprovalPendingError`는 즉시 전파되며, 이전까지 실행된 sibling의 tool-result는 보존되고 이후 tool call은 실행되지 않는다. 보류된 tool 자체의 tool-result는 approval resume 경로에서 append된다.
+- 병렬 경로에서 handler/middleware가 `humanApproval` 정적 선언 없이 `HumanApprovalPendingError`를 던지는 동적 HITL은 **지원되지 않는다.** step.ts는 settle된 sibling의 tool-result는 LLM 순서대로 append하고 LLM 순서상 첫 rejection을 전파하지만, 같은 step에서 두 개 이상의 동적 approval gate가 생성되면 두 번째 이후의 gate는 orphan 상태가 된다. 동적 approval을 쓰려는 extension은 해당 tool의 `ToolDefinition.humanApproval`도 같이 선언해 pre-flight가 순차 경로로 라우팅하도록 만들어야 한다.
 
 ### EXEC-CONST-004 - 스트리밍은 관찰용 부가기능이다
 
