@@ -165,49 +165,90 @@ export async function executeStep(
       });
     }
 
-    // e. Execute tool calls if any
+    // e. Execute tool calls in parallel (EXEC-CONST-003).
+    //    Result/appendMessage order still follows the LLM-returned tool call order.
+    //    If any tool throws HumanApprovalPendingError, skip all tool-result appendMessage
+    //    and rethrow the FIRST pending error (in LLM order) after all parallel work settles.
     const toolCallResults: StepResult["toolCalls"] = [];
 
     if (canonicalToolCalls.length > 0) {
-      for (const tc of canonicalToolCalls) {
-        const toolCallCtx = {
-          ...stepCtx,
-          toolName: tc.toolName,
-          toolArgs: tc.args,
-        };
+      type Settled =
+        | { kind: "result"; result: ToolResult }
+        | { kind: "pending"; error: unknown }
+        | { kind: "error"; error: unknown };
 
-        const toolResult =
-          tc.malformedResult ??
-          (await executeToolCall(tc.toolCallId, toolCallCtx, {
-            toolRegistry,
-            middlewareRegistry,
-            eventBus,
-            humanApprovalStore,
-          }));
+      const settled = await Promise.all(
+        canonicalToolCalls.map(async (tc): Promise<Settled> => {
+          // Malformed args: skip the handler, but still emit tool.start/done so observers
+          // see one event pair per LLM-returned tool call.
+          if (tc.malformedResult) {
+            eventBus.emit("tool.start", {
+              type: "tool.start",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+            });
+            eventBus.emit("tool.done", {
+              type: "tool.done",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.args,
+              result: tc.malformedResult,
+            });
+            return { kind: "result", result: tc.malformedResult };
+          }
 
-        if (tc.malformedResult) {
-          eventBus.emit("tool.start", {
-            type: "tool.start",
-            turnId,
-            agentName,
-            conversationId,
-            stepNumber,
-            toolCallId: tc.toolCallId,
+          const toolCallCtx = {
+            ...stepCtx,
             toolName: tc.toolName,
-            args: tc.args,
-          });
-          eventBus.emit("tool.done", {
-            type: "tool.done",
-            turnId,
-            agentName,
-            conversationId,
-            stepNumber,
-            toolCallId: tc.toolCallId,
-            toolName: tc.toolName,
-            args: tc.args,
-            result: toolResult,
-          });
-        }
+            toolArgs: tc.args,
+          };
+
+          try {
+            const result = await executeToolCall(tc.toolCallId, toolCallCtx, {
+              toolRegistry,
+              middlewareRegistry,
+              eventBus,
+              humanApprovalStore,
+            });
+            return { kind: "result", result };
+          } catch (err) {
+            if (isHumanApprovalPendingError(err)) {
+              return { kind: "pending", error: err };
+            }
+            // executeToolCall already normalizes non-pending errors into ToolResult,
+            // so reaching this branch means an unexpected throw — let it bubble up
+            // after the rest of the parallel batch has finished.
+            return { kind: "error", error: err };
+          }
+        }),
+      );
+
+      // If any tool requires human approval, abort tool-result recording for the
+      // whole step and rethrow the first pending error in LLM-returned order.
+      const firstPending = settled.find((s) => s.kind === "pending");
+      if (firstPending && firstPending.kind === "pending") {
+        throw firstPending.error;
+      }
+      const firstUnexpected = settled.find((s) => s.kind === "error");
+      if (firstUnexpected && firstUnexpected.kind === "error") {
+        throw firstUnexpected.error;
+      }
+
+      // All settled successfully → append results in original order.
+      for (let i = 0; i < canonicalToolCalls.length; i++) {
+        const tc = canonicalToolCalls[i];
+        const entry = settled[i];
+        if (entry.kind !== "result") continue; // unreachable after the guards above
+        const toolResult = entry.result;
 
         // FR-CORE-007: Record the tool result as a non-system message
         stepCtx.conversation.emit({
