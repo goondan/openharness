@@ -89,16 +89,16 @@ function toAiSdkTools(
 
 function toAiSdkPrompt(messages: Message[]): {
   messages: ModelMessage[];
-  system?: string;
+  allowSystemInMessages?: true;
 } {
   const nonSystemMessages: ModelMessage[] = [];
-  const systemMessages: string[] = [];
+  const systemMessages: ModelMessage[] = [];
 
   for (const message of messages) {
     const modelMessage = message.data;
 
     if (modelMessage.role === "system") {
-      systemMessages.push(modelMessage.content);
+      systemMessages.push(modelMessage);
       continue;
     }
 
@@ -106,9 +106,12 @@ function toAiSdkPrompt(messages: Message[]): {
   }
 
   return {
-    messages: nonSystemMessages,
+    messages: [
+      ...systemMessages,
+      ...nonSystemMessages,
+    ],
     ...(systemMessages.length > 0
-      ? { system: systemMessages.join("\n\n") }
+      ? { allowSystemInMessages: true }
       : {}),
   };
 }
