@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-adapters",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Reference adapters for OpenHarness",
   "type": "module",
   "types": "./dist/index.d.ts",
