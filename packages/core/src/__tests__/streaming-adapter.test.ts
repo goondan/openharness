@@ -504,7 +504,7 @@ describe("AI SDK adapter streamChat()", () => {
     expect(response.toolCalls).toHaveLength(2);
   });
 
-  it("splits system messages into the streamText system option", async () => {
+  it("keeps system messages in streamText messages and suppresses AI SDK warnings", async () => {
     let capturedArgs: Record<string, unknown> | undefined;
 
     vi.doMock("ai", async (importOriginal) => {
@@ -547,8 +547,12 @@ describe("AI SDK adapter streamChat()", () => {
     );
 
     expect(capturedArgs).toBeDefined();
-    expect(capturedArgs!["system"]).toBe("Stream safely");
-    expect(capturedArgs!["messages"]).toEqual([{ role: "user", content: "Hi" }]);
+    expect(capturedArgs!["system"]).toBeUndefined();
+    expect(capturedArgs!["allowSystemInMessages"]).toBe(true);
+    expect(capturedArgs!["messages"]).toEqual([
+      { role: "system", content: "Stream safely" },
+      { role: "user", content: "Hi" },
+    ]);
   });
 
   it("passes LlmChatOptions (temperature, maxTokens, model) to streamText", async () => {
