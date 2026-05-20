@@ -151,6 +151,7 @@ export type {
   ToolErrorPayload,
   StepTextDeltaPayload,
   StepToolCallDeltaPayload,
+  StepToolCallsSuppressedPayload,
   IngressReceivedPayload,
   IngressAcceptedPayload,
   IngressRejectedPayload,
