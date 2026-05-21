@@ -385,6 +385,74 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
+  it("waits for coordinator fence release before resolving a completed turn", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const releaseEntered = createManualDeferred<void>();
+    const releaseGate = createManualDeferred<void>();
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-delayed-release" })),
+      release: vi.fn(async () => {
+        releaseEntered.resolve();
+        await releaseGate.promise;
+      }),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    const turnPromise = runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-delayed-release",
+    });
+    let settled = false;
+    void turnPromise.finally(() => {
+      settled = true;
+    });
+
+    await releaseEntered.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releaseGate.resolve();
+    const result = await turnPromise;
+    expect(result.status).toBe("completed");
+    expect(settled).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("rejects a completed turn when coordinator fence release fails", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-release-fails" })),
+      release: vi.fn(async () => {
+        throw new Error("coordinator release failed");
+      }),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    await expect(runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-release-fails",
+    })).rejects.toThrow("coordinator release failed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-release-fails",
+      turnId: expect.any(String),
+      fenceToken: "fence-release-fails",
+    });
+
+    await runtime.close();
+  });
+
   // -----------------------------------------------------------------------
   // Test 2: env() refs resolved at createHarness time
   // -----------------------------------------------------------------------

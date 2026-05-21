@@ -163,6 +163,17 @@ function createDeferred<T>(): {
   return { promise, resolve, reject };
 }
 
+async function resolveAfterCleanup<T>(promise: Promise<T>, cleanup: () => Promise<void>): Promise<T> {
+  try {
+    const value = await promise;
+    await cleanup();
+    return value;
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+}
+
 function turnResultForDurableDuplicate(
   item: DurableInboundItem & { failure?: { reason?: string } },
   agentName: string,
@@ -576,13 +587,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         },
       });
       void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
-      const cleanupPromise = trackedTurn.promise.finally(cleanup);
-      void cleanupPromise.catch(() => undefined);
+      const completionPromise = resolveAfterCleanup(trackedTurn.promise, cleanup);
+      void completionPromise.catch(() => undefined);
       return {
         started: true,
         turnId,
         conversationId,
-        promise: trackedTurn.promise,
+        promise: completionPromise,
       };
     } catch (err) {
       trackedTurn.reject(err);
@@ -738,9 +749,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       });
     };
 
+    const completionPromise = resolveAfterCleanup(trackedTurn.promise, cleanup);
+    void completionPromise.catch(() => undefined);
+
     return {
       turnId,
-      promise: trackedTurn.promise,
+      promise: completionPromise,
       start: async () => {
         if (!started) {
           started = true;
@@ -788,18 +802,16 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               },
             });
             void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
-            const cleanupPromise = trackedTurn.promise.finally(cleanup);
-            void cleanupPromise.catch(() => undefined);
           } catch (err) {
             trackedTurn.reject(err);
-            await cleanup();
           }
         }
 
-        return await trackedTurn.promise;
+        return await completionPromise;
       },
       discard: () => {
         if (!started) {
+          started = true;
           trackedTurn.resolve({
             turnId,
             agentName,
@@ -807,8 +819,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
             status: "aborted",
             steps: [],
           });
+          return;
         }
-        void cleanup();
+        void cleanup().catch(() => undefined);
       },
     };
   }
