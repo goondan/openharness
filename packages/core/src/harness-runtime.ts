@@ -93,6 +93,14 @@ type ConversationTurnFence = {
   fenceToken: string;
 };
 
+type ConversationTurnFenceOutcome =
+  | { acquired: true; fence?: ConversationTurnFence }
+  | {
+      acquired: false;
+      disposition: RejectedTurnStart["disposition"];
+      reason: RejectedTurnStart["reason"];
+    };
+
 type InternalTurnOptions = ProcessTurnOptions & {
   turnId?: string;
   skipInputAppend?: boolean;
@@ -293,6 +301,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _conversations: Map<string, ConversationStateImpl> = new Map();
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
   private readonly _activeTurnByConversation: Map<string, InFlightTurn> = new Map();
+  private readonly _pendingTurnStartByConversation: Set<string> = new Set();
   private readonly _turnResultByInboundItem: Map<string, TurnResult> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
   private readonly _runtimeEvents: EventBus;
@@ -353,20 +362,27 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     });
   }
 
+  private _reserveConversationTurnStart(conversationKey: string): boolean {
+    if (
+      this._activeTurnByConversation.has(conversationKey) ||
+      this._pendingTurnStartByConversation.has(conversationKey)
+    ) {
+      return false;
+    }
+    this._pendingTurnStartByConversation.add(conversationKey);
+    return true;
+  }
+
+  private _releaseConversationTurnStartReservation(conversationKey: string): void {
+    this._pendingTurnStartByConversation.delete(conversationKey);
+  }
+
   private async _acquireConversationTurnFence(input: {
     agentName: string;
     conversationId: string;
     turnId: string;
     purpose: ConversationTurnStartPurpose;
-  }): Promise<
-    | { acquired: true; fence?: ConversationTurnFence }
-    | { acquired: false; disposition: RejectedTurnStart["disposition"]; reason: RejectedTurnStart["reason"] }
-  > {
-    const conversationKey = this._conversationKey(input.agentName, input.conversationId);
-    if (this._activeTurnByConversation.has(conversationKey)) {
-      return { acquired: false, disposition: "leaseConflict", reason: "active" };
-    }
-
+  }): Promise<ConversationTurnFenceOutcome> {
     if (!this._conversationTurnCoordinator) {
       return { acquired: true };
     }
@@ -427,13 +443,31 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         : randomUUID());
 
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
-    const fence = await this._acquireConversationTurnFence({
-      agentName,
-      conversationId,
-      turnId,
-      purpose,
-    });
+    const conversationKey = this._conversationKey(agentName, conversationId);
+    if (!this._reserveConversationTurnStart(conversationKey)) {
+      return {
+        started: false,
+        turnId,
+        conversationId,
+        disposition: "leaseConflict",
+        reason: "active",
+      };
+    }
+
+    let fence: ConversationTurnFenceOutcome;
+    try {
+      fence = await this._acquireConversationTurnFence({
+        agentName,
+        conversationId,
+        turnId,
+        purpose,
+      });
+    } catch (err) {
+      this._releaseConversationTurnStartReservation(conversationKey);
+      throw err;
+    }
     if (!fence.acquired) {
+      this._releaseConversationTurnStartReservation(conversationKey);
       return {
         started: false,
         turnId,
@@ -443,7 +477,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       };
     }
 
-    const conversationKey = this._conversationKey(agentName, conversationId);
     const conversationState = this._getConversationState(agentName, conversationId);
     const abortController = new AbortController();
     const steeringInbox = this._createSteeringInbox(turnId);
@@ -460,6 +493,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
     this._inFlightTurns.set(turnId, inFlightTurn);
     this._activeTurnByConversation.set(conversationKey, inFlightTurn);
+    this._releaseConversationTurnStartReservation(conversationKey);
 
     let cleanupStarted = false;
     const cleanup = async (): Promise<void> => {
@@ -552,6 +586,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       };
     } catch (err) {
       trackedTurn.reject(err);
+      this._releaseConversationTurnStartReservation(conversationKey);
       await cleanup();
       throw err;
     }

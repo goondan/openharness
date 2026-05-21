@@ -24,6 +24,16 @@ function mockLlmClient(text = "Hello from mock"): LlmClient {
   };
 }
 
+function createManualDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -200,6 +210,37 @@ describe("createHarness", () => {
     expect(result.turnId).toBeUndefined();
     expect(coordinator.release).not.toHaveBeenCalled();
     expect(llmClient.chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("reserves the local conversation slot before awaiting turn admission", async () => {
+    const releaseChat = createManualDeferred<void>();
+    const llmClient: LlmClient = {
+      chat: vi.fn(async () => {
+        await releaseChat.promise;
+        return { text: "only one turn", toolCalls: [] } satisfies LlmResponse;
+      }),
+    };
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const runtime = await createHarness(minimalConfig());
+
+    const first = runtime.processTurn("default", "first", {
+      conversationId: "conv-local-admission-race",
+    });
+    const second = await runtime.processTurn("default", "second", {
+      conversationId: "conv-local-admission-race",
+    });
+
+    expect(second.status).toBe("error");
+    expect(second.error?.message).toContain("Conversation turn start rejected: active");
+    expect(llmClient.chat).toHaveBeenCalledTimes(1);
+
+    releaseChat.resolve();
+    const firstResult = await first;
+    expect(firstResult.status).toBe("completed");
+    expect(llmClient.chat).toHaveBeenCalledTimes(1);
 
     await runtime.close();
   });
