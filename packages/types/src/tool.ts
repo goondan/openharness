@@ -60,16 +60,17 @@ export interface HumanTaskDefinition {
 }
 
 /**
- * Marks a tool as a human-approval barrier when it can actually open an
- * approval gate.
+ * Marks a tool as a human-approval barrier when it actually opens an approval
+ * gate.
  *
  * Barrier tools are committed as a single-tool assistant batch. If a model
  * returns this tool together with sibling tool calls in the same step, core
  * commits the first approval-requiring tool call and emits
  * `step.toolCallsSuppressed` for the siblings instead of recording partial
- * tool results that would violate provider transcript rules. Calls that cannot
- * open a gate, such as missing-store or invalid-argument calls, stay in the
- * normal batch and receive ordinary error tool-results.
+ * tool results that would violate provider transcript rules. Calls that do not
+ * reach pending state, such as missing-store, invalid-argument, or approval
+ * store failure calls, stay in the normal batch and receive ordinary error
+ * tool-results.
  */
 export interface HumanApprovalPolicy {
   required?: boolean;

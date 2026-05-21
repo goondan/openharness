@@ -6,11 +6,12 @@ import type {
   ToolModelMessage,
   ToolResult,
   HumanApprovalReferenceStore,
+  ToolCallContext,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import { executeToolCall, isHumanApprovalPendingError } from "./tool-call.js";
+import { executeToolCall, isHumanApprovalPendingError, probeHumanApprovalGate } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 
 type ToolResultContentPart = Extract<ToolModelMessage["content"][number], { type: "tool-result" }>;
@@ -146,16 +147,46 @@ export async function executeStep(
       return toolRegistry.validate(tc.toolName, tc.args).valid;
     };
 
-    const firstHumanApprovalToolCallIndex = canonicalToolCalls.findIndex(canOpenHumanApprovalBarrier);
-    const firstHumanApprovalToolCall = firstHumanApprovalToolCallIndex === -1
-      ? undefined
-      : canonicalToolCalls[firstHumanApprovalToolCallIndex];
-    const suppressedToolCalls = firstHumanApprovalToolCall
-      ? canonicalToolCalls.filter((_, index) => index !== firstHumanApprovalToolCallIndex)
-      : [];
-    const committedToolCalls = firstHumanApprovalToolCall ? [firstHumanApprovalToolCall] : canonicalToolCalls;
+    const humanApprovalToolCallIndexes = canonicalToolCalls.flatMap((tc, index) =>
+      canOpenHumanApprovalBarrier(tc) ? [index] : []
+    );
 
-    if (firstHumanApprovalToolCall && suppressedToolCalls.length > 0) {
+    const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+      const committedAssistantContent = [...assistantContent];
+      for (const tc of committedToolCalls) {
+        committedAssistantContent.push({
+          type: "tool-call",
+          toolName: tc.toolName,
+          input: tc.args,
+          toolCallId: tc.toolCallId,
+        });
+      }
+
+      // Append assistant message (even if no content parts, e.g. empty response)
+      // Only append if there's something to say
+      if (committedAssistantContent.length > 0) {
+        stepCtx.conversation.emit({
+          type: "appendMessage",
+          message: {
+            id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
+            data: {
+              role: "assistant",
+              content: committedAssistantContent,
+            },
+            metadata: {
+              __createdBy: "core",
+            },
+          },
+        });
+      }
+    };
+
+    const emitSuppressedToolCalls = (committedToolCall: (typeof canonicalToolCalls)[number]) => {
+      const suppressedToolCalls = canonicalToolCalls.filter((tc) => tc.toolCallId !== committedToolCall.toolCallId);
+      if (suppressedToolCalls.length === 0) {
+        return;
+      }
+
       eventBus.emit("step.toolCallsSuppressed", {
         type: "step.toolCallsSuppressed",
         turnId,
@@ -163,41 +194,28 @@ export async function executeStep(
         conversationId,
         stepNumber,
         reason: "humanApprovalBarrier",
-        committedToolCallId: firstHumanApprovalToolCall.toolCallId,
+        committedToolCallId: committedToolCall.toolCallId,
         suppressedToolCalls: suppressedToolCalls.map((tc) => ({
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
         })),
       });
-    }
+    };
 
-    if (committedToolCalls.length > 0) {
-      for (const tc of committedToolCalls) {
-        assistantContent.push({
-          type: "tool-call",
-          toolName: tc.toolName,
-          input: tc.args,
-          toolCallId: tc.toolCallId,
-        });
-      }
-    }
+    const appendSingleAssistantToolCall = (tc: (typeof canonicalToolCalls)[number]) => {
+      appendAssistantMessage([tc]);
+    };
 
-    // Append assistant message (even if no content parts, e.g. empty response)
-    // Only append if there's something to say
-    if (assistantContent.length > 0) {
-      stepCtx.conversation.emit({
-        type: "appendMessage",
-        message: {
-          id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
-          data: {
-            role: "assistant",
-            content: assistantContent,
-          },
-          metadata: {
-            __createdBy: "core",
-          },
-        },
-      });
+    const appendAllAssistantToolCalls = () => {
+      appendAssistantMessage(canonicalToolCalls);
+    };
+
+    const appendTextOnlyAssistantMessage = () => {
+      appendAssistantMessage([]);
+    };
+
+    if (canonicalToolCalls.length === 0) {
+      appendTextOnlyAssistantMessage();
     }
 
     // e. Execute committed tool calls (EXEC-CONST-003).
@@ -281,46 +299,158 @@ export async function executeStep(
       pendingToolResultParts.length = 0;
     };
 
-    if (committedToolCalls.length > 0) {
-      const batchRequiresApproval = Boolean(firstHumanApprovalToolCall);
+    const executeCanonicalToolCall = async (
+      tc: (typeof canonicalToolCalls)[number],
+    ): Promise<ToolResult> => {
+      if (tc.malformedResult) {
+        emitMalformedEvents(tc);
+        return tc.malformedResult;
+      }
 
-      if (batchRequiresApproval) {
-        // Sequential path — the committed batch contains only the approval tool,
-        // so resume can append its result directly after the assistant tool-call
-        // message without split sibling tool-result messages.
-        for (const tc of committedToolCalls) {
-          if (tc.malformedResult) {
-            emitMalformedEvents(tc);
-            recordToolResult(tc, tc.malformedResult);
-            continue;
-          }
+      const toolCallCtx = {
+        ...stepCtx,
+        toolName: tc.toolName,
+        toolArgs: tc.args,
+      };
 
-          const toolCallCtx = {
-            ...stepCtx,
-            toolName: tc.toolName,
-            toolArgs: tc.args,
-          };
+      return await executeToolCall(tc.toolCallId, toolCallCtx, {
+        toolRegistry,
+        middlewareRegistry,
+        eventBus,
+        humanApprovalStore,
+      });
+    };
 
-          // HumanApprovalPendingError is allowed to propagate; non-pending errors
-          // are already normalized to ToolResult by executeToolCall.
-          try {
-            const toolResult = await executeToolCall(tc.toolCallId, toolCallCtx, {
+    const executeProbedToolResult = async (
+      tc: (typeof canonicalToolCalls)[number],
+      probedResult: ToolResult,
+    ): Promise<ToolResult> => {
+      const toolCallCtx: ToolCallContext = {
+        ...stepCtx,
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        toolArgs: tc.args,
+      };
+
+      eventBus.emit("tool.start", {
+        type: "tool.start",
+        turnId,
+        agentName,
+        conversationId,
+        stepNumber,
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        args: tc.args,
+      });
+
+      const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
+        "toolCall",
+        async () => probedResult,
+      );
+
+      try {
+        const result = await chain(toolCallCtx);
+        eventBus.emit("tool.done", {
+          type: "tool.done",
+          turnId,
+          agentName,
+          conversationId,
+          stepNumber,
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: tc.args,
+          result,
+        });
+        return result;
+      } catch (err) {
+        if (isHumanApprovalPendingError(err)) {
+          throw err;
+        }
+        const error = err instanceof Error ? err : new Error(String(err));
+        eventBus.emit("tool.error", {
+          type: "tool.error",
+          turnId,
+          agentName,
+          conversationId,
+          stepNumber,
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: tc.args,
+          error,
+        });
+        return { type: "error", error: error.message };
+      }
+    };
+
+    const recordSettledToolCalls = (
+      toolCalls: typeof canonicalToolCalls,
+      settled: readonly PromiseSettledResult<ToolResult>[],
+    ) => {
+      // Append fulfilled results in LLM-returned order.
+      for (let i = 0; i < toolCalls.length; i++) {
+        const entry = settled[i];
+        if (entry.status === "fulfilled") {
+          recordToolResult(toolCalls[i], entry.value);
+        }
+      }
+      appendPendingToolResultMessage();
+
+      // Surface the first error (HITL pending or unexpected) in LLM order.
+      for (const entry of settled) {
+        if (entry.status === "rejected") {
+          throw entry.reason;
+        }
+      }
+    };
+
+    if (canonicalToolCalls.length > 0) {
+      if (humanApprovalToolCallIndexes.length > 0) {
+        // Probe declared approval candidates in LLM order before committing the
+        // assistant batch. The probe only attempts approval-gate creation; it
+        // deliberately does not run toolCall middleware or the tool handler,
+        // because any candidate may later become a suppressed sibling if another
+        // approval call reaches pending state.
+        const probedApprovalResults = new Map<number, ToolResult>();
+        for (const approvalIndex of humanApprovalToolCallIndexes) {
+          const approvalToolCall = canonicalToolCalls[approvalIndex];
+          const probeResult = await probeHumanApprovalGate(
+            {
+              ...stepCtx,
+              toolCallId: approvalToolCall.toolCallId,
+              toolName: approvalToolCall.toolName,
+              toolArgs: approvalToolCall.args,
+            },
+            {
               toolRegistry,
-              middlewareRegistry,
               eventBus,
               humanApprovalStore,
-            });
-
-            recordToolResult(tc, toolResult);
-          } catch (err) {
-            appendPendingToolResultMessage();
-            throw err;
+            },
+          );
+          if (probeResult.status === "pending") {
+            emitSuppressedToolCalls(approvalToolCall);
+            appendSingleAssistantToolCall(approvalToolCall);
+            throw probeResult.error;
           }
+
+          probedApprovalResults.set(approvalIndex, probeResult.result);
         }
-        appendPendingToolResultMessage();
+
+        appendAllAssistantToolCalls();
+        const settled = await Promise.allSettled(
+          canonicalToolCalls.map(async (tc, index) => {
+            const probedApprovalResult = probedApprovalResults.get(index);
+            if (probedApprovalResult) {
+              return await executeProbedToolResult(tc, probedApprovalResult);
+            }
+            return await executeCanonicalToolCall(tc);
+          }),
+        );
+        recordSettledToolCalls(canonicalToolCalls, settled);
       } else {
-        // Parallel path — no tool in this batch declares humanApproval, so the
-        // single-approval invariant cannot be violated by static policy.
+        appendAllAssistantToolCalls();
+        // Parallel path — no tool in this batch can open a declared humanApproval
+        // gate, so the single-approval invariant cannot be violated by static
+        // policy.
         //
         // We use Promise.allSettled (not Promise.all) so that if a non-pending
         // error or a *dynamic* HumanApprovalPendingError (thrown by middleware
@@ -332,42 +462,9 @@ export async function executeStep(
         // on the ToolDefinition so the pre-flight check routes the batch to the
         // sequential path.
         const settled = await Promise.allSettled(
-          committedToolCalls.map(async (tc) => {
-            if (tc.malformedResult) {
-              emitMalformedEvents(tc);
-              return tc.malformedResult;
-            }
-
-            const toolCallCtx = {
-              ...stepCtx,
-              toolName: tc.toolName,
-              toolArgs: tc.args,
-            };
-
-            return await executeToolCall(tc.toolCallId, toolCallCtx, {
-              toolRegistry,
-              middlewareRegistry,
-              eventBus,
-              humanApprovalStore,
-            });
-          }),
+          canonicalToolCalls.map(async (tc) => await executeCanonicalToolCall(tc)),
         );
-
-        // Append fulfilled results in LLM-returned order.
-        for (let i = 0; i < committedToolCalls.length; i++) {
-          const entry = settled[i];
-          if (entry.status === "fulfilled") {
-            recordToolResult(committedToolCalls[i], entry.value);
-          }
-        }
-        appendPendingToolResultMessage();
-
-        // Surface the first error (HITL pending or unexpected) in LLM order.
-        for (const entry of settled) {
-          if (entry.status === "rejected") {
-            throw entry.reason;
-          }
-        }
+        recordSettledToolCalls(canonicalToolCalls, settled);
       }
     }
 

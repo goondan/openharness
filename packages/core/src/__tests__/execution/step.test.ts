@@ -16,6 +16,8 @@ import type {
   MessageEvent,
   JsonObject,
   EventPayload,
+  CreateHumanApprovalInput,
+  CreateHumanApprovalResult,
 } from "@goondan/openharness-types";
 
 // -----------------------------------------------------------------------
@@ -106,6 +108,26 @@ function makeDeps(opts?: {
     middlewareRegistry: opts?.middlewareRegistry ?? new MiddlewareRegistry(),
     eventBus: opts?.eventBus ?? new EventBus(),
   };
+}
+
+class FailingCreateApprovalStore extends InMemoryHumanApprovalStore {
+  override async createApproval(_input: CreateHumanApprovalInput): Promise<CreateHumanApprovalResult> {
+    throw new Error("approval store unavailable");
+  }
+}
+
+class FailingSelectedApprovalStore extends InMemoryHumanApprovalStore {
+  constructor(private readonly failingToolCallId: string) {
+    super();
+  }
+
+  override async createApproval(input: CreateHumanApprovalInput): Promise<CreateHumanApprovalResult> {
+    if (input.toolCall.toolCallId === this.failingToolCallId) {
+      throw new Error("approval store unavailable");
+    }
+
+    return await super.createApproval(input);
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -860,5 +882,171 @@ describe("executeStep", () => {
 
     const tasks = await humanApprovalStore.listTasks();
     expect(tasks).toHaveLength(0);
+  });
+
+  it("HITL approval setup failure preserves sibling tool calls", async () => {
+    const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
+    const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("ok_before", okHandlerBefore));
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+    toolRegistry.register(makeTool("ok_after", okHandlerAfter));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-before", toolName: "ok_before", args: { value: "a" } },
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "b" } },
+        { toolCallId: "call-after", toolName: "ok_after", args: { value: "c" } },
+      ],
+    });
+
+    const humanApprovalStore = new FailingCreateApprovalStore();
+    const ctx = makeStepContext();
+    const suppressedEvents: EventPayload[] = [];
+    const toolCallMiddlewareNames: string[] = [];
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (mwCtx, next) => {
+      const toolCallCtx = mwCtx as { toolName?: string };
+      if (toolCallCtx.toolName) {
+        toolCallMiddlewareNames.push(toolCallCtx.toolName);
+      }
+      return await next();
+    });
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+    deps.eventBus.on("step.toolCallsSuppressed", (event) => suppressedEvents.push(event));
+
+    const result = await executeStep(ctx, deps);
+
+    expect(okHandlerBefore).toHaveBeenCalledOnce();
+    expect(approvalHandler).not.toHaveBeenCalled();
+    expect(okHandlerAfter).toHaveBeenCalledOnce();
+    expect([...toolCallMiddlewareNames].sort()).toEqual([
+      "needs_approval",
+      "ok_after",
+      "ok_before",
+    ]);
+    expect(suppressedEvents).toEqual([]);
+    expect(result.toolCalls.map((tc) => tc.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+    expect(result.toolCalls[1].result).toEqual({
+      type: "error",
+      error: "approval store unavailable",
+    });
+
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(1);
+    const toolContent = toolMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(toolContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+
+    const tasks = await humanApprovalStore.listTasks();
+    expect(tasks).toHaveLength(0);
+  });
+
+  it("later pending HITL suppresses siblings after an earlier approval setup failure", async () => {
+    const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
+    const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
+    const firstApprovalHandler = vi.fn(async () => ({ type: "text" as const, text: "first should not run" }));
+    const secondApprovalHandler = vi.fn(async () => ({ type: "text" as const, text: "second should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("ok_before", okHandlerBefore));
+    const firstApprovalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval_first", firstApprovalHandler),
+      humanApproval: { prompt: "approve first" },
+    };
+    const secondApprovalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval_second", secondApprovalHandler),
+      humanApproval: { prompt: "approve second" },
+    };
+    toolRegistry.register(firstApprovalTool);
+    toolRegistry.register(secondApprovalTool);
+    toolRegistry.register(makeTool("ok_after", okHandlerAfter));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-before", toolName: "ok_before", args: { value: "a" } },
+        { toolCallId: "call-approval-1", toolName: "needs_approval_first", args: { value: "b" } },
+        { toolCallId: "call-approval-2", toolName: "needs_approval_second", args: { value: "c" } },
+        { toolCallId: "call-after", toolName: "ok_after", args: { value: "d" } },
+      ],
+    });
+
+    const humanApprovalStore = new FailingSelectedApprovalStore("call-approval-1");
+    const ctx = makeStepContext();
+    const suppressedEvents: EventPayload[] = [];
+    const toolCallMiddlewareNames: string[] = [];
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (mwCtx, next) => {
+      const toolCallCtx = mwCtx as { toolName?: string };
+      if (toolCallCtx.toolName) {
+        toolCallMiddlewareNames.push(toolCallCtx.toolName);
+      }
+      return await next();
+    });
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+    deps.eventBus.on("step.toolCallsSuppressed", (event) => suppressedEvents.push(event));
+
+    let caught: unknown;
+    try {
+      await executeStep(ctx, deps);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(HumanApprovalPendingError);
+    expect(okHandlerBefore).not.toHaveBeenCalled();
+    expect(firstApprovalHandler).not.toHaveBeenCalled();
+    expect(secondApprovalHandler).not.toHaveBeenCalled();
+    expect(okHandlerAfter).not.toHaveBeenCalled();
+    expect(toolCallMiddlewareNames).toEqual([]);
+    expect(suppressedEvents).toEqual([
+      expect.objectContaining({
+        type: "step.toolCallsSuppressed",
+        reason: "humanApprovalBarrier",
+        committedToolCallId: "call-approval-2",
+        suppressedToolCalls: [
+          { toolCallId: "call-before", toolName: "ok_before" },
+          { toolCallId: "call-approval-1", toolName: "needs_approval_first" },
+          { toolCallId: "call-after", toolName: "ok_after" },
+        ],
+      }),
+    ]);
+
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(assistantContent).toHaveLength(1);
+    expect(assistantContent[0].toolCallId).toBe("call-approval-2");
+
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(0);
+
+    const tasks = await humanApprovalStore.listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].toolCallId).toBe("call-approval-2");
   });
 });
