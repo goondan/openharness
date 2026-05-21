@@ -569,6 +569,12 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   ): Promise<TurnResult> {
     const start = await this.startTurn(agentName, input, options, durable, purpose);
     if (!start.started) {
+      if (durable?.item) {
+        await this._deferDurableInboundItemAfterRejectedTurnStart({
+          item: durable.item,
+          rejection: start,
+        });
+      }
       return {
         turnId: start.turnId,
         agentName,
@@ -799,6 +805,42 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     return item;
   }
 
+  private async _deferDurableInboundItemAfterRejectedTurnStart(input: {
+    item: DurableInboundItem;
+    rejection: RejectedTurnStart;
+  }): Promise<void> {
+    if (!this._durableInboundStore) {
+      return;
+    }
+
+    const { item, rejection } = input;
+    if (item.status === "pending") {
+      return;
+    }
+
+    if (item.status === "leased" || item.status === "delivered" || item.status === "blocked") {
+      if (this._durableInboundStore.releaseInboundItem) {
+        await this._durableInboundStore.releaseInboundItem({
+          id: item.id,
+          leaseOwner: item.lease?.owner,
+        });
+        return;
+      }
+
+      await this._durableInboundStore.markFailed({
+        id: item.id,
+        reason: `Conversation turn start deferred: ${rejection.reason}`,
+        retryable: true,
+        leaseOwner: item.lease?.owner,
+      });
+      return;
+    }
+
+    if (item.status === "failed" || item.status === "deadLetter") {
+      await this._durableInboundStore.retryInboundItem({ id: item.id });
+    }
+  }
+
   async deliverInboundToActiveTurn(
     agentName: string,
     conversationId: string,
@@ -877,10 +919,19 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     }
 
     const turnId = `turn-${randomUUID()}`;
-    this.dispatchTurn(item.agentName, item.envelope, { conversationId: item.conversationId, turnId }, {
+    const started = await this.startTurn(item.agentName, item.envelope, { conversationId: item.conversationId, turnId }, {
       item,
       commitRef: inboundUserMessageCommitRef(item.id),
-    })
+    });
+    if (!started.started) {
+      await this._deferDurableInboundItemAfterRejectedTurnStart({
+        item,
+        rejection: started,
+      });
+      return;
+    }
+
+    started.promise
       .then((result) => {
         this._turnResultByInboundItem.set(item.id, result);
       })

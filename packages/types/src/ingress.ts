@@ -64,6 +64,7 @@ export type IngressDisposition =
   | "delivered"
   | "blocked"
   | "duplicate"
+  | "queued"
   | "steered"
   | "leaseConflict"
   | "leaseUnknown";

@@ -252,6 +252,9 @@ export class InMemoryDurableInboundStore implements DurableInboundReferenceStore
 
   async retryInboundItem(input: RetryInboundInput): Promise<DurableInboundItem> {
     const item = this._mustGet(input.id);
+    if (item.status === "pending") {
+      return cloneInboundItem(item);
+    }
     if (!["failed", "deadLetter", "blocked", "delivered"].includes(item.status)) {
       throw new Error(`Cannot retry inbound item "${input.id}" from status "${item.status}".`);
     }

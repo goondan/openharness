@@ -204,6 +204,117 @@ describe("createHarness", () => {
     await runtime.close();
   });
 
+  it("keeps durable ingress queued when the coordinator rejects turn start after append", async () => {
+    const llmClient = mockLlmClient("queued later");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const inboundStore = createInMemoryDurableInboundStore();
+    let ownerActive = true;
+    const coordinator = {
+      getStatus: vi.fn(async () => (ownerActive ? "active" as const : "inactive" as const)),
+      acquire: vi.fn(async () =>
+        ownerActive
+          ? { acquired: false as const, reason: "active" as const }
+          : { acquired: true as const, fenceToken: "queued-fence" },
+      ),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      durableInbound: {
+        enabled: true,
+        store: inboundStore,
+      },
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-queued"),
+    });
+
+    expect(result.disposition).toBe("queued");
+    expect(result.turnId).toBeUndefined();
+    expect(result.inboundItemId).toBeDefined();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    const [queued] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+    });
+    expect(queued.status).toBe("pending");
+
+    ownerActive = false;
+    await runtime.control.retryInboundItem?.({ id: queued.id });
+    await vi.waitFor(() => expect(llmClient.chat).toHaveBeenCalledTimes(1));
+
+    const [consumed] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+    });
+    expect(consumed.status).toBe("consumed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+      turnId: expect.any(String),
+      fenceToken: "queued-fence",
+    });
+
+    await runtime.close();
+  });
+
+  it("keeps retried durable ingress pending when the coordinator still rejects scheduler start", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const inboundStore = createInMemoryDurableInboundStore();
+    const coordinator = {
+      getStatus: vi.fn(async () => "active" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "active" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      durableInbound: {
+        enabled: true,
+        store: inboundStore,
+      },
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-retry-pending"),
+    });
+    expect(result.disposition).toBe("queued");
+
+    await runtime.control.retryInboundItem?.({ id: result.inboundItemId! });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [item] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-retry-pending",
+    });
+    expect(item.status).toBe("pending");
+    expect(item.turnId).toBeUndefined();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+    expect(coordinator.release).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
   it("releases the coordinator fence after an accepted turn finishes", async () => {
     const llmClient = mockLlmClient("coordinated answer");
     const { createLlmClient } = await import("../models/index.js");

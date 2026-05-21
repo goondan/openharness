@@ -378,7 +378,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
         });
         if (!started.started) {
           return {
-            disposition: started.disposition,
+            disposition: "queued" as const,
             inboundItemId: appended.item.id,
           };
         }
