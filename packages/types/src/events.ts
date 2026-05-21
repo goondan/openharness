@@ -119,6 +119,20 @@ export interface StepToolCallDeltaPayload {
   argsDelta: string;
 }
 
+export interface StepToolCallsSuppressedPayload {
+  type: "step.toolCallsSuppressed";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  reason: "humanApprovalBarrier";
+  committedToolCallId: string;
+  suppressedToolCalls: Array<{
+    toolCallId: string;
+    toolName: string;
+  }>;
+}
+
 // -----------------------------------------------------------------------
 // Ingress event payloads
 // -----------------------------------------------------------------------
@@ -293,6 +307,7 @@ export type EventPayload =
   | StepErrorPayload
   | StepTextDeltaPayload
   | StepToolCallDeltaPayload
+  | StepToolCallsSuppressedPayload
   | ToolStartPayload
   | ToolDonePayload
   | ToolErrorPayload

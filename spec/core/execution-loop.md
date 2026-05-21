@@ -45,11 +45,11 @@
   5. 스트리밍 중간에 `step.textDelta`, `step.toolCallDelta` 이벤트를 발행한다.
   6. assistant 응답을 `appendMessage`로 기록한다.
   7. tool call이 있으면 다음 정책으로 실행한다.
-     - 같은 step의 tool call 중 하나라도 `humanApproval`을 선언했다면 모든 tool call을 LLM이 반환한 순서대로 **순차 실행**한다. 이는 한 step 안에서 동시에 여러 개의 human approval gate가 열리지 않도록 보장한다.
+     - 같은 step의 tool call 중 하나라도 실제로 Human Approval gate를 열 수 있다면, 코어는 LLM이 반환한 순서상 첫 approval tool call만 assistant 메시지에 commit하고 해당 approval gate만 생성한다. 같은 assistant 응답에 포함된 sibling tool call은 대화 히스토리에 기록하거나 실행하지 않으며, `step.toolCallsSuppressed` 이벤트로 명시적으로 노출한다. 이는 approval resume이 나중에 append하는 tool-result가 직전 assistant tool-call batch와 1:1로 맞도록 보장한다. 단, `humanApproval.store`가 없거나 tool args가 schema validation에 실패해 gate가 열릴 수 없는 approval tool call은 barrier가 아니며 일반 tool call batch처럼 error tool-result와 sibling results를 함께 기록한다.
      - 그렇지 않으면 모든 tool call을 **병렬 실행**한다 (handler 부수효과의 동시 실행 안전성은 tool 작성자 책임).
      - tool call 인자가 invalid JSON이거나 JSON object로 해석되지 않으면 실제 ToolCall 실행은 건너뛰고, provider-safe한 `{}` input의 assistant tool-call과 error tool-result를 기록해 다음 Step에서 모델이 재시도할 수 있게 한다.
-     - 각 tool call의 결과는 LLM이 반환한 순서대로 `appendMessage`로 기록한다. `HumanApprovalPendingError`로 보류된 tool call은 이 step에서는 tool-result를 기록하지 않고, approval resume 경로에서 해당 tool의 결과가 append된다.
-  8. 순차 경로에서 `HumanApprovalPendingError`가 발생하면 즉시 상위 Turn 루프로 전파한다 (이미 실행된 sibling의 tool-result는 보존됨, 이후 tool call은 실행되지 않음). 병렬 경로에서 handler가 동적으로 `HumanApprovalPendingError`를 던지면 `Promise.all` 거부 즉시 전파된다 — 단, 표준 패턴은 tool 정의의 `humanApproval`을 선언하는 것이다.
+     - committed tool-call batch의 결과는 LLM이 반환한 순서대로 단일 `role="tool"` 메시지의 `tool-result` parts에 모아 `appendMessage`로 기록한다. `HumanApprovalPendingError`로 보류된 tool call은 이 step에서는 tool-result를 기록하지 않고, approval resume 경로에서 해당 tool의 결과가 append된다.
+  8. approval 경로에서 `HumanApprovalPendingError`가 발생하면 즉시 상위 Turn 루프로 전파한다. 병렬 경로에서 handler가 동적으로 `HumanApprovalPendingError`를 던지면 settle된 sibling result를 단일 tool 메시지로 기록한 뒤 첫 rejection을 전파한다 — 단, 표준 패턴은 tool 정의의 `humanApproval`을 선언하는 것이다.
   9. `step.done`을 발행하고 `StepResult`를 반환한다.
 - Failure:
   - LLM 오류는 `step.error`를 발행한 뒤 상위 Turn으로 전파된다.
@@ -95,11 +95,12 @@
 
 - 같은 Turn 안의 Step은 병렬이 아니다.
 - 한 Step 안의 tool call은 다음 정책으로 실행된다.
-  - 같은 step에 `humanApproval`을 선언한 tool이 하나라도 있으면 **모두 순차 실행**한다. HITL gate의 단일 인스턴스 불변식과 blocked-inbound 라우팅을 보존한다.
+  - 같은 step에 실제로 Human Approval gate를 열 수 있는 tool이 하나라도 있으면 LLM 순서상 **첫 approval tool call만 commit**하고 approval gate를 생성한다. sibling tool call은 assistant 메시지, tool-result 메시지, `StepResult.toolCalls` 어디에도 기록하지 않으며 `step.toolCallsSuppressed(reason="humanApprovalBarrier")` 이벤트로만 관찰 가능해야 한다.
   - 그 외에는 **모두 병렬 실행**한다.
-- `StepResult.toolCalls`와 conversation에 기록되는 tool-result `appendMessage` 순서는 두 경로 모두 LLM이 반환한 tool call 순서를 따른다.
-- 순차 경로에서 `HumanApprovalPendingError`는 즉시 전파되며, 이전까지 실행된 sibling의 tool-result는 보존되고 이후 tool call은 실행되지 않는다. 보류된 tool 자체의 tool-result는 approval resume 경로에서 append된다.
-- 병렬 경로에서 handler/middleware가 `humanApproval` 정적 선언 없이 `HumanApprovalPendingError`를 던지는 동적 HITL은 **지원되지 않는다.** step.ts는 settle된 sibling의 tool-result는 LLM 순서대로 append하고 LLM 순서상 첫 rejection을 전파하지만, 같은 step에서 두 개 이상의 동적 approval gate가 생성되면 두 번째 이후의 gate는 orphan 상태가 된다. 동적 approval을 쓰려는 extension은 해당 tool의 `ToolDefinition.humanApproval`도 같이 선언해 pre-flight가 순차 경로로 라우팅하도록 만들어야 한다.
+- `StepResult.toolCalls`와 conversation에 기록되는 tool-result part 순서는 두 경로 모두 committed tool-call batch의 LLM 반환 순서를 따른다.
+- approval 경로에서 `HumanApprovalPendingError`는 즉시 전파되며, 보류된 tool의 tool-result는 approval resume 경로에서 append된다.
+- 하나의 assistant tool-call batch에 대한 tool-result는 하나의 `role="tool"` 메시지에 모아 append한다. 같은 assistant batch의 sibling tool-result를 여러 tool 메시지로 나누면 provider adapter의 직전 메시지 인접성 계약을 깨므로 코어에서 허용하지 않는다.
+- 병렬 경로에서 handler/middleware가 `humanApproval` 정적 선언 없이 `HumanApprovalPendingError`를 던지는 동적 HITL은 **지원되지 않는다.** step.ts는 settle된 sibling의 tool-result는 LLM 순서대로 단일 tool 메시지에 append하고 LLM 순서상 첫 rejection을 전파하지만, 같은 step에서 두 개 이상의 동적 approval gate가 생성되면 두 번째 이후의 gate는 orphan 상태가 된다. 동적 approval을 쓰려는 extension은 해당 tool의 `ToolDefinition.humanApproval`도 같이 선언해 pre-flight가 approval 경로로 라우팅하도록 만들어야 한다.
 
 ### EXEC-CONST-004 - 스트리밍은 관찰용 부가기능이다
 
@@ -182,8 +183,9 @@ interface LlmClient {
 
 - Given extension/tool 없이 model만 선언된 agent, When Turn을 실행하면, Then 사용자 메시지 1개만 LLM 입력으로 전달된다.
 - Given LLM이 tool call을 반환하면, When Step을 실행하면, Then tool 검증/실행 후 tool result가 conversation에 `appendMessage`로 기록되고 다음 Step으로 진행한다.
-- Given LLM이 같은 Step에서 N개의 tool call을 반환하고 어느 tool도 `humanApproval`을 선언하지 않으면, When Step을 실행하면, Then tool handler들은 병렬로 호출되고 `StepResult.toolCalls`와 tool-result `appendMessage` 순서는 LLM이 반환한 순서를 따른다.
-- Given LLM이 같은 Step에서 N개의 tool call을 반환하고 그 중 하나라도 `humanApproval`을 선언하면, When Step을 실행하면, Then tool call들은 LLM 순서대로 순차 실행되고 첫 approval-요구 tool에서 `HumanApprovalPendingError`가 즉시 전파된다.
+- Given LLM이 같은 Step에서 N개의 tool call을 반환하고 어느 tool도 `humanApproval`을 선언하지 않으면, When Step을 실행하면, Then tool handler들은 병렬로 호출되고 `StepResult.toolCalls`와 단일 tool-result 메시지 안의 parts 순서는 LLM이 반환한 순서를 따른다.
+- Given LLM이 같은 Step에서 N개의 tool call을 반환하고 그 중 하나라도 실제로 Human Approval gate를 열 수 있으면, When Step을 실행하면, Then LLM 순서상 첫 approval-요구 tool call만 assistant 메시지에 기록되고 suppressed sibling tool call은 `step.toolCallsSuppressed` 이벤트로 노출되며 `HumanApprovalPendingError`가 즉시 전파된다.
+- Given `humanApproval` 선언 tool call이 store/schema 조건 때문에 gate를 열 수 없을 때, When 같은 Step의 sibling tool call이 함께 실행되면, Then sibling tool call은 suppress되지 않고 invalid approval result와 함께 단일 tool message에 기록된다.
 - Given `streamChat()`이 구현된 client, When Step을 실행하면, Then `chat()` 대신 `streamChat()`을 사용하고 delta 이벤트를 발행한다.
 - Given abortConversation이 실행 중인 Turn에 호출되면, When 다음 abort 체크 시점에 도달하면, Then Turn은 `aborted`로 종료된다.
 - Given `turn.start` listener가 현재 conversation에 `abortConversation()`을 호출하면, When Turn이 다음 abort 체크에 도달하면, Then 현재 Turn은 `aborted`로 종료된다.

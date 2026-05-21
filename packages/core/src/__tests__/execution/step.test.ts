@@ -15,6 +15,7 @@ import type {
   Message,
   MessageEvent,
   JsonObject,
+  EventPayload,
 } from "@goondan/openharness-types";
 
 // -----------------------------------------------------------------------
@@ -386,8 +387,16 @@ describe("executeStep", () => {
     );
 
     const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
-    expect(toolMessages).toHaveLength(2);
-    expect(toolMessages[1].data.content).toEqual([
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].data.content).toEqual([
+      expect.objectContaining({
+        type: "tool-result",
+        toolCallId: "call-valid",
+        output: expect.objectContaining({
+          type: "text",
+          value: "valid result",
+        }),
+      }),
       expect.objectContaining({
         type: "tool-result",
         toolCallId: "call-malformed",
@@ -615,9 +624,11 @@ describe("executeStep", () => {
     );
   });
 
-  // Test: Multiple tool calls in one step execute in parallel,
-  // but result + appendMessage order follows the LLM-returned order.
-  it("multiple tool calls in one step execute in parallel (EXEC-CONST-003)", async () => {
+  // Test: Multiple tool calls in one step execute in parallel, but the model
+  // history must contain exactly one tool message immediately after the
+  // assistant tool-call batch. Anthropic rejects later split tool-result
+  // messages because their previous message is no longer the tool_use message.
+  it("multiple tool calls in one step append a single tool message with ordered results (EXEC-CONST-003)", async () => {
     const startOrder: string[] = [];
     let concurrentCount = 0;
     let maxConcurrent = 0;
@@ -664,14 +675,14 @@ describe("executeStep", () => {
       "call-3",
     ]);
 
-    // tool-result messages are appended in LLM-returned order.
+    // tool-result parts are appended in one tool message in LLM-returned order.
     const toolMessages = ctx.conversation.messages.filter(
       (m: Message) => m.data.role === "tool",
     );
-    const appendedToolCallIds = toolMessages.map((m) => {
-      const content = m.data.content as Array<{ toolCallId: string }>;
-      return content[0]?.toolCallId;
-    });
+    expect(toolMessages).toHaveLength(1);
+    const appendedToolCallIds = (toolMessages[0].data.content as Array<{ toolCallId: string }>).map(
+      (part) => part.toolCallId,
+    );
     expect(appendedToolCallIds).toEqual(["call-1", "call-2", "call-3"]);
   });
 
@@ -712,18 +723,18 @@ describe("executeStep", () => {
   });
 
   // EXEC-CONST-003: When ANY tool in the batch declares humanApproval, the step
-  // falls back to sequential execution. Non-approval siblings before the pending
-  // tool still have their results appended; the first approval-requiring tool
-  // throws HumanApprovalPendingError immediately (no slow-sibling delay), and
-  // tools after it never run.
-  it("HITL-declared tool in batch → sequential fallback, siblings before pending get appended", async () => {
+  // commits only the first approval-requiring tool call. Siblings are not written
+  // to conversation history because the approval result is appended later by
+  // resume, and split same-batch tool-result messages violate provider contracts.
+  it("HITL-declared tool in batch → only first approval tool call is committed", async () => {
     const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
     const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
 
     const toolRegistry = new ToolRegistry();
     toolRegistry.register(makeTool("ok_before", okHandlerBefore));
     const approvalTool: ReturnType<typeof makeTool> = {
-      ...makeTool("needs_approval", vi.fn(async () => ({ type: "text" as const, text: "should not run" }))),
+      ...makeTool("needs_approval", approvalHandler),
       humanApproval: { prompt: "approve please" },
     };
     toolRegistry.register(approvalTool);
@@ -739,10 +750,12 @@ describe("executeStep", () => {
 
     const humanApprovalStore = new InMemoryHumanApprovalStore();
     const ctx = makeStepContext();
+    const suppressedEvents: EventPayload[] = [];
     const deps = {
       ...makeDeps({ llmClient, toolRegistry }),
       humanApprovalStore,
     };
+    deps.eventBus.on("step.toolCallsSuppressed", (event) => suppressedEvents.push(event));
 
     let caught: unknown;
     try {
@@ -751,18 +764,101 @@ describe("executeStep", () => {
       caught = err;
     }
 
-    // First (in LLM order) approval-requiring tool throws; trailing siblings never ran.
+    // The first approval-requiring tool throws; sibling calls are intentionally
+    // left uncommitted so resume can append exactly one matching tool result.
     expect(caught).toBeInstanceOf(HumanApprovalPendingError);
-    expect(okHandlerBefore).toHaveBeenCalledOnce();
+    expect(okHandlerBefore).not.toHaveBeenCalled();
+    expect(approvalHandler).not.toHaveBeenCalled();
     expect(okHandlerAfter).not.toHaveBeenCalled();
+    expect(suppressedEvents).toEqual([
+      expect.objectContaining({
+        type: "step.toolCallsSuppressed",
+        reason: "humanApprovalBarrier",
+        committedToolCallId: "call-approval",
+        suppressedToolCalls: [
+          { toolCallId: "call-before", toolName: "ok_before" },
+          { toolCallId: "call-after", toolName: "ok_after" },
+        ],
+      }),
+    ]);
 
-    // ok_before's tool-result is appended; the approval tool's result is added
-    // by the resume flow, not here.
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(assistantContent).toHaveLength(1);
+    expect(assistantContent[0].toolCallId).toBe("call-approval");
+
+    // The approval tool's result is added by the resume flow, not here.
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(0);
+
+    const tasks = await humanApprovalStore.listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].toolCallId).toBe("call-approval");
+  });
+
+  it("HITL-declared tool that cannot pend preserves sibling tool calls", async () => {
+    const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
+    const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("ok_before", okHandlerBefore));
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+    toolRegistry.register(makeTool("ok_after", okHandlerAfter));
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-before", toolName: "ok_before", args: { value: "a" } },
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: 123 } },
+        { toolCallId: "call-after", toolName: "ok_after", args: { value: "c" } },
+      ],
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const suppressedEvents: EventPayload[] = [];
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry }),
+      humanApprovalStore,
+    };
+    deps.eventBus.on("step.toolCallsSuppressed", (event) => suppressedEvents.push(event));
+
+    const result = await executeStep(ctx, deps);
+
+    expect(okHandlerBefore).toHaveBeenCalledOnce();
+    expect(approvalHandler).not.toHaveBeenCalled();
+    expect(okHandlerAfter).toHaveBeenCalledOnce();
+    expect(suppressedEvents).toEqual([]);
+    expect(result.toolCalls.map((tc) => tc.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+    expect(result.toolCalls[1].result).toEqual({
+      type: "error",
+      error: expect.stringContaining("Invalid arguments:"),
+    });
+
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+
     const toolMessages = ctx.conversation.messages.filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(1);
-    const content = toolMessages[0].data.content as Array<{ toolCallId: string }>;
-    expect(content[0].toolCallId).toBe("call-before");
+    const toolContent = toolMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(toolContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
+
+    const tasks = await humanApprovalStore.listTasks();
+    expect(tasks).toHaveLength(0);
   });
 });
