@@ -61,6 +61,35 @@ export interface HumanApprovalConfig {
   resumeLeaseMs?: number;
 }
 
+export type ConversationTurnCoordinatorStatus = "active" | "inactive" | "unknown";
+export type ConversationTurnCoordinatorRejectReason = Exclude<ConversationTurnCoordinatorStatus, "inactive">;
+export type ConversationTurnStartPurpose = "start" | "resume" | "continuation";
+
+export interface ConversationTurnCoordinatorAcquireInput {
+  agentName: string;
+  conversationId: string;
+  turnId: string;
+  purpose: ConversationTurnStartPurpose;
+}
+
+export type ConversationTurnCoordinatorAcquireResult =
+  | { acquired: true; fenceToken: string }
+  | { acquired: false; reason: ConversationTurnCoordinatorRejectReason };
+
+export interface ConversationTurnCoordinator {
+  getStatus(input: {
+    agentName: string;
+    conversationId: string;
+  }): Promise<ConversationTurnCoordinatorStatus>;
+  acquire(input: ConversationTurnCoordinatorAcquireInput): Promise<ConversationTurnCoordinatorAcquireResult>;
+  release(input: {
+    agentName: string;
+    conversationId: string;
+    turnId: string;
+    fenceToken: string;
+  }): Promise<void>;
+}
+
 // -----------------------------------------------------------------------
 // Top-level harness config
 // -----------------------------------------------------------------------
@@ -70,6 +99,7 @@ export interface HarnessConfig {
   connections?: Record<string, ConnectionConfig>;
   durableInbound?: DurableInboundConfig;
   humanApproval?: HumanApprovalConfig;
+  conversationTurnCoordinator?: ConversationTurnCoordinator;
 }
 
 // -----------------------------------------------------------------------

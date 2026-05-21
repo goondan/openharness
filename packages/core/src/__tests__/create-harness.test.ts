@@ -39,6 +39,29 @@ function minimalConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
   };
 }
 
+function passthroughConnector() {
+  return {
+    name: "passthrough",
+    normalize: async () => {
+      throw new Error("dispatch tests bypass normalize");
+    },
+  };
+}
+
+function makeTestEnvelope(conversationId: string): InboundEnvelope {
+  return {
+    name: "test.message",
+    conversationId,
+    content: [{ type: "text", text: "hello" }],
+    properties: { id: `msg:${conversationId}` },
+    source: {
+      connector: "test",
+      connectionName: "test",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+  };
+}
+
 // We need to mock createLlmClient so we don't need real API clients
 vi.mock("../models/index.js", () => ({
   createLlmClient: vi.fn(() => mockLlmClient()),
@@ -105,6 +128,107 @@ describe("createHarness", () => {
     );
     expect(item.idempotencyKey).not.toContain("payload-");
     expect(item.idempotencyKey.length).toBeLessThan(128);
+
+    await runtime.close();
+  });
+
+  it("returns leaseConflict instead of starting an ingress turn when the coordinator reports an active owner", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "active" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "active" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-active"),
+    });
+
+    expect(result.disposition).toBe("leaseConflict");
+    expect(result.turnId).toBeUndefined();
+    expect(coordinator.acquire).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-active",
+      turnId: expect.any(String),
+      purpose: "start",
+    });
+    expect(coordinator.release).not.toHaveBeenCalled();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("returns leaseUnknown instead of starting an ingress turn when the coordinator cannot verify ownership", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "unknown" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "unknown" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-unknown"),
+    });
+
+    expect(result.disposition).toBe("leaseUnknown");
+    expect(result.turnId).toBeUndefined();
+    expect(coordinator.release).not.toHaveBeenCalled();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("releases the coordinator fence after an accepted turn finishes", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-1" })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    const result = await runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-release",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-release",
+      turnId: result.turnId,
+      fenceToken: "fence-1",
+    });
 
     await runtime.close();
   });

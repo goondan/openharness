@@ -64,7 +64,9 @@ export type IngressDisposition =
   | "delivered"
   | "blocked"
   | "duplicate"
-  | "steered";
+  | "steered"
+  | "leaseConflict"
+  | "leaseUnknown";
 
 export type ConversationBlockerType = "humanApproval" | "operatorHold";
 
