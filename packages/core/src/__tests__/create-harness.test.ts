@@ -24,6 +24,16 @@ function mockLlmClient(text = "Hello from mock"): LlmClient {
   };
 }
 
+function createManualDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -36,6 +46,29 @@ function minimalConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
       },
     },
     ...overrides,
+  };
+}
+
+function passthroughConnector() {
+  return {
+    name: "passthrough",
+    normalize: async () => {
+      throw new Error("dispatch tests bypass normalize");
+    },
+  };
+}
+
+function makeTestEnvelope(conversationId: string): InboundEnvelope {
+  return {
+    name: "test.message",
+    conversationId,
+    content: [{ type: "text", text: "hello" }],
+    properties: { id: `msg:${conversationId}` },
+    source: {
+      connector: "test",
+      connectionName: "test",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
   };
 }
 
@@ -105,6 +138,317 @@ describe("createHarness", () => {
     );
     expect(item.idempotencyKey).not.toContain("payload-");
     expect(item.idempotencyKey.length).toBeLessThan(128);
+
+    await runtime.close();
+  });
+
+  it("returns leaseConflict instead of starting an ingress turn when the coordinator reports an active owner", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "active" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "active" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-active"),
+    });
+
+    expect(result.disposition).toBe("leaseConflict");
+    expect(result.turnId).toBeUndefined();
+    expect(coordinator.acquire).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-active",
+      turnId: expect.any(String),
+      purpose: "start",
+    });
+    expect(coordinator.release).not.toHaveBeenCalled();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("returns leaseUnknown instead of starting an ingress turn when the coordinator cannot verify ownership", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "unknown" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "unknown" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-unknown"),
+    });
+
+    expect(result.disposition).toBe("leaseUnknown");
+    expect(result.turnId).toBeUndefined();
+    expect(coordinator.release).not.toHaveBeenCalled();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("reserves the local conversation slot before awaiting turn admission", async () => {
+    const releaseChat = createManualDeferred<void>();
+    const llmClient: LlmClient = {
+      chat: vi.fn(async () => {
+        await releaseChat.promise;
+        return { text: "only one turn", toolCalls: [] } satisfies LlmResponse;
+      }),
+    };
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const runtime = await createHarness(minimalConfig());
+
+    const first = runtime.processTurn("default", "first", {
+      conversationId: "conv-local-admission-race",
+    });
+    const second = await runtime.processTurn("default", "second", {
+      conversationId: "conv-local-admission-race",
+    });
+
+    expect(second.status).toBe("error");
+    expect(second.error?.message).toContain("Conversation turn start rejected: active");
+    expect(llmClient.chat).toHaveBeenCalledTimes(1);
+
+    releaseChat.resolve();
+    const firstResult = await first;
+    expect(firstResult.status).toBe("completed");
+    expect(llmClient.chat).toHaveBeenCalledTimes(1);
+
+    await runtime.close();
+  });
+
+  it("keeps durable ingress queued when the coordinator rejects turn start after append", async () => {
+    const llmClient = mockLlmClient("queued later");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const inboundStore = createInMemoryDurableInboundStore();
+    let ownerActive = true;
+    const coordinator = {
+      getStatus: vi.fn(async () => (ownerActive ? "active" as const : "inactive" as const)),
+      acquire: vi.fn(async () =>
+        ownerActive
+          ? { acquired: false as const, reason: "active" as const }
+          : { acquired: true as const, fenceToken: "queued-fence" },
+      ),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      durableInbound: {
+        enabled: true,
+        store: inboundStore,
+      },
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-queued"),
+    });
+
+    expect(result.disposition).toBe("queued");
+    expect(result.turnId).toBeUndefined();
+    expect(result.inboundItemId).toBeDefined();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+
+    const [queued] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+    });
+    expect(queued.status).toBe("pending");
+
+    ownerActive = false;
+    await runtime.control.retryInboundItem?.({ id: queued.id });
+    await vi.waitFor(() => expect(llmClient.chat).toHaveBeenCalledTimes(1));
+
+    const [consumed] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+    });
+    expect(consumed.status).toBe("consumed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-queued",
+      turnId: expect.any(String),
+      fenceToken: "queued-fence",
+    });
+
+    await runtime.close();
+  });
+
+  it("keeps retried durable ingress pending when the coordinator still rejects scheduler start", async () => {
+    const llmClient = mockLlmClient("should not run");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const inboundStore = createInMemoryDurableInboundStore();
+    const coordinator = {
+      getStatus: vi.fn(async () => "active" as const),
+      acquire: vi.fn(async () => ({ acquired: false as const, reason: "active" as const })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+      durableInbound: {
+        enabled: true,
+        store: inboundStore,
+      },
+      connections: {
+        test: {
+          connector: passthroughConnector(),
+          rules: [{ match: { event: "test.message" }, agent: "default" }],
+        },
+      },
+    });
+
+    const result = await runtime.ingress.dispatch({
+      connectionName: "test",
+      envelope: makeTestEnvelope("conv-coordinator-retry-pending"),
+    });
+    expect(result.disposition).toBe("queued");
+
+    await runtime.control.retryInboundItem?.({ id: result.inboundItemId! });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [item] = await inboundStore.listInboundItems({
+      agentName: "default",
+      conversationId: "conv-coordinator-retry-pending",
+    });
+    expect(item.status).toBe("pending");
+    expect(item.turnId).toBeUndefined();
+    expect(llmClient.chat).not.toHaveBeenCalled();
+    expect(coordinator.release).not.toHaveBeenCalled();
+
+    await runtime.close();
+  });
+
+  it("releases the coordinator fence after an accepted turn finishes", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-1" })),
+      release: vi.fn(async () => undefined),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    const result = await runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-release",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-release",
+      turnId: result.turnId,
+      fenceToken: "fence-1",
+    });
+
+    await runtime.close();
+  });
+
+  it("waits for coordinator fence release before resolving a completed turn", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const releaseEntered = createManualDeferred<void>();
+    const releaseGate = createManualDeferred<void>();
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-delayed-release" })),
+      release: vi.fn(async () => {
+        releaseEntered.resolve();
+        await releaseGate.promise;
+      }),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    const turnPromise = runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-delayed-release",
+    });
+    let settled = false;
+    void turnPromise.finally(() => {
+      settled = true;
+    });
+
+    await releaseEntered.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releaseGate.resolve();
+    const result = await turnPromise;
+    expect(result.status).toBe("completed");
+    expect(settled).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("rejects a completed turn when coordinator fence release fails", async () => {
+    const llmClient = mockLlmClient("coordinated answer");
+    const { createLlmClient } = await import("../models/index.js");
+    vi.mocked(createLlmClient).mockImplementation(() => llmClient);
+    const coordinator = {
+      getStatus: vi.fn(async () => "inactive" as const),
+      acquire: vi.fn(async () => ({ acquired: true as const, fenceToken: "fence-release-fails" })),
+      release: vi.fn(async () => {
+        throw new Error("coordinator release failed");
+      }),
+    };
+    const runtime = await createHarness({
+      ...minimalConfig(),
+      conversationTurnCoordinator: coordinator,
+    });
+
+    await expect(runtime.processTurn("default", "hello", {
+      conversationId: "conv-coordinator-release-fails",
+    })).rejects.toThrow("coordinator release failed");
+    expect(coordinator.release).toHaveBeenCalledWith({
+      agentName: "default",
+      conversationId: "conv-coordinator-release-fails",
+      turnId: expect.any(String),
+      fenceToken: "fence-release-fails",
+    });
 
     await runtime.close();
   });

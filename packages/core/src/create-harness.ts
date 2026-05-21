@@ -372,21 +372,26 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           }
         }
 
-        runtimeRef
-          .dispatchTurn(agentName, envelope, { conversationId, turnId }, {
-            item: appended.item,
-            commitRef: inboundUserMessageCommitRef(appended.item.id),
-          })
-          .catch((err) => {
-            ingressEventBus.emit("turn.error", {
-              type: "turn.error",
-              turnId,
-              agentName,
-              conversationId,
-              status: "error",
-              error: err instanceof Error ? err : new Error(String(err)),
-            });
+        const started = await runtimeRef.startTurn(agentName, envelope, { conversationId, turnId }, {
+          item: appended.item,
+          commitRef: inboundUserMessageCommitRef(appended.item.id),
+        });
+        if (!started.started) {
+          return {
+            disposition: "queued" as const,
+            inboundItemId: appended.item.id,
+          };
+        }
+        started.promise.catch((err) => {
+          ingressEventBus.emit("turn.error", {
+            type: "turn.error",
+            turnId,
+            agentName,
+            conversationId,
+            status: "error",
+            error: err instanceof Error ? err : new Error(String(err)),
           });
+        });
         return { turnId, disposition: "started" as const, inboundItemId: appended.item.id };
       }
 
@@ -403,18 +408,20 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       }
 
       // Fire-and-forget: start turn asynchronously
-      runtimeRef
-        .dispatchTurn(agentName, envelope, { conversationId, turnId })
-        .catch((err) => {
-          ingressEventBus.emit("turn.error", {
-            type: "turn.error",
-            turnId,
-            agentName,
-            conversationId,
-            status: "error",
-            error: err instanceof Error ? err : new Error(String(err)),
-          });
+      const started = await runtimeRef.startTurn(agentName, envelope, { conversationId, turnId });
+      if (!started.started) {
+        return { disposition: started.disposition };
+      }
+      started.promise.catch((err) => {
+        ingressEventBus.emit("turn.error", {
+          type: "turn.error",
+          turnId,
+          agentName,
+          conversationId,
+          status: "error",
+          error: err instanceof Error ? err : new Error(String(err)),
         });
+      });
       return { turnId, disposition: "started" };
     },
   });
@@ -426,6 +433,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     durableInboundStore,
     humanApprovalStore,
     config.humanApproval?.resumeLeaseMs,
+    config.conversationTurnCoordinator,
   );
   runtimeRef = runtime;
 

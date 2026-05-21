@@ -184,6 +184,12 @@ export type {
   ConnectionConfig,
   DurableInboundConfig,
   HumanApprovalConfig,
+  ConversationTurnCoordinatorStatus,
+  ConversationTurnCoordinatorRejectReason,
+  ConversationTurnStartPurpose,
+  ConversationTurnCoordinatorAcquireInput,
+  ConversationTurnCoordinatorAcquireResult,
+  ConversationTurnCoordinator,
   HarnessConfig,
   ProcessTurnOptions,
 } from "./config.js";
