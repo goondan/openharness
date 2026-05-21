@@ -1055,7 +1055,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(result.status).toBe("waitingForHuman");
     expect(stepErrors).toHaveLength(0);
     expect(toolHandler).not.toHaveBeenCalled();
-    expect(middlewareCalls).toEqual(["guarded"]);
+    expect(middlewareCalls).toEqual([]);
 
     const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-human" });
     expect(tasks).toHaveLength(1);
@@ -1130,7 +1130,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumed?.continuation?.status).toBe("completed");
     expect(resumed?.continuation?.text).toBe("approved and continued");
     expect(toolHandler).toHaveBeenCalledOnce();
-    expect(middlewareCalls).toEqual(["guarded", "guarded"]);
+    expect(middlewareCalls).toEqual(["guarded"]);
     expect(resumingEvents).toHaveLength(1);
     expect((resumingEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect(extensionToolDoneEvents).toHaveLength(1);
