@@ -588,7 +588,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
       });
       void turnPromise.then(trackedTurn.resolve, trackedTurn.reject);
       const completionPromise = resolveAfterCleanup(trackedTurn.promise, cleanup);
-      void completionPromise.catch(() => undefined);
       return {
         started: true,
         turnId,
@@ -750,7 +749,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     };
 
     const completionPromise = resolveAfterCleanup(trackedTurn.promise, cleanup);
-    void completionPromise.catch(() => undefined);
 
     return {
       turnId,
@@ -821,7 +819,6 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
           });
           return;
         }
-        void cleanup().catch(() => undefined);
       },
     };
   }
