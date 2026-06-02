@@ -932,6 +932,43 @@ describe("executeStep", () => {
     expect(toolMessages).toHaveLength(0);
   });
 
+  it("HITL preflight preserves ToolCall middleware results when approval does not pend", async () => {
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "original" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      await next({ toolArgs: { wrong: true } });
+      return { type: "text", text: "fallback" };
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+
+    const result = await executeStep(ctx, deps);
+
+    expect(approvalHandler).not.toHaveBeenCalled();
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval).toBeNull();
+    expect(result.toolCalls[0].result).toEqual({ type: "text", text: "fallback" });
+  });
+
   it("HITL preflight treats middleware-fixed args as an approval barrier", async () => {
     const okHandler = vi.fn(async () => ({ type: "text" as const, text: "ok-result" }));
     const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));

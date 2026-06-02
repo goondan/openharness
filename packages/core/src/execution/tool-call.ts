@@ -152,10 +152,11 @@ export async function probeHumanApprovalGate(
   middlewareApplied = !!middlewareRegistry;
 
   try {
-    await chain(normalizedCtx);
+    const result = await chain(normalizedCtx);
+    await openHumanApprovalGate(finalToolArgs);
     return {
       status: "error",
-      result: await openHumanApprovalGate(finalToolArgs),
+      result,
       toolArgs: finalToolArgs,
       middlewareApplied,
     };
