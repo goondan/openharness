@@ -59,10 +59,7 @@ export async function probeHumanApprovalGate(
   let finalToolArgs = normalizedToolArgs;
   let middlewareApplied = false;
 
-  const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
-    const effectiveToolArgs = normalizeToolArgs(innerCtx.toolArgs);
-    finalToolArgs = effectiveToolArgs;
-
+  const openHumanApprovalGate = async (effectiveToolArgs: JsonObject): Promise<ToolResult> => {
     const tool = toolRegistry.get(toolName);
     if (!tool) {
       return { type: "error", error: `Tool "${toolName}" not found` };
@@ -143,14 +140,25 @@ export async function probeHumanApprovalGate(
     throw new HumanApprovalPendingError(created.approval.id);
   };
 
+  const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
+    const effectiveToolArgs = normalizeToolArgs(innerCtx.toolArgs);
+    finalToolArgs = effectiveToolArgs;
+    return await openHumanApprovalGate(effectiveToolArgs);
+  };
+
   const chain = middlewareRegistry
     ? middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler)
     : coreHandler;
   middlewareApplied = !!middlewareRegistry;
 
   try {
-    const result = await chain(normalizedCtx);
-    return { status: "error", result, toolArgs: finalToolArgs, middlewareApplied };
+    await chain(normalizedCtx);
+    return {
+      status: "error",
+      result: await openHumanApprovalGate(finalToolArgs),
+      toolArgs: finalToolArgs,
+      middlewareApplied,
+    };
   } catch (err) {
     if (isHumanApprovalPendingError(err)) {
       return { status: "pending", error: err, toolArgs: finalToolArgs };
