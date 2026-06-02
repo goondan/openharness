@@ -150,16 +150,16 @@ export async function executeStep(
         };
       }) ?? [];
 
-    const canOpenHumanApprovalBarrier = (tc: (typeof canonicalToolCalls)[number]) => {
+    const isHumanApprovalPreflightCandidate = (tc: (typeof canonicalToolCalls)[number]) => {
       if (tc.malformedResult) return false;
       if (!humanApprovalStore) return false;
       const tool = toolRegistry.get(tc.toolName);
       if (!tool?.humanApproval || tool.humanApproval.required === false) return false;
-      return toolRegistry.validate(tc.toolName, tc.args).valid;
+      return true;
     };
 
     const humanApprovalToolCallIndexes = canonicalToolCalls.flatMap((tc, index) =>
-      canOpenHumanApprovalBarrier(tc) ? [index] : []
+      isHumanApprovalPreflightCandidate(tc) ? [index] : []
     );
 
     const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
