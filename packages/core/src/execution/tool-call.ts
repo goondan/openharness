@@ -29,108 +29,139 @@ export type HumanApprovalGateProbeResult =
   | {
     status: "pending";
     error: HumanApprovalPendingError;
+    toolArgs?: ToolCallContext["toolArgs"];
   }
   | {
     status: "error";
     result: ToolResult;
+    toolArgs?: ToolCallContext["toolArgs"];
+    middlewareApplied?: boolean;
   };
 
 export async function probeHumanApprovalGate(
   ctx: ToolCallContext,
   deps: {
     toolRegistry: ToolRegistry;
+    middlewareRegistry?: MiddlewareRegistry;
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
   },
 ): Promise<HumanApprovalGateProbeResult> {
-  const { toolRegistry, eventBus, humanApprovalStore } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber } = ctx;
   const toolCallId = ctx.toolCallId;
   if (!toolCallId) {
     return { status: "error", result: { type: "error", error: `Tool "${toolName}" is missing a toolCallId` } };
   }
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
-  const tool = toolRegistry.get(toolName);
-  if (!tool) {
-    return { status: "error", result: { type: "error", error: `Tool "${toolName}" not found` } };
-  }
+  const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
+  let finalToolArgs = normalizedToolArgs;
+  let middlewareApplied = false;
 
-  const validation = toolRegistry.validate(toolName, normalizedToolArgs);
-  if (!validation.valid) {
-    return { status: "error", result: { type: "error", error: `Invalid arguments: ${validation.errors}` } };
-  }
+  const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
+    const effectiveToolArgs = normalizeToolArgs(innerCtx.toolArgs);
+    finalToolArgs = effectiveToolArgs;
 
-  const humanApproval = tool.humanApproval;
-  if (!humanApproval || humanApproval.required === false) {
-    return { status: "error", result: { type: "error", error: `Tool "${toolName}" does not require Human Approval` } };
-  }
-
-  if (!humanApprovalStore) {
-    return { status: "error", result: { type: "error", error: `Tool "${toolName}" requires a Human Approval store` } };
-  }
-
-  let created: Awaited<ReturnType<HumanApprovalReferenceStore["createApproval"]>>;
-  try {
-    created = await humanApprovalStore.createApproval({
-      id: `${turnId}:${toolCallId}:humanApproval`,
-      toolCall: {
-        turnId,
-        agentName,
-        conversationId,
-        stepNumber,
-        toolCallId,
-        toolName,
-        toolArgs: normalizedToolArgs,
-      },
-      prompt: humanApproval.prompt,
-      expectedResultSchema: humanApproval.responseSchema,
-      tasks: (humanApproval.tasks?.length
-        ? humanApproval.tasks.map((task, index) => ({
-            humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
-            taskType: task.taskType,
-            title: task.title,
-            prompt: task.prompt ?? humanApproval.prompt,
-            required: task.required,
-            responseSchema: task.responseSchema,
-          }))
-        : [{
-            humanTaskId: `${turnId}:${toolCallId}:task:1`,
-            taskType: "approval" as const,
-            prompt: humanApproval.prompt,
-            required: true,
-            responseSchema: humanApproval.responseSchema,
-          }]),
-    });
-  } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    return { status: "error", result: { type: "error", error: error.message } };
-  }
-
-  if (!created.duplicate) {
-    eventBus.emit("humanApproval.created", {
-      type: "humanApproval.created",
-      humanApprovalId: created.approval.id,
-      agentName,
-      conversationId,
-      turnId,
-      toolCallId,
-    });
-    for (const task of created.tasks) {
-      eventBus.emit("humanTask.created", {
-        type: "humanTask.created",
-        humanApprovalId: created.approval.id,
-        humanTaskId: task.id,
-        taskType: task.taskType,
-        agentName,
-        conversationId,
-      });
+    const tool = toolRegistry.get(toolName);
+    if (!tool) {
+      return { type: "error", error: `Tool "${toolName}" not found` };
     }
-  }
 
-  return {
-    status: "pending",
-    error: new HumanApprovalPendingError(created.approval.id),
+    const validation = toolRegistry.validate(toolName, effectiveToolArgs);
+    if (!validation.valid) {
+      return { type: "error", error: `Invalid arguments: ${validation.errors}` };
+    }
+
+    const humanApproval = tool.humanApproval;
+    if (!humanApproval || humanApproval.required === false) {
+      return { type: "error", error: `Tool "${toolName}" does not require Human Approval` };
+    }
+
+    if (!humanApprovalStore) {
+      return { type: "error", error: `Tool "${toolName}" requires a Human Approval store` };
+    }
+
+    let created: Awaited<ReturnType<HumanApprovalReferenceStore["createApproval"]>>;
+    try {
+      created = await humanApprovalStore.createApproval({
+        id: `${turnId}:${toolCallId}:humanApproval`,
+        toolCall: {
+          turnId,
+          agentName,
+          conversationId,
+          stepNumber,
+          toolCallId,
+          toolName,
+          toolArgs: effectiveToolArgs,
+        },
+        prompt: humanApproval.prompt,
+        expectedResultSchema: humanApproval.responseSchema,
+        tasks: (humanApproval.tasks?.length
+          ? humanApproval.tasks.map((task, index) => ({
+              humanTaskId: `${turnId}:${toolCallId}:task:${index + 1}`,
+              taskType: task.taskType,
+              title: task.title,
+              prompt: task.prompt ?? humanApproval.prompt,
+              required: task.required,
+              responseSchema: task.responseSchema,
+            }))
+          : [{
+              humanTaskId: `${turnId}:${toolCallId}:task:1`,
+              taskType: "approval" as const,
+              prompt: humanApproval.prompt,
+              required: true,
+              responseSchema: humanApproval.responseSchema,
+            }]),
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      return { type: "error", error: error.message };
+    }
+
+    if (!created.duplicate) {
+      eventBus.emit("humanApproval.created", {
+        type: "humanApproval.created",
+        humanApprovalId: created.approval.id,
+        agentName,
+        conversationId,
+        turnId,
+        toolCallId,
+      });
+      for (const task of created.tasks) {
+        eventBus.emit("humanTask.created", {
+          type: "humanTask.created",
+          humanApprovalId: created.approval.id,
+          humanTaskId: task.id,
+          taskType: task.taskType,
+          agentName,
+          conversationId,
+        });
+      }
+    }
+
+    throw new HumanApprovalPendingError(created.approval.id);
   };
+
+  const chain = middlewareRegistry
+    ? middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler)
+    : coreHandler;
+  middlewareApplied = !!middlewareRegistry;
+
+  try {
+    const result = await chain(normalizedCtx);
+    return { status: "error", result, toolArgs: finalToolArgs, middlewareApplied };
+  } catch (err) {
+    if (isHumanApprovalPendingError(err)) {
+      return { status: "pending", error: err, toolArgs: finalToolArgs };
+    }
+    const error = err instanceof Error ? err : new Error(String(err));
+    return {
+      status: "error",
+      result: { type: "error", error: error.message },
+      toolArgs: finalToolArgs,
+      middlewareApplied,
+    };
+  }
 }
 
 /**

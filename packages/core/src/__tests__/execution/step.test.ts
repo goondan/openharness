@@ -823,6 +823,41 @@ describe("executeStep", () => {
     expect(tasks[0].toolCallId).toBe("call-approval");
   });
 
+  it("HITL preflight uses ToolCall middleware override args for approval snapshots", async () => {
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "original" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { value: "rewritten" } });
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+
+    await expect(executeStep(ctx, deps)).rejects.toThrow(HumanApprovalPendingError);
+
+    expect(approvalHandler).not.toHaveBeenCalled();
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval?.toolCall.toolArgs).toEqual({ value: "rewritten" });
+  });
+
   it("HITL-declared tool that cannot pend preserves sibling tool calls", async () => {
     const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
     const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
@@ -1018,7 +1053,10 @@ describe("executeStep", () => {
     expect(firstApprovalHandler).not.toHaveBeenCalled();
     expect(secondApprovalHandler).not.toHaveBeenCalled();
     expect(okHandlerAfter).not.toHaveBeenCalled();
-    expect(toolCallMiddlewareNames).toEqual([]);
+    expect(toolCallMiddlewareNames).toEqual([
+      "needs_approval_first",
+      "needs_approval_second",
+    ]);
     expect(suppressedEvents).toEqual([
       expect.objectContaining({
         type: "step.toolCallsSuppressed",

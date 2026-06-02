@@ -11,10 +11,16 @@ import type {
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import { executeToolCall, isHumanApprovalPendingError, probeHumanApprovalGate } from "./tool-call.js";
+import {
+  executeToolCall,
+  isHumanApprovalPendingError,
+  probeHumanApprovalGate,
+  type HumanApprovalGateProbeResult,
+} from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 
 type ToolResultContentPart = Extract<ToolModelMessage["content"][number], { type: "tool-result" }>;
+type HumanApprovalGateProbeErrorResult = Extract<HumanApprovalGateProbeResult, { status: "error" }>;
 
 function toToolResultOutput(toolResult: ToolResult) {
   return toolResult.type === "text"
@@ -323,13 +329,15 @@ export async function executeStep(
 
     const executeProbedToolResult = async (
       tc: (typeof canonicalToolCalls)[number],
-      probedResult: ToolResult,
+      probeResult: HumanApprovalGateProbeErrorResult,
     ): Promise<ToolResult> => {
+      const probedResult = probeResult.result;
+      const eventArgs = probeResult.toolArgs ?? tc.args;
       const toolCallCtx: ToolCallContext = {
         ...stepCtx,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        toolArgs: tc.args,
+        toolArgs: eventArgs,
       };
 
       eventBus.emit("tool.start", {
@@ -340,16 +348,18 @@ export async function executeStep(
         stepNumber,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        args: tc.args,
+        args: eventArgs,
       });
 
-      const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
-        "toolCall",
-        async () => probedResult,
-      );
+      const runProbedResult = probeResult.middlewareApplied
+        ? async () => probedResult
+        : middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
+            "toolCall",
+            async () => probedResult,
+          );
 
       try {
-        const result = await chain(toolCallCtx);
+        const result = await runProbedResult(toolCallCtx);
         eventBus.emit("tool.done", {
           type: "tool.done",
           turnId,
@@ -358,7 +368,7 @@ export async function executeStep(
           stepNumber,
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
-          args: tc.args,
+          args: eventArgs,
           result,
         });
         return result;
@@ -375,7 +385,7 @@ export async function executeStep(
           stepNumber,
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
-          args: tc.args,
+          args: eventArgs,
           error,
         });
         return { type: "error", error: error.message };
@@ -406,11 +416,11 @@ export async function executeStep(
     if (canonicalToolCalls.length > 0) {
       if (humanApprovalToolCallIndexes.length > 0) {
         // Probe declared approval candidates in LLM order before committing the
-        // assistant batch. The probe only attempts approval-gate creation; it
-        // deliberately does not run toolCall middleware or the tool handler,
-        // because any candidate may later become a suppressed sibling if another
-        // approval call reaches pending state.
-        const probedApprovalResults = new Map<number, ToolResult>();
+        // assistant batch. The probe runs toolCall middleware so pre-tool argument
+        // rewrites are reflected in approval snapshots, but it still does not run
+        // the tool handler because any candidate may later become a suppressed
+        // sibling if another approval call reaches pending state.
+        const probedApprovalResults = new Map<number, HumanApprovalGateProbeErrorResult>();
         for (const approvalIndex of humanApprovalToolCallIndexes) {
           const approvalToolCall = canonicalToolCalls[approvalIndex];
           const probeResult = await probeHumanApprovalGate(
@@ -422,6 +432,7 @@ export async function executeStep(
             },
             {
               toolRegistry,
+              middlewareRegistry,
               eventBus,
               humanApprovalStore,
             },
@@ -432,7 +443,7 @@ export async function executeStep(
             throw probeResult.error;
           }
 
-          probedApprovalResults.set(approvalIndex, probeResult.result);
+          probedApprovalResults.set(approvalIndex, probeResult);
         }
 
         appendAllAssistantToolCalls();
