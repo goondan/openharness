@@ -1145,6 +1145,84 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("does not reapply tool arg overrides when resuming an approved tool", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const handlerArgs: unknown[] = [];
+    const toolMiddlewareExtension: Extension = {
+      name: "double-amount-middleware",
+      register(api) {
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName !== "guarded") {
+            return next();
+          }
+          const amount = Number(ctx.toolArgs.amount);
+          return next({ toolArgs: { amount: amount * 2 } });
+        });
+      },
+    };
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: {
+        type: "object",
+        properties: { amount: { type: "number" } },
+        required: ["amount"],
+        additionalProperties: false,
+      },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: async (args) => {
+        handlerArgs.push(args);
+        return { type: "text" as const, text: "charged" };
+      },
+    };
+    currentClient = mockClient([
+      {
+        text: "need approval",
+        toolCalls: [{ toolCallId: "call-double", toolName: "guarded", args: { amount: 5 } }],
+      },
+      {
+        text: "continued",
+        toolCalls: [],
+      },
+    ]);
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          extensions: [toolMiddlewareExtension],
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-double",
+      idempotencyKey: "direct-double-1",
+    });
+
+    expect(result.status).toBe("waitingForHuman");
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-double" });
+    expect(tasks).toHaveLength(1);
+    const approval = await humanApprovalStore.getApproval(tasks[0].humanApprovalId);
+    expect(approval?.toolCall.toolArgs).toEqual({ amount: 10 });
+
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-double",
+    });
+    const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
+
+    expect(resumed?.status).toBe("completed");
+    expect(handlerArgs).toEqual([{ amount: 10 }]);
+
+    await runtime.close();
+  });
+
   it("reblocks delivered steering items when a turn pauses for Human Approval", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();

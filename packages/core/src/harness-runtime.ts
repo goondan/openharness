@@ -1430,6 +1430,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       eventBus: agentDeps.eventBus,
                       humanApprovalStore: this._humanApprovalStore,
                       skipHumanApproval: true,
+                      lockedToolArgs: finalArgs,
                     });
                     throwIfResumeAborted();
                   }

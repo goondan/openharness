@@ -184,6 +184,7 @@ export async function executeToolCall(
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
     skipHumanApproval?: boolean;
+    lockedToolArgs?: JsonObject;
     onToolArgsResolved?: (toolArgs: JsonObject) => void;
   }
 ): Promise<ToolResult> {
@@ -193,10 +194,12 @@ export async function executeToolCall(
     eventBus,
     humanApprovalStore,
     skipHumanApproval,
+    lockedToolArgs,
     onToolArgsResolved,
   } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
+  const normalizedLockedToolArgs = lockedToolArgs ? normalizeToolArgs(lockedToolArgs) : undefined;
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
   let finalToolArgs = normalizedToolArgs;
 
@@ -214,7 +217,7 @@ export async function executeToolCall(
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
   const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
-    const effectiveToolArgs = normalizeToolArgs(innerCtx.toolArgs);
+    const effectiveToolArgs = normalizedLockedToolArgs ?? normalizeToolArgs(innerCtx.toolArgs);
     finalToolArgs = effectiveToolArgs;
 
     // Check tool exists
