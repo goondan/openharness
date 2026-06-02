@@ -8,6 +8,7 @@ import type {
   HumanApprovalReferenceStore,
   ToolCallContext,
   JsonObject,
+  NonSystemMessage,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -162,7 +163,8 @@ export async function executeStep(
       isHumanApprovalPreflightCandidate(tc) ? [index] : []
     );
 
-    const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+    const assistantMessageId = `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`;
+    const buildAssistantMessage = (committedToolCalls: typeof canonicalToolCalls): NonSystemMessage | undefined => {
       const committedAssistantContent = [...assistantContent];
       for (const tc of committedToolCalls) {
         committedAssistantContent.push({
@@ -173,25 +175,42 @@ export async function executeStep(
         });
       }
 
-      // Append assistant message (even if no content parts, e.g. empty response)
-      // Only append if there's something to say
-      if (committedAssistantContent.length > 0) {
+      if (committedAssistantContent.length === 0) {
+        return undefined;
+      }
+
+      return {
+        id: assistantMessageId,
+        data: {
+          role: "assistant",
+          content: committedAssistantContent,
+        },
+        metadata: {
+          __createdBy: "core",
+        },
+      };
+    };
+
+    const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+      const message = buildAssistantMessage(committedToolCalls);
+      if (message) {
         stepCtx.conversation.emit({
           type: "appendMessage",
-          message: {
-            id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
-            data: {
-              role: "assistant",
-              content: committedAssistantContent,
-            },
-            metadata: {
-              __createdBy: "core",
-            },
-          },
+          message,
         });
       }
     };
 
+    const replaceAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+      const message = buildAssistantMessage(committedToolCalls);
+      if (message) {
+        stepCtx.conversation.emit({
+          type: "replace",
+          messageId: assistantMessageId,
+          message,
+        });
+      }
+    };
     const emitSuppressedToolCalls = (committedToolCall: (typeof canonicalToolCalls)[number]) => {
       const suppressedToolCalls = canonicalToolCalls.filter((tc) => tc.toolCallId !== committedToolCall.toolCallId);
       if (suppressedToolCalls.length === 0) {
@@ -407,6 +426,11 @@ export async function executeStep(
       toolCalls: typeof canonicalToolCalls,
       settled: readonly PromiseSettledResult<ExecutedToolCallResult>[],
     ) => {
+      replaceAssistantMessage(toolCalls.map((tc, index) => {
+        const entry = settled[index];
+        return entry?.status === "fulfilled" ? { ...tc, args: entry.value.args } : tc;
+      }));
+
       // Append fulfilled results in LLM-returned order.
       for (let i = 0; i < toolCalls.length; i++) {
         const entry = settled[i];

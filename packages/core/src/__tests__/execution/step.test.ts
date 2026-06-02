@@ -221,6 +221,12 @@ describe("executeStep", () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0]).toEqual({ value: "rewritten" });
     expect(result.toolCalls[0].args).toEqual({ value: "rewritten" });
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ input?: unknown }>;
+    expect(assistantContent[0].input).toEqual({ value: "rewritten" });
   });
 
   // Test 3: Step middleware can modify conversation before next()
