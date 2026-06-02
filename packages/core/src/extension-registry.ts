@@ -68,7 +68,7 @@ export function createExtensionApi(deps: ExtensionRegistryDeps): ExtensionApi {
       ): void {
         middlewareRegistry.register(
           level,
-          handler as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+          handler as (ctx: unknown, next: (override?: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>,
           options
         );
       },

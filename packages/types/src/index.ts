@@ -108,6 +108,7 @@ export type {
   TurnContext,
   StepContext,
   ToolCallContext,
+  ToolCallNextOverride,
   ToolCallSummary,
   LlmUsage,
   StepSummary,

@@ -183,6 +183,35 @@ describe("buildChain", () => {
     expect(result).toEqual({ result: 15 });
   });
 
+  it("middleware can pass a partial context override to downstream handlers", async () => {
+    const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value });
+    const originalCtx = { value: 5 };
+    const innerObservedValues: number[] = [];
+
+    const outer = {
+      handler: async (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>): Promise<Res> => {
+        return next({ value: ctx.value + 10 });
+      },
+      priority: 50,
+      order: 0,
+    };
+    const inner = {
+      handler: async (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>): Promise<Res> => {
+        innerObservedValues.push(ctx.value);
+        return next();
+      },
+      priority: 100,
+      order: 1,
+    };
+
+    const chain = buildChain([outer, inner], core);
+    const result = await chain(originalCtx);
+
+    expect(innerObservedValues).toEqual([15]);
+    expect(result).toEqual({ result: 15 });
+    expect(originalCtx).toEqual({ value: 5 });
+  });
+
   // Test 8: Middleware can modify result after next()
   it("middleware can modify the result after next() returns", async () => {
     const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value });

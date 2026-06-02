@@ -158,6 +158,7 @@ export async function executeToolCall(
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
+  let finalToolArgs = normalizedToolArgs;
 
   // 1. Emit tool.start before building / running chain
   eventBus.emit("tool.start", {
@@ -172,7 +173,10 @@ export async function executeToolCall(
   });
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
-  const coreHandler = async (_ctx: ToolCallContext): Promise<ToolResult> => {
+  const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
+    const effectiveToolArgs = normalizeToolArgs(innerCtx.toolArgs);
+    finalToolArgs = effectiveToolArgs;
+
     // Check tool exists
     const tool = toolRegistry.get(toolName);
     if (!tool) {
@@ -180,7 +184,7 @@ export async function executeToolCall(
     }
 
     // Validate args via JSON Schema
-    const validation = toolRegistry.validate(toolName, normalizedToolArgs);
+    const validation = toolRegistry.validate(toolName, effectiveToolArgs);
     if (!validation.valid) {
       return { type: "error", error: `Invalid arguments: ${validation.errors}` };
     }
@@ -200,7 +204,7 @@ export async function executeToolCall(
           stepNumber,
           toolCallId,
           toolName,
-          toolArgs: normalizedToolArgs,
+          toolArgs: effectiveToolArgs,
         },
         prompt: humanApproval.prompt,
         expectedResultSchema: humanApproval.responseSchema,
@@ -254,7 +258,7 @@ export async function executeToolCall(
     };
 
     // Call the tool handler — errors propagate up
-    return await tool.handler(normalizedToolArgs, toolContext);
+    return await tool.handler(effectiveToolArgs, toolContext);
   };
 
   // 3. Build the full middleware chain
@@ -273,7 +277,7 @@ export async function executeToolCall(
       stepNumber,
       toolCallId,
       toolName,
-      args: normalizedToolArgs,
+      args: finalToolArgs,
       result,
     });
 
@@ -293,7 +297,7 @@ export async function executeToolCall(
       stepNumber,
       toolCallId,
       toolName,
-      args: normalizedToolArgs,
+      args: finalToolArgs,
       error,
     });
 

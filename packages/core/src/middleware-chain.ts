@@ -6,7 +6,7 @@
  */
 
 export interface MiddlewareEntry<Ctx, Res> {
-  handler: (ctx: Ctx, next: () => Promise<Res>) => Promise<Res>;
+  handler: (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>) => Promise<Res>;
   priority: number;
   order: number;
 }
@@ -38,7 +38,10 @@ export function buildChain<Ctx, Res>(
   for (let i = sorted.length - 1; i >= 0; i--) {
     const mw = sorted[i];
     const next = inner; // capture current inner before overwriting
-    inner = (ctx: Ctx) => mw.handler(ctx, () => next(ctx));
+    inner = (ctx: Ctx) => mw.handler(ctx, (override?: Partial<Ctx>) => {
+      const nextCtx = override ? { ...ctx, ...override } : ctx;
+      return next(nextCtx as Ctx);
+    });
   }
 
   return inner;
@@ -62,7 +65,7 @@ export class MiddlewareRegistry {
    */
   register(
     level: string,
-    handler: (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+    handler: (ctx: unknown, next: (override?: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>,
     options?: { priority?: number }
   ): void {
     const priority = options?.priority ?? 100;

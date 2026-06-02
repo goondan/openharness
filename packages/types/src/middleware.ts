@@ -158,9 +158,13 @@ export type StepMiddleware = (
   next: () => Promise<StepResult>,
 ) => Promise<StepResult>;
 
+export interface ToolCallNextOverride {
+  toolArgs?: JsonObject;
+}
+
 export type ToolCallMiddleware = (
   ctx: ToolCallContext,
-  next: () => Promise<ToolResult>,
+  next: (override?: ToolCallNextOverride) => Promise<ToolResult>,
 ) => Promise<ToolResult>;
 
 // Ingress middleware
