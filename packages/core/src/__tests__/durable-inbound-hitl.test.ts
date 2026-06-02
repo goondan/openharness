@@ -1161,6 +1161,12 @@ describe("durable inbound and Human Approval integration", () => {
           return next({ toolArgs: { amount: amount * 2 } });
         });
         api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
+            (ctx.toolArgs as { amount: number }).amount = 99;
+          }
+          return next();
+        });
+        api.pipeline.register("toolCall", async (ctx, next) => {
           if (ctx.toolName === "guarded") {
             observedMiddlewareArgs.push(ctx.toolArgs);
           }

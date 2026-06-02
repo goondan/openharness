@@ -20,6 +20,10 @@ export class HumanApprovalPendingError extends Error {
   }
 }
 
+function cloneToolArgs(toolArgs: JsonObject): JsonObject {
+  return structuredClone(toolArgs) as JsonObject;
+}
+
 export function isHumanApprovalPendingError(error: unknown): error is HumanApprovalPendingError {
   return error instanceof HumanApprovalPendingError || (
     error instanceof Error && error.name === "HumanApprovalPendingError"
@@ -208,8 +212,8 @@ export async function executeToolCall(
   } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
-  const normalizedLockedToolArgs = lockedToolArgs ? normalizeToolArgs(lockedToolArgs) : undefined;
-  const startingToolArgs = normalizedLockedToolArgs ?? normalizedToolArgs;
+  const lockedToolArgsSnapshot = lockedToolArgs ? cloneToolArgs(normalizeToolArgs(lockedToolArgs)) : undefined;
+  const startingToolArgs = lockedToolArgsSnapshot ? cloneToolArgs(lockedToolArgsSnapshot) : normalizedToolArgs;
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: startingToolArgs };
   let finalToolArgs = startingToolArgs;
 
@@ -227,7 +231,7 @@ export async function executeToolCall(
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
   const coreHandler = async (innerCtx: ToolCallContext): Promise<ToolResult> => {
-    const effectiveToolArgs = normalizedLockedToolArgs ?? normalizeToolArgs(innerCtx.toolArgs);
+    const effectiveToolArgs = lockedToolArgsSnapshot ?? normalizeToolArgs(innerCtx.toolArgs);
     finalToolArgs = effectiveToolArgs;
 
     // Check tool exists
@@ -318,12 +322,16 @@ export async function executeToolCall(
   const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
     "toolCall",
     coreHandler,
-    normalizedLockedToolArgs
+    lockedToolArgsSnapshot
       ? {
           mergeOverride: (currentCtx, override) => ({
             ...currentCtx,
             ...override,
-            toolArgs: normalizedLockedToolArgs,
+            toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
+          }),
+          prepareNextCtx: (nextCtx) => ({
+            ...nextCtx,
+            toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
           }),
         }
       : undefined,

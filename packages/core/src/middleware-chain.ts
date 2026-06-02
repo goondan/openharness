@@ -23,6 +23,7 @@ export function buildChain<Ctx, Res>(
   coreHandler: (ctx: Ctx) => Promise<Res>,
   options?: {
     mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+    prepareNextCtx?: (ctx: Ctx) => Ctx;
   }
 ): (ctx: Ctx) => Promise<Res> {
   // Sort: lower priority first; tie-break by registration order (ascending)
@@ -42,11 +43,12 @@ export function buildChain<Ctx, Res>(
     const mw = sorted[i];
     const next = inner; // capture current inner before overwriting
     inner = (ctx: Ctx) => mw.handler(ctx, (override?: Partial<Ctx>) => {
-      const nextCtx = override
+      const mergedCtx = override
         ? options?.mergeOverride
           ? options.mergeOverride(ctx, override)
           : { ...ctx, ...override } as Ctx
         : ctx;
+      const nextCtx = options?.prepareNextCtx ? options.prepareNextCtx(mergedCtx) : mergedCtx;
       return next(nextCtx as Ctx);
     });
   }
@@ -97,6 +99,7 @@ export class MiddlewareRegistry {
     coreHandler: (ctx: Ctx) => Promise<Res>,
     options?: {
       mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+      prepareNextCtx?: (ctx: Ctx) => Ctx;
     }
   ): (ctx: Ctx) => Promise<Res> {
     const entries = (this._entries.get(level) ?? []) as Array<
