@@ -879,6 +879,12 @@ describe("executeStep", () => {
     expect(approvalHandler).not.toHaveBeenCalled();
     const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
     expect(approval?.toolCall.toolArgs).toEqual({ value: "rewritten" });
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ input?: unknown }>;
+    expect(assistantContent[0].input).toEqual({ value: "rewritten" });
   });
 
   it("HITL preflight treats middleware-fixed args as an approval barrier", async () => {

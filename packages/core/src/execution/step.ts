@@ -449,8 +449,12 @@ export async function executeStep(
             },
           );
           if (probeResult.status === "pending") {
-            emitSuppressedToolCalls(approvalToolCall);
-            appendSingleAssistantToolCall(approvalToolCall);
+            const committedApprovalToolCall = {
+              ...approvalToolCall,
+              args: probeResult.toolArgs ?? approvalToolCall.args,
+            };
+            emitSuppressedToolCalls(committedApprovalToolCall);
+            appendSingleAssistantToolCall(committedApprovalToolCall);
             throw probeResult.error;
           }
 
