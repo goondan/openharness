@@ -200,8 +200,9 @@ export async function executeToolCall(
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedLockedToolArgs = lockedToolArgs ? normalizeToolArgs(lockedToolArgs) : undefined;
-  const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
-  let finalToolArgs = normalizedToolArgs;
+  const startingToolArgs = normalizedLockedToolArgs ?? normalizedToolArgs;
+  const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: startingToolArgs };
+  let finalToolArgs = startingToolArgs;
 
   // 1. Emit tool.start before building / running chain
   eventBus.emit("tool.start", {
@@ -212,7 +213,7 @@ export async function executeToolCall(
     stepNumber,
     toolCallId,
     toolName,
-    args: normalizedToolArgs,
+    args: startingToolArgs,
   });
 
   // 2. Core handler — the innermost logic run when all middleware has called next()
@@ -305,7 +306,19 @@ export async function executeToolCall(
   };
 
   // 3. Build the full middleware chain
-  const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler);
+  const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
+    "toolCall",
+    coreHandler,
+    normalizedLockedToolArgs
+      ? {
+          mergeOverride: (currentCtx, override) => ({
+            ...currentCtx,
+            ...override,
+            toolArgs: normalizedLockedToolArgs,
+          }),
+        }
+      : undefined,
+  );
 
   // 4. Run the chain, handling errors
   try {

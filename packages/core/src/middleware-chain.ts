@@ -20,7 +20,10 @@ export interface MiddlewareEntry<Ctx, Res> {
  */
 export function buildChain<Ctx, Res>(
   middlewares: Array<MiddlewareEntry<Ctx, Res>>,
-  coreHandler: (ctx: Ctx) => Promise<Res>
+  coreHandler: (ctx: Ctx) => Promise<Res>,
+  options?: {
+    mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+  }
 ): (ctx: Ctx) => Promise<Res> {
   // Sort: lower priority first; tie-break by registration order (ascending)
   const sorted = [...middlewares].sort((a, b) => {
@@ -39,7 +42,11 @@ export function buildChain<Ctx, Res>(
     const mw = sorted[i];
     const next = inner; // capture current inner before overwriting
     inner = (ctx: Ctx) => mw.handler(ctx, (override?: Partial<Ctx>) => {
-      const nextCtx = override ? { ...ctx, ...override } : ctx;
+      const nextCtx = override
+        ? options?.mergeOverride
+          ? options.mergeOverride(ctx, override)
+          : { ...ctx, ...override } as Ctx
+        : ctx;
       return next(nextCtx as Ctx);
     });
   }
@@ -87,11 +94,14 @@ export class MiddlewareRegistry {
    */
   buildChain<Ctx, Res>(
     level: string,
-    coreHandler: (ctx: Ctx) => Promise<Res>
+    coreHandler: (ctx: Ctx) => Promise<Res>,
+    options?: {
+      mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+    }
   ): (ctx: Ctx) => Promise<Res> {
     const entries = (this._entries.get(level) ?? []) as Array<
       MiddlewareEntry<Ctx, Res>
     >;
-    return buildChain<Ctx, Res>(entries, coreHandler);
+    return buildChain<Ctx, Res>(entries, coreHandler, options);
   }
 }

@@ -1149,6 +1149,7 @@ describe("durable inbound and Human Approval integration", () => {
     const inboundStore = createInMemoryDurableInboundStore();
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const handlerArgs: unknown[] = [];
+    const observedMiddlewareArgs: unknown[] = [];
     const toolMiddlewareExtension: Extension = {
       name: "double-amount-middleware",
       register(api) {
@@ -1158,6 +1159,12 @@ describe("durable inbound and Human Approval integration", () => {
           }
           const amount = Number(ctx.toolArgs.amount);
           return next({ toolArgs: { amount: amount * 2 } });
+        });
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "guarded") {
+            observedMiddlewareArgs.push(ctx.toolArgs);
+          }
+          return next();
         });
       },
     };
@@ -1218,6 +1225,7 @@ describe("durable inbound and Human Approval integration", () => {
     const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
 
     expect(resumed?.status).toBe("completed");
+    expect(observedMiddlewareArgs).toEqual([{ amount: 10 }, { amount: 10 }]);
     expect(handlerArgs).toEqual([{ amount: 10 }]);
 
     await runtime.close();
