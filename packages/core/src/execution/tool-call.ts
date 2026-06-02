@@ -3,6 +3,7 @@ import type {
   ToolResult,
   ToolContext,
   HumanApprovalReferenceStore,
+  JsonObject,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -183,9 +184,17 @@ export async function executeToolCall(
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
     skipHumanApproval?: boolean;
+    onToolArgsResolved?: (toolArgs: JsonObject) => void;
   }
 ): Promise<ToolResult> {
-  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore, skipHumanApproval } = deps;
+  const {
+    toolRegistry,
+    middlewareRegistry,
+    eventBus,
+    humanApprovalStore,
+    skipHumanApproval,
+    onToolArgsResolved,
+  } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
   const normalizedCtx: ToolCallContext = { ...ctx, toolArgs: normalizedToolArgs };
@@ -298,6 +307,7 @@ export async function executeToolCall(
   // 4. Run the chain, handling errors
   try {
     const result = await chain(normalizedCtx);
+    onToolArgsResolved?.(finalToolArgs);
 
     // Emit tool.done on success
     eventBus.emit("tool.done", {
@@ -318,6 +328,7 @@ export async function executeToolCall(
       throw err;
     }
     const error = err instanceof Error ? err : new Error(String(err));
+    onToolArgsResolved?.(finalToolArgs);
 
     // Emit tool.error on failure
     eventBus.emit("tool.error", {

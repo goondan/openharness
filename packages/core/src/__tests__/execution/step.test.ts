@@ -200,6 +200,29 @@ describe("executeStep", () => {
     expect(result.toolCalls[0].result).toEqual({ type: "text", text: "tool result" });
   });
 
+  it("records ToolCall middleware override args in step summaries", async () => {
+    const handler = vi.fn(async (_args: JsonObject) => ({ type: "text" as const, text: "tool result" }));
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("my_tool", handler));
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { value: "rewritten" } });
+    });
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-1", toolName: "my_tool", args: { value: "original" } },
+      ],
+    });
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+
+    const result = await executeStep(ctx, deps);
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toEqual({ value: "rewritten" });
+    expect(result.toolCalls[0].args).toEqual({ value: "rewritten" });
+  });
+
   // Test 3: Step middleware can modify conversation before next()
   it("step middleware can modify context before next()", async () => {
     const llmClient = makeLlmClient({ text: "response" });

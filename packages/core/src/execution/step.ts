@@ -7,6 +7,7 @@ import type {
   ToolResult,
   HumanApprovalReferenceStore,
   ToolCallContext,
+  JsonObject,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
@@ -21,6 +22,10 @@ import { normalizeToolArgsResult } from "../tool-args.js";
 
 type ToolResultContentPart = Extract<ToolModelMessage["content"][number], { type: "tool-result" }>;
 type HumanApprovalGateProbeErrorResult = Extract<HumanApprovalGateProbeResult, { status: "error" }>;
+type ExecutedToolCallResult = {
+  result: ToolResult;
+  args: JsonObject;
+};
 
 function toToolResultOutput(toolResult: ToolResult) {
   return toolResult.type === "text"
@@ -264,8 +269,9 @@ export async function executeStep(
 
     const recordToolResult = (
       tc: (typeof canonicalToolCalls)[number],
-      toolResult: ToolResult,
+      executed: ExecutedToolCallResult,
     ) => {
+      const toolResult = executed.result;
       pendingToolResultParts.push({
         type: "tool-result",
         toolCallId: tc.toolCallId,
@@ -275,7 +281,7 @@ export async function executeStep(
       toolCallResults.push({
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        args: tc.args,
+        args: executed.args,
         ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
         result: toolResult,
       });
@@ -307,11 +313,12 @@ export async function executeStep(
 
     const executeCanonicalToolCall = async (
       tc: (typeof canonicalToolCalls)[number],
-    ): Promise<ToolResult> => {
+    ): Promise<ExecutedToolCallResult> => {
       if (tc.malformedResult) {
         emitMalformedEvents(tc);
-        return tc.malformedResult;
+        return { result: tc.malformedResult, args: tc.args };
       }
+      let effectiveArgs = tc.args;
 
       const toolCallCtx = {
         ...stepCtx,
@@ -319,18 +326,22 @@ export async function executeStep(
         toolArgs: tc.args,
       };
 
-      return await executeToolCall(tc.toolCallId, toolCallCtx, {
+      const result = await executeToolCall(tc.toolCallId, toolCallCtx, {
         toolRegistry,
         middlewareRegistry,
         eventBus,
         humanApprovalStore,
+        onToolArgsResolved: (toolArgs) => {
+          effectiveArgs = toolArgs;
+        },
       });
+      return { result, args: effectiveArgs };
     };
 
     const executeProbedToolResult = async (
       tc: (typeof canonicalToolCalls)[number],
       probeResult: HumanApprovalGateProbeErrorResult,
-    ): Promise<ToolResult> => {
+    ): Promise<ExecutedToolCallResult> => {
       const probedResult = probeResult.result;
       const eventArgs = probeResult.toolArgs ?? tc.args;
       const toolCallCtx: ToolCallContext = {
@@ -371,7 +382,7 @@ export async function executeStep(
           args: eventArgs,
           result,
         });
-        return result;
+        return { result, args: eventArgs };
       } catch (err) {
         if (isHumanApprovalPendingError(err)) {
           throw err;
@@ -388,13 +399,13 @@ export async function executeStep(
           args: eventArgs,
           error,
         });
-        return { type: "error", error: error.message };
+        return { result: { type: "error", error: error.message }, args: eventArgs };
       }
     };
 
     const recordSettledToolCalls = (
       toolCalls: typeof canonicalToolCalls,
-      settled: readonly PromiseSettledResult<ToolResult>[],
+      settled: readonly PromiseSettledResult<ExecutedToolCallResult>[],
     ) => {
       // Append fulfilled results in LLM-returned order.
       for (let i = 0; i < toolCalls.length; i++) {
