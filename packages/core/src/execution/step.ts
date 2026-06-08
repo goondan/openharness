@@ -7,14 +7,26 @@ import type {
   ToolResult,
   HumanApprovalReferenceStore,
   ToolCallContext,
+  JsonObject,
+  NonSystemMessage,
 } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
-import { executeToolCall, isHumanApprovalPendingError, probeHumanApprovalGate } from "./tool-call.js";
+import {
+  executeToolCall,
+  isHumanApprovalPendingError,
+  probeHumanApprovalGate,
+  type HumanApprovalGateProbeResult,
+} from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
 
 type ToolResultContentPart = Extract<ToolModelMessage["content"][number], { type: "tool-result" }>;
+type HumanApprovalGateProbeErrorResult = Extract<HumanApprovalGateProbeResult, { status: "error" }>;
+type ExecutedToolCallResult = {
+  result: ToolResult;
+  args: JsonObject;
+};
 
 function toToolResultOutput(toolResult: ToolResult) {
   return toolResult.type === "text"
@@ -139,19 +151,20 @@ export async function executeStep(
         };
       }) ?? [];
 
-    const canOpenHumanApprovalBarrier = (tc: (typeof canonicalToolCalls)[number]) => {
+    const isHumanApprovalPreflightCandidate = (tc: (typeof canonicalToolCalls)[number]) => {
       if (tc.malformedResult) return false;
       if (!humanApprovalStore) return false;
       const tool = toolRegistry.get(tc.toolName);
       if (!tool?.humanApproval || tool.humanApproval.required === false) return false;
-      return toolRegistry.validate(tc.toolName, tc.args).valid;
+      return true;
     };
 
     const humanApprovalToolCallIndexes = canonicalToolCalls.flatMap((tc, index) =>
-      canOpenHumanApprovalBarrier(tc) ? [index] : []
+      isHumanApprovalPreflightCandidate(tc) ? [index] : []
     );
 
-    const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+    const assistantMessageId = `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`;
+    const buildAssistantMessage = (committedToolCalls: typeof canonicalToolCalls): NonSystemMessage | undefined => {
       const committedAssistantContent = [...assistantContent];
       for (const tc of committedToolCalls) {
         committedAssistantContent.push({
@@ -162,25 +175,42 @@ export async function executeStep(
         });
       }
 
-      // Append assistant message (even if no content parts, e.g. empty response)
-      // Only append if there's something to say
-      if (committedAssistantContent.length > 0) {
+      if (committedAssistantContent.length === 0) {
+        return undefined;
+      }
+
+      return {
+        id: assistantMessageId,
+        data: {
+          role: "assistant",
+          content: committedAssistantContent,
+        },
+        metadata: {
+          __createdBy: "core",
+        },
+      };
+    };
+
+    const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+      const message = buildAssistantMessage(committedToolCalls);
+      if (message) {
         stepCtx.conversation.emit({
           type: "appendMessage",
-          message: {
-            id: `assistant-${stepCtx.turnId}-${stepCtx.stepNumber}`,
-            data: {
-              role: "assistant",
-              content: committedAssistantContent,
-            },
-            metadata: {
-              __createdBy: "core",
-            },
-          },
+          message,
         });
       }
     };
 
+    const replaceAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
+      const message = buildAssistantMessage(committedToolCalls);
+      if (message) {
+        stepCtx.conversation.emit({
+          type: "replace",
+          messageId: assistantMessageId,
+          message,
+        });
+      }
+    };
     const emitSuppressedToolCalls = (committedToolCall: (typeof canonicalToolCalls)[number]) => {
       const suppressedToolCalls = canonicalToolCalls.filter((tc) => tc.toolCallId !== committedToolCall.toolCallId);
       if (suppressedToolCalls.length === 0) {
@@ -258,8 +288,9 @@ export async function executeStep(
 
     const recordToolResult = (
       tc: (typeof canonicalToolCalls)[number],
-      toolResult: ToolResult,
+      executed: ExecutedToolCallResult,
     ) => {
+      const toolResult = executed.result;
       pendingToolResultParts.push({
         type: "tool-result",
         toolCallId: tc.toolCallId,
@@ -269,7 +300,7 @@ export async function executeStep(
       toolCallResults.push({
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        args: tc.args,
+        args: executed.args,
         ...(tc.invalidReason ? { invalidReason: tc.invalidReason } : {}),
         result: toolResult,
       });
@@ -301,11 +332,12 @@ export async function executeStep(
 
     const executeCanonicalToolCall = async (
       tc: (typeof canonicalToolCalls)[number],
-    ): Promise<ToolResult> => {
+    ): Promise<ExecutedToolCallResult> => {
       if (tc.malformedResult) {
         emitMalformedEvents(tc);
-        return tc.malformedResult;
+        return { result: tc.malformedResult, args: tc.args };
       }
+      let effectiveArgs = tc.args;
 
       const toolCallCtx = {
         ...stepCtx,
@@ -313,23 +345,29 @@ export async function executeStep(
         toolArgs: tc.args,
       };
 
-      return await executeToolCall(tc.toolCallId, toolCallCtx, {
+      const result = await executeToolCall(tc.toolCallId, toolCallCtx, {
         toolRegistry,
         middlewareRegistry,
         eventBus,
         humanApprovalStore,
+        onToolArgsResolved: (toolArgs) => {
+          effectiveArgs = toolArgs;
+        },
       });
+      return { result, args: effectiveArgs };
     };
 
     const executeProbedToolResult = async (
       tc: (typeof canonicalToolCalls)[number],
-      probedResult: ToolResult,
-    ): Promise<ToolResult> => {
+      probeResult: HumanApprovalGateProbeErrorResult,
+    ): Promise<ExecutedToolCallResult> => {
+      const probedResult = probeResult.result;
+      const eventArgs = probeResult.toolArgs ?? tc.args;
       const toolCallCtx: ToolCallContext = {
         ...stepCtx,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        toolArgs: tc.args,
+        toolArgs: eventArgs,
       };
 
       eventBus.emit("tool.start", {
@@ -340,16 +378,18 @@ export async function executeStep(
         stepNumber,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        args: tc.args,
+        args: eventArgs,
       });
 
-      const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
-        "toolCall",
-        async () => probedResult,
-      );
+      const runProbedResult = probeResult.middlewareApplied
+        ? async () => probedResult
+        : middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
+            "toolCall",
+            async () => probedResult,
+          );
 
       try {
-        const result = await chain(toolCallCtx);
+        const result = await runProbedResult(toolCallCtx);
         eventBus.emit("tool.done", {
           type: "tool.done",
           turnId,
@@ -358,10 +398,10 @@ export async function executeStep(
           stepNumber,
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
-          args: tc.args,
+          args: eventArgs,
           result,
         });
-        return result;
+        return { result, args: eventArgs };
       } catch (err) {
         if (isHumanApprovalPendingError(err)) {
           throw err;
@@ -375,17 +415,22 @@ export async function executeStep(
           stepNumber,
           toolCallId: tc.toolCallId,
           toolName: tc.toolName,
-          args: tc.args,
+          args: eventArgs,
           error,
         });
-        return { type: "error", error: error.message };
+        return { result: { type: "error", error: error.message }, args: eventArgs };
       }
     };
 
     const recordSettledToolCalls = (
       toolCalls: typeof canonicalToolCalls,
-      settled: readonly PromiseSettledResult<ToolResult>[],
+      settled: readonly PromiseSettledResult<ExecutedToolCallResult>[],
     ) => {
+      replaceAssistantMessage(toolCalls.map((tc, index) => {
+        const entry = settled[index];
+        return entry?.status === "fulfilled" ? { ...tc, args: entry.value.args } : tc;
+      }));
+
       // Append fulfilled results in LLM-returned order.
       for (let i = 0; i < toolCalls.length; i++) {
         const entry = settled[i];
@@ -406,11 +451,11 @@ export async function executeStep(
     if (canonicalToolCalls.length > 0) {
       if (humanApprovalToolCallIndexes.length > 0) {
         // Probe declared approval candidates in LLM order before committing the
-        // assistant batch. The probe only attempts approval-gate creation; it
-        // deliberately does not run toolCall middleware or the tool handler,
-        // because any candidate may later become a suppressed sibling if another
-        // approval call reaches pending state.
-        const probedApprovalResults = new Map<number, ToolResult>();
+        // assistant batch. The probe runs toolCall middleware so pre-tool argument
+        // rewrites are reflected in approval snapshots, but it still does not run
+        // the tool handler because any candidate may later become a suppressed
+        // sibling if another approval call reaches pending state.
+        const probedApprovalResults = new Map<number, HumanApprovalGateProbeErrorResult>();
         for (const approvalIndex of humanApprovalToolCallIndexes) {
           const approvalToolCall = canonicalToolCalls[approvalIndex];
           const probeResult = await probeHumanApprovalGate(
@@ -422,17 +467,22 @@ export async function executeStep(
             },
             {
               toolRegistry,
+              middlewareRegistry,
               eventBus,
               humanApprovalStore,
             },
           );
           if (probeResult.status === "pending") {
-            emitSuppressedToolCalls(approvalToolCall);
-            appendSingleAssistantToolCall(approvalToolCall);
+            const committedApprovalToolCall = {
+              ...approvalToolCall,
+              args: probeResult.toolArgs ?? approvalToolCall.args,
+            };
+            emitSuppressedToolCalls(committedApprovalToolCall);
+            appendSingleAssistantToolCall(committedApprovalToolCall);
             throw probeResult.error;
           }
 
-          probedApprovalResults.set(approvalIndex, probeResult.result);
+          probedApprovalResults.set(approvalIndex, probeResult);
         }
 
         appendAllAssistantToolCalls();

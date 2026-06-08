@@ -6,7 +6,7 @@
  */
 
 export interface MiddlewareEntry<Ctx, Res> {
-  handler: (ctx: Ctx, next: () => Promise<Res>) => Promise<Res>;
+  handler: (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>) => Promise<Res>;
   priority: number;
   order: number;
 }
@@ -20,7 +20,11 @@ export interface MiddlewareEntry<Ctx, Res> {
  */
 export function buildChain<Ctx, Res>(
   middlewares: Array<MiddlewareEntry<Ctx, Res>>,
-  coreHandler: (ctx: Ctx) => Promise<Res>
+  coreHandler: (ctx: Ctx) => Promise<Res>,
+  options?: {
+    mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+    prepareNextCtx?: (ctx: Ctx) => Ctx;
+  }
 ): (ctx: Ctx) => Promise<Res> {
   // Sort: lower priority first; tie-break by registration order (ascending)
   const sorted = [...middlewares].sort((a, b) => {
@@ -38,7 +42,15 @@ export function buildChain<Ctx, Res>(
   for (let i = sorted.length - 1; i >= 0; i--) {
     const mw = sorted[i];
     const next = inner; // capture current inner before overwriting
-    inner = (ctx: Ctx) => mw.handler(ctx, () => next(ctx));
+    inner = (ctx: Ctx) => mw.handler(ctx, (override?: Partial<Ctx>) => {
+      const mergedCtx = override
+        ? options?.mergeOverride
+          ? options.mergeOverride(ctx, override)
+          : { ...ctx, ...override } as Ctx
+        : ctx;
+      const nextCtx = options?.prepareNextCtx ? options.prepareNextCtx(mergedCtx) : mergedCtx;
+      return next(nextCtx as Ctx);
+    });
   }
 
   return inner;
@@ -62,7 +74,7 @@ export class MiddlewareRegistry {
    */
   register(
     level: string,
-    handler: (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+    handler: (ctx: unknown, next: (override?: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>,
     options?: { priority?: number }
   ): void {
     const priority = options?.priority ?? 100;
@@ -84,11 +96,15 @@ export class MiddlewareRegistry {
    */
   buildChain<Ctx, Res>(
     level: string,
-    coreHandler: (ctx: Ctx) => Promise<Res>
+    coreHandler: (ctx: Ctx) => Promise<Res>,
+    options?: {
+      mergeOverride?: (ctx: Ctx, override: Partial<Ctx>) => Ctx;
+      prepareNextCtx?: (ctx: Ctx) => Ctx;
+    }
   ): (ctx: Ctx) => Promise<Res> {
     const entries = (this._entries.get(level) ?? []) as Array<
       MiddlewareEntry<Ctx, Res>
     >;
-    return buildChain<Ctx, Res>(entries, coreHandler);
+    return buildChain<Ctx, Res>(entries, coreHandler, options);
   }
 }

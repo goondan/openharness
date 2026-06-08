@@ -1055,7 +1055,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(result.status).toBe("waitingForHuman");
     expect(stepErrors).toHaveLength(0);
     expect(toolHandler).not.toHaveBeenCalled();
-    expect(middlewareCalls).toEqual([]);
+    expect(middlewareCalls).toEqual(["guarded"]);
 
     const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-human" });
     expect(tasks).toHaveLength(1);
@@ -1130,7 +1130,7 @@ describe("durable inbound and Human Approval integration", () => {
     expect(resumed?.continuation?.status).toBe("completed");
     expect(resumed?.continuation?.text).toBe("approved and continued");
     expect(toolHandler).toHaveBeenCalledOnce();
-    expect(middlewareCalls).toEqual(["guarded"]);
+    expect(middlewareCalls).toEqual(["guarded", "guarded"]);
     expect(resumingEvents).toHaveLength(1);
     expect((resumingEvents[0] as any).humanApprovalId).toBe(tasks[0].humanApprovalId);
     expect(extensionToolDoneEvents).toHaveLength(1);
@@ -1141,6 +1141,98 @@ describe("durable inbound and Human Approval integration", () => {
       status: ["consumed"],
     });
     expect(blockedItems.some((item) => item.id === blocked.inboundItemId)).toBe(true);
+
+    await runtime.close();
+  });
+
+  it("does not reapply tool arg overrides when resuming an approved tool", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const handlerArgs: unknown[] = [];
+    const observedMiddlewareArgs: unknown[] = [];
+    const toolMiddlewareExtension: Extension = {
+      name: "double-amount-middleware",
+      register(api) {
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName !== "guarded") {
+            return next();
+          }
+          const amount = Number(ctx.toolArgs.amount);
+          return next({ toolArgs: { amount: amount * 2 } });
+        });
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
+            (ctx.toolArgs as { amount: number }).amount = 99;
+          }
+          return next();
+        });
+        api.pipeline.register("toolCall", async (ctx, next) => {
+          if (ctx.toolName === "guarded") {
+            observedMiddlewareArgs.push(ctx.toolArgs);
+          }
+          return next();
+        });
+      },
+    };
+    const guardedTool: ToolDefinition = {
+      name: "guarded",
+      description: "guarded tool",
+      parameters: {
+        type: "object",
+        properties: { amount: { type: "number" } },
+        required: ["amount"],
+        additionalProperties: false,
+      },
+      humanApproval: { required: true, prompt: "Approve?" },
+      handler: async (args) => {
+        handlerArgs.push(args);
+        return { type: "text" as const, text: "charged" };
+      },
+    };
+    currentClient = mockClient([
+      {
+        text: "need approval",
+        toolCalls: [{ toolCallId: "call-double", toolName: "guarded", args: { amount: 5 } }],
+      },
+      {
+        text: "continued",
+        toolCalls: [],
+      },
+    ]);
+
+    const runtime = await createHarness(baseConfig({
+      agents: {
+        default: {
+          model: { provider: "openai", model: "gpt-4", apiKey: "test" },
+          extensions: [toolMiddlewareExtension],
+          tools: [guardedTool],
+        },
+      },
+      durableInbound: { enabled: true, store: inboundStore as any },
+      humanApproval: { store: humanApprovalStore as any },
+    }));
+
+    const result = await runtime.processTurn("default", "run guarded", {
+      conversationId: "conv-double",
+      idempotencyKey: "direct-double-1",
+    });
+
+    expect(result.status).toBe("waitingForHuman");
+    const tasks = await humanApprovalStore.listTasks({ conversationId: "conv-double" });
+    expect(tasks).toHaveLength(1);
+    const approval = await humanApprovalStore.getApproval(tasks[0].humanApprovalId);
+    expect(approval?.toolCall.toolArgs).toEqual({ amount: 10 });
+
+    await runtime.control.submitHumanResult!({
+      humanTaskId: tasks[0].id,
+      result: { type: "approval", approved: true },
+      idempotencyKey: "approve-double",
+    });
+    const resumed = await runtime.control.resumeHumanApproval?.(tasks[0].humanApprovalId);
+
+    expect(resumed?.status).toBe("completed");
+    expect(observedMiddlewareArgs).toEqual([{ amount: 10 }, { amount: 10 }]);
+    expect(handlerArgs).toEqual([{ amount: 10 }]);
 
     await runtime.close();
   });

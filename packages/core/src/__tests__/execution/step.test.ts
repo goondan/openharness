@@ -200,6 +200,35 @@ describe("executeStep", () => {
     expect(result.toolCalls[0].result).toEqual({ type: "text", text: "tool result" });
   });
 
+  it("records ToolCall middleware override args in step summaries", async () => {
+    const handler = vi.fn(async (_args: JsonObject) => ({ type: "text" as const, text: "tool result" }));
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("my_tool", handler));
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { value: "rewritten" } });
+    });
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-1", toolName: "my_tool", args: { value: "original" } },
+      ],
+    });
+    const ctx = makeStepContext();
+    const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+
+    const result = await executeStep(ctx, deps);
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toEqual({ value: "rewritten" });
+    expect(result.toolCalls[0].args).toEqual({ value: "rewritten" });
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ input?: unknown }>;
+    expect(assistantContent[0].input).toEqual({ value: "rewritten" });
+  });
+
   // Test 3: Step middleware can modify conversation before next()
   it("step middleware can modify context before next()", async () => {
     const llmClient = makeLlmClient({ text: "response" });
@@ -823,6 +852,191 @@ describe("executeStep", () => {
     expect(tasks[0].toolCallId).toBe("call-approval");
   });
 
+  it("HITL preflight uses ToolCall middleware override args for approval snapshots", async () => {
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "original" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { value: "rewritten" } });
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+
+    await expect(executeStep(ctx, deps)).rejects.toThrow(HumanApprovalPendingError);
+
+    expect(approvalHandler).not.toHaveBeenCalled();
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval?.toolCall.toolArgs).toEqual({ value: "rewritten" });
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ input?: unknown }>;
+    expect(assistantContent[0].input).toEqual({ value: "rewritten" });
+  });
+
+  it("HITL preflight enforces approval when ToolCall middleware short-circuits", async () => {
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "original" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async () => {
+      return { type: "text", text: "cached" };
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+
+    await expect(executeStep(ctx, deps)).rejects.toThrow(HumanApprovalPendingError);
+
+    expect(approvalHandler).not.toHaveBeenCalled();
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval?.toolCall.toolArgs).toEqual({ value: "original" });
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(0);
+  });
+
+  it("HITL preflight preserves ToolCall middleware results when approval does not pend", async () => {
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: "original" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      await next({ toolArgs: { wrong: true } });
+      return { type: "text", text: "fallback" };
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+
+    const result = await executeStep(ctx, deps);
+
+    expect(approvalHandler).not.toHaveBeenCalled();
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval).toBeNull();
+    expect(result.toolCalls[0].result).toEqual({ type: "text", text: "fallback" });
+  });
+
+  it("HITL preflight treats middleware-fixed args as an approval barrier", async () => {
+    const okHandler = vi.fn(async () => ({ type: "text" as const, text: "ok-result" }));
+    const approvalHandler = vi.fn(async () => ({ type: "text" as const, text: "should not run" }));
+
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("ok_tool", okHandler));
+    const approvalTool: ReturnType<typeof makeTool> = {
+      ...makeTool("needs_approval", approvalHandler),
+      humanApproval: { prompt: "approve please" },
+    };
+    toolRegistry.register(approvalTool);
+
+    const llmClient = makeLlmClient({
+      toolCalls: [
+        { toolCallId: "call-approval", toolName: "needs_approval", args: { value: 123 } },
+        { toolCallId: "call-ok", toolName: "ok_tool", args: { value: "ok" } },
+      ],
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (mwCtx, next) => {
+      const toolCallCtx = mwCtx as { toolName?: string };
+      if (toolCallCtx.toolName === "needs_approval") {
+        return next({ toolArgs: { value: "rewritten" } });
+      }
+      return next();
+    });
+
+    const humanApprovalStore = new InMemoryHumanApprovalStore();
+    const ctx = makeStepContext();
+    const suppressedEvents: EventPayload[] = [];
+    const deps = {
+      ...makeDeps({ llmClient, toolRegistry, middlewareRegistry }),
+      humanApprovalStore,
+    };
+    deps.eventBus.on("step.toolCallsSuppressed", (event) => suppressedEvents.push(event));
+
+    await expect(executeStep(ctx, deps)).rejects.toThrow(HumanApprovalPendingError);
+
+    expect(okHandler).not.toHaveBeenCalled();
+    expect(approvalHandler).not.toHaveBeenCalled();
+    expect(suppressedEvents).toEqual([
+      expect.objectContaining({
+        type: "step.toolCallsSuppressed",
+        reason: "humanApprovalBarrier",
+        committedToolCallId: "call-approval",
+        suppressedToolCalls: [
+          { toolCallId: "call-ok", toolName: "ok_tool" },
+        ],
+      }),
+    ]);
+
+    const assistantMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "assistant",
+    );
+    expect(assistantMessages).toHaveLength(1);
+    const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
+    expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-approval"]);
+
+    const toolMessages = ctx.conversation.messages.filter(
+      (m: Message) => m.data.role === "tool",
+    );
+    expect(toolMessages).toHaveLength(0);
+
+    const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
+    expect(approval?.toolCall.toolArgs).toEqual({ value: "rewritten" });
+  });
+
   it("HITL-declared tool that cannot pend preserves sibling tool calls", async () => {
     const okHandlerBefore = vi.fn(async () => ({ type: "text" as const, text: "before-result" }));
     const okHandlerAfter = vi.fn(async () => ({ type: "text" as const, text: "after-result" }));
@@ -1018,7 +1232,10 @@ describe("executeStep", () => {
     expect(firstApprovalHandler).not.toHaveBeenCalled();
     expect(secondApprovalHandler).not.toHaveBeenCalled();
     expect(okHandlerAfter).not.toHaveBeenCalled();
-    expect(toolCallMiddlewareNames).toEqual([]);
+    expect(toolCallMiddlewareNames).toEqual([
+      "needs_approval_first",
+      "needs_approval_second",
+    ]);
     expect(suppressedEvents).toEqual([
       expect.objectContaining({
         type: "step.toolCallsSuppressed",

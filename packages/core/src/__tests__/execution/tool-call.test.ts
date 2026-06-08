@@ -207,6 +207,77 @@ describe("executeToolCall", () => {
     expect(executionOrder).toEqual(["middleware-before", "handler", "middleware-after"]);
   });
 
+  it("validates and executes with ToolCall middleware override args", async () => {
+    const handler = vi.fn(async (args): Promise<ToolResult> => {
+      return { type: "text", text: `hello ${String(args.name)}` };
+    });
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(
+      makeTool("strict_tool", handler, {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        additionalProperties: false,
+      })
+    );
+
+    const eventBus = new EventBus();
+    const doneListener = vi.fn();
+    eventBus.on("tool.done", doneListener);
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { name: "Alice" } });
+    });
+
+    const ctx = makeToolCallContext({
+      toolName: "strict_tool",
+      toolArgs: { wrong: "arg" },
+    });
+    const deps = makeDeps({ toolRegistry, middlewareRegistry, eventBus });
+
+    const result = await executeToolCall("call-override-args", ctx, deps);
+
+    expect(result).toEqual({ type: "text", text: "hello Alice" });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toEqual({ name: "Alice" });
+    expect(doneListener).toHaveBeenCalledOnce();
+    expect(doneListener.mock.calls[0][0].args).toEqual({ name: "Alice" });
+  });
+
+  it("ToolCall middleware arg overrides are used when creating human approval gates", async () => {
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register({
+      ...makeTool("strict_tool", undefined, {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        additionalProperties: false,
+      }),
+      humanApproval: { required: true, prompt: "Approve?" },
+    });
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    middlewareRegistry.register("toolCall", async (_ctx, next) => {
+      return next({ toolArgs: { name: "Alice" } });
+    });
+
+    const humanApprovalStore = createInMemoryHumanApprovalStore();
+    const createApproval = humanApprovalStore.createApproval.bind(humanApprovalStore);
+    const createApprovalSpy = vi.spyOn(humanApprovalStore, "createApproval").mockImplementation(createApproval);
+
+    const ctx = makeToolCallContext({
+      toolName: "strict_tool",
+      toolArgs: { wrong: "arg" },
+    });
+    const deps = { ...makeDeps({ toolRegistry, middlewareRegistry }), humanApprovalStore };
+
+    await expect(executeToolCall("call-override-approval", ctx, deps)).rejects.toThrow(/Human Approval/);
+
+    expect(createApprovalSpy).toHaveBeenCalledOnce();
+    expect(createApprovalSpy.mock.calls[0][0].toolCall.toolArgs).toEqual({ name: "Alice" });
+  });
+
   // Test 5: Middleware blocks (no next()) → handler NOT called, middleware result used
   it("middleware blocks without calling next → handler NOT called, middleware result used", async () => {
     const handler = vi.fn(async (): Promise<ToolResult> => ({
