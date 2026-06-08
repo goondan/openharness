@@ -86,14 +86,54 @@ function parseXmlParameterValue(raw: string): unknown {
   }
 }
 
+/**
+ * Compute byte ranges in `text` that should be treated as code (so any
+ * `<invoke>` block inside them is descriptive markup, not an execution
+ * request). We exclude both fenced code blocks (``` … ``` / ~~~ … ~~~) and
+ * inline code spans (`…`). Without this guard, a model that explains tool
+ * call syntax — e.g. ``` ```Use <invoke name="bash">…</invoke> to call``` ```
+ * — would actually invoke `bash`.
+ */
+function collectCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const patterns: RegExp[] = [
+    /```[\s\S]*?```/g,
+    /~~~[\s\S]*?~~~/g,
+    /`[^`\n]+`/g,
+  ];
+  for (const pattern of patterns) {
+    for (const m of text.matchAll(pattern)) {
+      if (m.index === undefined) continue;
+      ranges.push([m.index, m.index + m[0].length]);
+    }
+  }
+  return ranges;
+}
+
+function isInsideAnyRange(index: number, ranges: ReadonlyArray<[number, number]>): boolean {
+  for (const [start, end] of ranges) {
+    if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
 function parseXmlInvokeBlocks(
   text: string,
-): Array<{ toolName: string; args: Record<string, unknown> }> {
+): Array<{ toolName: string; args: Record<string, unknown>; start: number; end: number }> {
   const invokePattern = /<invoke\b([^>]*)>([\s\S]*?)<\/invoke>/gi;
   const paramPattern = /<parameter\b([^>]*)>([\s\S]*?)<\/parameter>/gi;
-  const result: Array<{ toolName: string; args: Record<string, unknown> }> = [];
+  const codeRanges = collectCodeRanges(text);
+  const result: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    start: number;
+    end: number;
+  }> = [];
 
   for (const m of text.matchAll(invokePattern)) {
+    if (m.index === undefined) continue;
+    if (isInsideAnyRange(m.index, codeRanges)) continue;
+
     const toolName = readXmlAttribute(m[1] ?? "", "name");
     if (!toolName) continue;
 
@@ -104,13 +144,34 @@ function parseXmlInvokeBlocks(
         args[paramName] = parseXmlParameterValue(p[2] ?? "");
       }
     }
-    result.push({ toolName, args });
+    result.push({ toolName, args, start: m.index, end: m.index + m[0].length });
   }
   return result;
 }
 
-function removeXmlInvokeBlocks(text: string): string {
-  return text.replace(/<invoke\b[\s\S]*?<\/invoke>/gi, "").trim();
+/**
+ * Remove the exact byte ranges occupied by parsed (i.e. actually-executed)
+ * `<invoke>` blocks, preserving everything else verbatim — including
+ * surrounding whitespace, newlines, and any `<invoke>` blocks that lived
+ * inside code spans (those were never executed, so they stay in the text).
+ */
+function removeParsedInvokeBlocks(
+  text: string,
+  parsed: ReadonlyArray<{ start: number; end: number }>,
+): string {
+  if (parsed.length === 0) return text;
+  // Sort by start so we walk through `text` once. Ranges from
+  // `parseXmlInvokeBlocks` are already in order because `matchAll` yields
+  // matches in source order, but sort defensively.
+  const sorted = [...parsed].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const { start, end } of sorted) {
+    out += text.slice(cursor, start);
+    cursor = end;
+  }
+  out += text.slice(cursor);
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,10 +333,12 @@ export async function executeStep(
     }
 
     // Persist assistant text. When invoke recovery rewrote calls out of the
-    // text, strip the raw <invoke> blocks so they don't leak into history.
-    // Otherwise preserve the original text byte-for-byte.
+    // text, strip only the exact byte ranges of the parsed <invoke> blocks
+    // (preserving surrounding whitespace, newlines, and any <invoke> blocks
+    // that lived inside code spans). Otherwise preserve the original text
+    // byte-for-byte.
     const assistantText = hadInvokeBlocks
-      ? removeXmlInvokeBlocks(llmResponse.text ?? "")
+      ? removeParsedInvokeBlocks(llmResponse.text ?? "", parsedInvokes)
       : llmResponse.text;
     if (assistantText) {
       assistantContent.push({ type: "text", text: assistantText });
