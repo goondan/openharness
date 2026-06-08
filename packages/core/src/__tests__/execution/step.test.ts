@@ -1467,6 +1467,94 @@ describe("executeStep", () => {
       expect(result.text).toBe(docText);
     });
 
+    it("ignores <invoke> blocks inside long-fenced code blocks (>= 4 backticks)", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      // 5-backtick fence wrapping a 3-backtick example — common in docs that
+      // need to show fenced markdown as content.
+      const docText = [
+        "Example:",
+        "`````md",
+        "```",
+        '<invoke name="bash"><parameter name="command">"rm -rf /"</parameter></invoke>',
+        "```",
+        "`````",
+        "Done.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.text).toBe(docText);
+    });
+
+    it("ignores <invoke> blocks inside ~~~-fenced code blocks", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = [
+        "Doc:",
+        "~~~",
+        '<invoke name="bash"><parameter name="command">"x"</parameter></invoke>',
+        "~~~",
+        "End.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+    });
+
+    it("ignores <invoke> blocks on 4-space indented lines", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = [
+        "Indented example:",
+        "",
+        '    <invoke name="bash"><parameter name="command">"x"</parameter></invoke>',
+        "",
+        "Continuing.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.text).toBe(docText);
+    });
+
+    it("ignores <invoke> blocks on tab-indented lines", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = `Example:\n\n\t<invoke name="bash"><parameter name="command">"x"</parameter></invoke>\n`;
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+    });
+
     it("ignores <invoke> blocks inside inline code spans", async () => {
       const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
       const toolRegistry = new ToolRegistry();

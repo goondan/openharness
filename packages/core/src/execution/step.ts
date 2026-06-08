@@ -89,23 +89,36 @@ function parseXmlParameterValue(raw: string): unknown {
 /**
  * Compute byte ranges in `text` that should be treated as code (so any
  * `<invoke>` block inside them is descriptive markup, not an execution
- * request). We exclude both fenced code blocks (``` … ``` / ~~~ … ~~~) and
- * inline code spans (`…`). Without this guard, a model that explains tool
- * call syntax — e.g. ``` ```Use <invoke name="bash">…</invoke> to call``` ```
- * — would actually invoke `bash`.
+ * request). Without this guard, a model that explains tool call syntax —
+ * e.g. ``` ```Use <invoke name="bash">…</invoke> to call``` ``` — would
+ * actually invoke `bash`.
+ *
+ * We exclude:
+ *   - Fenced code blocks with any fence length >= 3 (``` / ~~~ / `````` / etc.)
+ *     The closing fence must be the same character & length as the opening one
+ *     (standard CommonMark) so that a long fence can intentionally contain a
+ *     short fence as a literal example.
+ *   - Inline code spans (`…`).
+ *
+ * 4-space / tab indented code blocks are handled separately on a per-match
+ * basis (see `isInsideIndentedCodeLine`) because their boundaries are
+ * line-anchored rather than range-delimited.
  */
 function collectCodeRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
-  const patterns: RegExp[] = [
-    /```[\s\S]*?```/g,
-    /~~~[\s\S]*?~~~/g,
-    /`[^`\n]+`/g,
-  ];
-  for (const pattern of patterns) {
-    for (const m of text.matchAll(pattern)) {
-      if (m.index === undefined) continue;
-      ranges.push([m.index, m.index + m[0].length]);
-    }
+  // Fenced code blocks. Backreference \1 forces the closing fence to be the
+  // same character sequence as the opening one, so a long fence can wrap a
+  // shorter fence as an example.
+  const fencePattern = /(?<=^|\n)([`~]{3,})[^\n]*\n[\s\S]*?\n\1(?=\n|$)/g;
+  for (const m of text.matchAll(fencePattern)) {
+    if (m.index === undefined) continue;
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  // Inline code spans.
+  const inlinePattern = /`[^`\n]+`/g;
+  for (const m of text.matchAll(inlinePattern)) {
+    if (m.index === undefined) continue;
+    ranges.push([m.index, m.index + m[0].length]);
   }
   return ranges;
 }
@@ -113,6 +126,31 @@ function collectCodeRanges(text: string): Array<[number, number]> {
 function isInsideAnyRange(index: number, ranges: ReadonlyArray<[number, number]>): boolean {
   for (const [start, end] of ranges) {
     if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true when `index` sits on a line whose leading whitespace is at
+ * least one tab or four spaces — the CommonMark threshold for an indented
+ * code block. We deliberately err toward false-positives (treating heavily
+ * indented invoke markup as code) because the canonical recovery target
+ * starts at column 0 inside the assistant message, not deeply indented.
+ */
+function isInsideIndentedCodeLine(text: string, index: number): boolean {
+  const lineStart = text.lastIndexOf("\n", index - 1) + 1;
+  if (lineStart === index) return false;
+  // Look at the leading run of whitespace on this line.
+  let spaces = 0;
+  for (let i = lineStart; i < index; i += 1) {
+    const ch = text[i];
+    if (ch === "\t") return true;
+    if (ch === " ") {
+      spaces += 1;
+      if (spaces >= 4) return true;
+      continue;
+    }
+    break;
   }
   return false;
 }
@@ -133,6 +171,7 @@ function parseXmlInvokeBlocks(
   for (const m of text.matchAll(invokePattern)) {
     if (m.index === undefined) continue;
     if (isInsideAnyRange(m.index, codeRanges)) continue;
+    if (isInsideIndentedCodeLine(text, m.index)) continue;
 
     const toolName = readXmlAttribute(m[1] ?? "", "name");
     if (!toolName) continue;
