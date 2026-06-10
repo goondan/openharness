@@ -313,6 +313,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   private readonly _inFlightTurns: Map<string, InFlightTurn> = new Map();
   private readonly _activeTurnByConversation: Map<string, InFlightTurn> = new Map();
   private readonly _pendingTurnStartByConversation: Set<string> = new Set();
+  private readonly _queuedDurableInboundCountByConversation: Map<string, number> = new Map();
   private readonly _turnResultByInboundItem: Map<string, TurnResult> = new Map();
   private readonly _ingressPipeline: IngressPipeline;
   private readonly _runtimeEvents: EventBus;
@@ -388,6 +389,92 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     this._pendingTurnStartByConversation.delete(conversationKey);
   }
 
+  private _recordQueuedDurableInbound(conversationKey: string): void {
+    this._queuedDurableInboundCountByConversation.set(
+      conversationKey,
+      (this._queuedDurableInboundCountByConversation.get(conversationKey) ?? 0) + 1,
+    );
+  }
+
+  async reconcileStaleDeliveredInboundItems(): Promise<void> {
+    if (!this._durableInboundStore) {
+      return;
+    }
+
+    const deliveredItems = await this._durableInboundStore.listInboundItems({
+      status: ["delivered"],
+    });
+    for (const item of deliveredItems.sort((a, b) => a.sequence - b.sequence)) {
+      if (this._closed) {
+        return;
+      }
+      const conversationKey = this._conversationKey(item.agentName, item.conversationId);
+      if (
+        this._activeTurnByConversation.has(conversationKey) ||
+        this._pendingTurnStartByConversation.has(conversationKey)
+      ) {
+        continue;
+      }
+      if (this._conversationTurnCoordinator) {
+        const status = await this._conversationTurnCoordinator.getStatus({
+          agentName: item.agentName,
+          conversationId: item.conversationId,
+        });
+        if (status !== "inactive") {
+          continue;
+        }
+      }
+
+      const current = await this._durableInboundStore.getInboundItem(item.id);
+      if (current?.status !== "delivered") {
+        continue;
+      }
+      await this._durableInboundStore.retryInboundItem({ id: item.id });
+    }
+  }
+
+  private _schedulePendingDurableInboundAfterTurnCleanup(input: {
+    agentName: string;
+    conversationId: string;
+  }): void {
+    if (!this._durableInboundStore || this._closed) {
+      return;
+    }
+    const conversationKey = this._conversationKey(input.agentName, input.conversationId);
+    const queuedCount = this._queuedDurableInboundCountByConversation.get(conversationKey) ?? 0;
+    if (queuedCount <= 0) {
+      return;
+    }
+
+    void (async () => {
+      const [item] = await this._durableInboundStore!.listInboundItems({
+        agentName: input.agentName,
+        conversationId: input.conversationId,
+        status: ["pending"],
+        limit: 1,
+      });
+      if (!item || this._closed) {
+        this._queuedDurableInboundCountByConversation.delete(conversationKey);
+        return;
+      }
+      if (queuedCount === 1) {
+        this._queuedDurableInboundCountByConversation.delete(conversationKey);
+      } else {
+        this._queuedDurableInboundCountByConversation.set(conversationKey, queuedCount - 1);
+      }
+      this._scheduleDurableInboundItemInBackground(item);
+    })().catch((err) => {
+      this._runtimeEvents.emit("turn.error", {
+        type: "turn.error",
+        turnId: `turn-${randomUUID()}`,
+        agentName: input.agentName,
+        conversationId: input.conversationId,
+        status: "error",
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    });
+  }
+
   private async _acquireConversationTurnFence(input: {
     agentName: string;
     conversationId: string;
@@ -456,6 +543,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     const turnId = options?.turnId ?? `turn-${randomUUID()}`;
     const conversationKey = this._conversationKey(agentName, conversationId);
     if (!this._reserveConversationTurnStart(conversationKey)) {
+      if (durable?.item) {
+        this._recordQueuedDurableInbound(conversationKey);
+      }
       return {
         started: false,
         turnId,
@@ -523,6 +613,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         turnId,
         fence: fence.fence,
       });
+      this._schedulePendingDurableInboundAfterTurnCleanup({ agentName, conversationId });
     };
 
     try {
@@ -746,6 +837,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         turnId,
         fence: fence.fence,
       });
+      this._schedulePendingDurableInboundAfterTurnCleanup({ agentName, conversationId });
     };
 
     const completionPromise = resolveAfterCleanup(trackedTurn.promise, cleanup);
@@ -824,6 +916,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   }
 
   private _scheduleDurableInboundItemInBackground(item: DurableInboundItem): void {
+    if (this._closed) {
+      return;
+    }
     void this._scheduleDurableInboundItem(item).catch((err) => {
       const error = err instanceof Error ? err : new Error(String(err));
       this._runtimeEvents.emit("inbound.failed", {
@@ -932,7 +1027,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
   }
 
   private async _scheduleDurableInboundItem(item: DurableInboundItem): Promise<void> {
-    if (!this._durableInboundStore) {
+    if (!this._durableInboundStore || this._closed) {
       return;
     }
 
@@ -1703,6 +1798,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
     // Clean up
     this._inFlightTurns.clear();
     this._activeTurnByConversation.clear();
+    this._queuedDurableInboundCountByConversation.clear();
     this._conversations.clear();
   }
 }
