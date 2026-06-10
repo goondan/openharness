@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   StepContext,
   StepResult,
@@ -20,6 +21,199 @@ import {
   type HumanApprovalGateProbeResult,
 } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
+
+// ─── XML invoke recovery ──────────────────────────────────────────────────────
+// Some models, instead of emitting a real tool call, write the call out as an
+// XML-style block inside their text response:
+//
+//   call <invoke name="bash"><parameter name="command">["node","--version"]</parameter></invoke>
+//
+// When that happens the model returns text but no `toolCalls`, so the harness
+// would otherwise just record the assistant text and stop. The functions below
+// let us detect such blocks, surface them as canonical tool calls, and strip
+// the raw block from the assistant text so it isn't persisted to history.
+
+function decodeXmlEntities(text: string): string {
+  return text.replace(
+    /&(?:amp|lt|gt|quot|apos);|&#(\d+);|&#x([0-9a-fA-F]+);/g,
+    (entity, decimal?: string, hex?: string) => {
+      if (decimal) {
+        const cp = Number.parseInt(decimal, 10);
+        return Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff
+          ? String.fromCodePoint(cp)
+          : entity;
+      }
+      if (hex) {
+        const cp = Number.parseInt(hex, 16);
+        return Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff
+          ? String.fromCodePoint(cp)
+          : entity;
+      }
+      switch (entity) {
+        case "&amp;":
+          return "&";
+        case "&lt;":
+          return "<";
+        case "&gt;":
+          return ">";
+        case "&quot;":
+          return '"';
+        case "&apos;":
+          return "'";
+        default:
+          return entity;
+      }
+    },
+  );
+}
+
+function readXmlAttribute(attributes: string, name: string): string | null {
+  const pattern = /\b([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  for (const match of attributes.matchAll(pattern)) {
+    if (match[1] === name) {
+      return decodeXmlEntities(match[2] ?? match[3] ?? "");
+    }
+  }
+  return null;
+}
+
+function parseXmlParameterValue(raw: string): unknown {
+  const value = decodeXmlEntities(raw.trim());
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Compute byte ranges in `text` that should be treated as code (so any
+ * `<invoke>` block inside them is descriptive markup, not an execution
+ * request). Without this guard, a model that explains tool call syntax —
+ * e.g. ``` ```Use <invoke name="bash">…</invoke> to call``` ``` — would
+ * actually invoke `bash`.
+ *
+ * We exclude:
+ *   - Fenced code blocks with any fence length >= 3 (``` / ~~~ / `````` / etc.)
+ *     The closing fence must be the same character & length as the opening one
+ *     (standard CommonMark) so that a long fence can intentionally contain a
+ *     short fence as a literal example.
+ *   - Inline code spans (`…`).
+ *
+ * 4-space / tab indented code blocks are handled separately on a per-match
+ * basis (see `isInsideIndentedCodeLine`) because their boundaries are
+ * line-anchored rather than range-delimited.
+ */
+function collectCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  // Fenced code blocks. Backreference \1 forces the closing fence to be the
+  // same character sequence as the opening one, so a long fence can wrap a
+  // shorter fence as an example.
+  const fencePattern = /(?<=^|\n)([`~]{3,})[^\n]*\n[\s\S]*?\n\1(?=\n|$)/g;
+  for (const m of text.matchAll(fencePattern)) {
+    if (m.index === undefined) continue;
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  // Inline code spans.
+  const inlinePattern = /`[^`\n]+`/g;
+  for (const m of text.matchAll(inlinePattern)) {
+    if (m.index === undefined) continue;
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  return ranges;
+}
+
+function isInsideAnyRange(index: number, ranges: ReadonlyArray<[number, number]>): boolean {
+  for (const [start, end] of ranges) {
+    if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true when `index` sits on a line whose leading whitespace is at
+ * least one tab or four spaces — the CommonMark threshold for an indented
+ * code block. We deliberately err toward false-positives (treating heavily
+ * indented invoke markup as code) because the canonical recovery target
+ * starts at column 0 inside the assistant message, not deeply indented.
+ */
+function isInsideIndentedCodeLine(text: string, index: number): boolean {
+  const lineStart = text.lastIndexOf("\n", index - 1) + 1;
+  if (lineStart === index) return false;
+  // Look at the leading run of whitespace on this line.
+  let spaces = 0;
+  for (let i = lineStart; i < index; i += 1) {
+    const ch = text[i];
+    if (ch === "\t") return true;
+    if (ch === " ") {
+      spaces += 1;
+      if (spaces >= 4) return true;
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
+function parseXmlInvokeBlocks(
+  text: string,
+): Array<{ toolName: string; args: Record<string, unknown>; start: number; end: number }> {
+  const invokePattern = /<invoke\b([^>]*)>([\s\S]*?)<\/invoke>/gi;
+  const paramPattern = /<parameter\b([^>]*)>([\s\S]*?)<\/parameter>/gi;
+  const codeRanges = collectCodeRanges(text);
+  const result: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    start: number;
+    end: number;
+  }> = [];
+
+  for (const m of text.matchAll(invokePattern)) {
+    if (m.index === undefined) continue;
+    if (isInsideAnyRange(m.index, codeRanges)) continue;
+    if (isInsideIndentedCodeLine(text, m.index)) continue;
+
+    const toolName = readXmlAttribute(m[1] ?? "", "name");
+    if (!toolName) continue;
+
+    const args: Record<string, unknown> = {};
+    for (const p of (m[2] ?? "").matchAll(paramPattern)) {
+      const paramName = readXmlAttribute(p[1] ?? "", "name");
+      if (paramName) {
+        args[paramName] = parseXmlParameterValue(p[2] ?? "");
+      }
+    }
+    result.push({ toolName, args, start: m.index, end: m.index + m[0].length });
+  }
+  return result;
+}
+
+/**
+ * Remove the exact byte ranges occupied by parsed (i.e. actually-executed)
+ * `<invoke>` blocks, preserving everything else verbatim — including
+ * surrounding whitespace, newlines, and any `<invoke>` blocks that lived
+ * inside code spans (those were never executed, so they stay in the text).
+ */
+function removeParsedInvokeBlocks(
+  text: string,
+  parsed: ReadonlyArray<{ start: number; end: number }>,
+): string {
+  if (parsed.length === 0) return text;
+  // Sort by start so we walk through `text` once. Ranges from
+  // `parseXmlInvokeBlocks` are already in order because `matchAll` yields
+  // matches in source order, but sort defensively.
+  const sorted = [...parsed].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const { start, end } of sorted) {
+    out += text.slice(cursor, start);
+    cursor = end;
+  }
+  out += text.slice(cursor);
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 type ToolResultContentPart = Extract<ToolModelMessage["content"][number], { type: "tool-result" }>;
 type HumanApprovalGateProbeErrorResult = Extract<HumanApprovalGateProbeResult, { status: "error" }>;
@@ -127,10 +321,6 @@ export async function executeStep(
         : T
       : never = [];
 
-    if (llmResponse.text) {
-      assistantContent.push({ type: "text", text: llmResponse.text });
-    }
-
     const canonicalToolCalls =
       llmResponse.toolCalls?.map((tc) => {
         const normalized = normalizeToolArgsResult(tc.args);
@@ -150,6 +340,48 @@ export async function executeStep(
           malformedResult,
         };
       }) ?? [];
+
+    // FR-CORE-007 (xml-invoke recovery): if the model produced no real tool
+    // calls but its text contains <invoke> blocks, parse them and surface the
+    // calls so the rest of the step (middleware, tool execution, persistence)
+    // treats them like first-class tool calls. We only run recovery when the
+    // canonical list is empty so we never override a provider that did return
+    // real tool calls.
+    const parsedInvokes =
+      canonicalToolCalls.length === 0 && llmResponse.text
+        ? parseXmlInvokeBlocks(llmResponse.text)
+        : [];
+    const hadInvokeBlocks = parsedInvokes.length > 0;
+    for (const block of parsedInvokes) {
+      const normalized = normalizeToolArgsResult(block.args);
+      const invalidReason = normalized.ok ? undefined : normalized.error;
+      const malformedResult: ToolResult | undefined = invalidReason
+        ? {
+            type: "error",
+            error: invalidReason,
+          }
+        : undefined;
+
+      canonicalToolCalls.push({
+        toolCallId: `xml-invoke-${randomUUID()}`,
+        toolName: block.toolName,
+        args: normalized.args,
+        invalidReason,
+        malformedResult,
+      });
+    }
+
+    // Persist assistant text. When invoke recovery rewrote calls out of the
+    // text, strip only the exact byte ranges of the parsed <invoke> blocks
+    // (preserving surrounding whitespace, newlines, and any <invoke> blocks
+    // that lived inside code spans). Otherwise preserve the original text
+    // byte-for-byte.
+    const assistantText = hadInvokeBlocks
+      ? removeParsedInvokeBlocks(llmResponse.text ?? "", parsedInvokes)
+      : llmResponse.text;
+    if (assistantText) {
+      assistantContent.push({ type: "text", text: assistantText });
+    }
 
     const isHumanApprovalPreflightCandidate = (tc: (typeof canonicalToolCalls)[number]) => {
       if (tc.malformedResult) return false;
@@ -518,9 +750,12 @@ export async function executeStep(
       }
     }
 
-    // f. Return StepResult
+    // f. Return StepResult — when invoke recovery rewrote the assistant text,
+    //    surface the cleaned text so consumers see the same content that was
+    //    persisted to the conversation history. Otherwise return the raw text
+    //    untouched (preserve original whitespace, undefined ↔ undefined).
     return {
-      text: llmResponse.text,
+      text: hadInvokeBlocks ? assistantText : llmResponse.text,
       finishReason: llmResponse.finishReason,
       rawFinishReason: llmResponse.rawFinishReason,
       toolCalls: toolCallResults,

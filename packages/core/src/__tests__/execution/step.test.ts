@@ -1266,4 +1266,379 @@ describe("executeStep", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].toolCallId).toBe("call-approval-2");
   });
+
+  // -------------------------------------------------------------------------
+  // xml-invoke recovery — some models emit tool calls as <invoke> XML blocks
+  // inside their text response instead of as real function calls. The step
+  // should parse and execute them as if they were proper tool calls.
+  // -------------------------------------------------------------------------
+  describe("xml-invoke recovery", () => {
+    // Tool with a permissive schema so we can validate the parsed args end up
+    // at the handler exactly as parsed (string OR array<string> command).
+    const makeBashTool = (
+      handler?: ToolDefinition["handler"],
+    ): ToolDefinition => ({
+      name: "bash",
+      description: "bash",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            oneOf: [
+              { type: "string" },
+              { type: "array", items: { type: "string" } },
+            ],
+          },
+        },
+        required: ["command"],
+        additionalProperties: false,
+      },
+      handler: handler ?? (async () => ({ type: "text", text: "ok" })),
+    });
+
+    it("converts <invoke> blocks in text to executed tool calls when no real tool calls present", async () => {
+      const handler = vi.fn(async (args: JsonObject) => ({
+        type: "text" as const,
+        text: `bash:${JSON.stringify(args.command)}`,
+      }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const llmClient = makeLlmClient({
+        text: 'call <invoke name="bash"> <parameter name="command">["node","--version"]</parameter> </invoke>',
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0]).toEqual({ command: ["node", "--version"] });
+      expect(result.toolCalls).toHaveLength(1);
+      expect(result.toolCalls[0].toolName).toBe("bash");
+      expect(result.toolCalls[0].toolCallId).toMatch(/^xml-invoke-/);
+      expect(result.toolCalls[0].result).toEqual({
+        type: "text",
+        text: 'bash:["node","--version"]',
+      });
+    });
+
+    it("strips <invoke> blocks from assistant text and StepResult.text", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const llmClient = makeLlmClient({
+        text: 'before <invoke name="bash"><parameter name="command">["echo","hi"]</parameter></invoke> after',
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(result.text).toBe("before  after");
+
+      const assistantMessages = ctx.conversation.messages.filter(
+        (m: Message) => m.data.role === "assistant",
+      );
+      expect(assistantMessages).toHaveLength(1);
+      const content = assistantMessages[0].data.content as Array<{
+        type: string;
+        text?: string;
+        toolCallId?: string;
+        toolName?: string;
+      }>;
+      const textParts = content.filter((p) => p.type === "text");
+      expect(textParts).toHaveLength(1);
+      expect(textParts[0].text).toBe("before  after");
+      // The raw <invoke> block must not leak into history.
+      expect(textParts[0].text).not.toContain("<invoke");
+      const toolCallParts = content.filter((p) => p.type === "tool-call");
+      expect(toolCallParts).toHaveLength(1);
+      expect(toolCallParts[0].toolName).toBe("bash");
+    });
+
+    it("does not run invoke recovery when real tool calls are returned", async () => {
+      const realHandler = vi.fn(async () => ({ type: "text" as const, text: "real" }));
+      const xmlHandler = vi.fn(async () => ({ type: "text" as const, text: "xml" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeTool("my_tool", realHandler));
+      toolRegistry.register(makeBashTool(xmlHandler));
+
+      const llmClient = makeLlmClient({
+        text: 'narration <invoke name="bash"><parameter name="command">["x"]</parameter></invoke>',
+        toolCalls: [
+          { toolCallId: "call-real", toolName: "my_tool", args: { value: "v" } },
+        ],
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      // Only the real tool ran. The XML block stays as-is in the assistant
+      // text because we never override real tool calls with recovery.
+      expect(realHandler).toHaveBeenCalledOnce();
+      expect(xmlHandler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(1);
+      expect(result.toolCalls[0].toolCallId).toBe("call-real");
+      expect(result.text).toContain("<invoke");
+    });
+
+    it("processes multiple <invoke> blocks in a single response", async () => {
+      const calls: string[] = [];
+      const handler = vi.fn(async (args: JsonObject) => {
+        calls.push(String(args.command));
+        return { type: "text" as const, text: `done:${String(args.command)}` };
+      });
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const llmClient = makeLlmClient({
+        text:
+          '<invoke name="bash"><parameter name="command">"one"</parameter></invoke> ' +
+          '<invoke name="bash"><parameter name="command">"two"</parameter></invoke>',
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(result.toolCalls).toHaveLength(2);
+      expect(result.toolCalls.map((c) => c.toolName)).toEqual(["bash", "bash"]);
+      // Both ids must be unique recovery ids.
+      const ids = result.toolCalls.map((c) => c.toolCallId);
+      expect(ids[0]).not.toBe(ids[1]);
+      expect(ids.every((id) => id.startsWith("xml-invoke-"))).toBe(true);
+      expect(calls).toEqual(["one", "two"]);
+    });
+
+    it("falls back to raw string when parameter value is not JSON", async () => {
+      const handler = vi.fn(async (_args: JsonObject) => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const llmClient = makeLlmClient({
+        text: '<invoke name="bash"><parameter name="command">node --version</parameter></invoke>',
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0]).toEqual({ command: "node --version" });
+    });
+
+    it("leaves plain text without <invoke> blocks untouched", async () => {
+      const llmClient = makeLlmClient({ text: "just a plain message" });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(result.text).toBe("just a plain message");
+      expect(result.toolCalls).toHaveLength(0);
+    });
+
+    it("ignores <invoke> blocks inside fenced code blocks", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = [
+        "Here is how you call bash:",
+        "```xml",
+        '<invoke name="bash"><parameter name="command">["rm","-rf","/"]</parameter></invoke>',
+        "```",
+        "Got it?",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      // The original text is preserved verbatim because nothing was executed.
+      expect(result.text).toBe(docText);
+    });
+
+    it("ignores <invoke> blocks inside long-fenced code blocks (>= 4 backticks)", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      // 5-backtick fence wrapping a 3-backtick example — common in docs that
+      // need to show fenced markdown as content.
+      const docText = [
+        "Example:",
+        "`````md",
+        "```",
+        '<invoke name="bash"><parameter name="command">"rm -rf /"</parameter></invoke>',
+        "```",
+        "`````",
+        "Done.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.text).toBe(docText);
+    });
+
+    it("ignores <invoke> blocks inside ~~~-fenced code blocks", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = [
+        "Doc:",
+        "~~~",
+        '<invoke name="bash"><parameter name="command">"x"</parameter></invoke>',
+        "~~~",
+        "End.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+    });
+
+    it("ignores <invoke> blocks on 4-space indented lines", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = [
+        "Indented example:",
+        "",
+        '    <invoke name="bash"><parameter name="command">"x"</parameter></invoke>',
+        "",
+        "Continuing.",
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.text).toBe(docText);
+    });
+
+    it("ignores <invoke> blocks on tab-indented lines", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const docText = `Example:\n\n\t<invoke name="bash"><parameter name="command">"x"</parameter></invoke>\n`;
+      const llmClient = makeLlmClient({ text: docText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+    });
+
+    it("ignores <invoke> blocks inside inline code spans", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const inlineText =
+        'Use `<invoke name="bash"><parameter name="command">"x"</parameter></invoke>` to call tools.';
+      const llmClient = makeLlmClient({ text: inlineText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.text).toBe(inlineText);
+    });
+
+    it("executes invoke outside code blocks even when an example invoke is inside one", async () => {
+      const handler = vi.fn(async (args: JsonObject) => ({
+        type: "text" as const,
+        text: `ran:${String(args.command)}`,
+      }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const mixedText = [
+        "Example (do not run):",
+        "```",
+        '<invoke name="bash"><parameter name="command">"echo example"</parameter></invoke>',
+        "```",
+        'Now actually doing it: <invoke name="bash"><parameter name="command">"echo real"</parameter></invoke>',
+      ].join("\n");
+
+      const llmClient = makeLlmClient({ text: mixedText });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0]).toEqual({ command: "echo real" });
+      expect(result.toolCalls).toHaveLength(1);
+      // Code block survives intact; only the executed block was stripped.
+      expect(result.text).toContain("```");
+      expect(result.text).toContain('<invoke name="bash"><parameter name="command">"echo example"');
+      expect(result.text).not.toContain("echo real");
+    });
+
+    it("preserves surrounding whitespace and newlines when stripping invoke blocks", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const text =
+        '\n\nIntro paragraph.\n\n<invoke name="bash"><parameter name="command">"x"</parameter></invoke>\n\nOutro paragraph.\n';
+      const llmClient = makeLlmClient({ text });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      const result = await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledOnce();
+      // Leading/trailing newlines and the blank lines around the block are
+      // preserved verbatim — only the <invoke>…</invoke> bytes are removed.
+      expect(result.text).toBe("\n\nIntro paragraph.\n\n\n\nOutro paragraph.\n");
+    });
+
+    it("decodes XML entities in parameter values", async () => {
+      const handler = vi.fn(async (_args: JsonObject) => ({ type: "text" as const, text: "ok" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeBashTool(handler));
+
+      const llmClient = makeLlmClient({
+        text:
+          '<invoke name="bash"><parameter name="command">echo &quot;hi&quot; &amp;&amp; ls</parameter></invoke>',
+      });
+      const ctx = makeStepContext();
+      const deps = makeDeps({ llmClient, toolRegistry });
+
+      await executeStep(ctx, deps);
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0]).toEqual({ command: 'echo "hi" && ls' });
+    });
+  });
 });
