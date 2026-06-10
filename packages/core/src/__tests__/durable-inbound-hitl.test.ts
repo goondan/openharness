@@ -5,6 +5,7 @@ import type {
   HarnessConfig,
   LlmClient,
   LlmResponse,
+  ToolCallMiddleware,
   ToolContext,
   ToolDefinition,
 } from "@goondan/openharness-types";
@@ -171,6 +172,57 @@ describe("durable inbound and Human Approval integration", () => {
     expect(released.turnId).toBeUndefined();
     expect(released.commitRef).toBeUndefined();
     expect(released.blockedBy).toBeUndefined();
+  });
+
+  it("reconciles stale delivered inbound items to pending when the runtime starts", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const appended = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-restart-delivered",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "delivered before crash" }],
+        properties: { id: "evt-restart-delivered" },
+        conversationId: "conv-restart-delivered",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-restart-delivered",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-restart-delivered:evt-restart-delivered",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    await inboundStore.markDelivered({
+      id: appended.item.id,
+      turnId: "turn-crashed-before-drain",
+      now: "2026-01-01T00:00:01.000Z",
+    });
+
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+    const [reconciled] = await inboundStore.listInboundItems({
+      conversationId: "conv-restart-delivered",
+    });
+    const reacquired = await inboundStore.acquireNext({
+      agentName: "default",
+      conversationId: "conv-restart-delivered",
+      leaseOwner: "recovery-worker",
+      now: "2026-01-01T00:00:02.000Z",
+    });
+
+    expect(reconciled.status).toBe("pending");
+    expect(reconciled.turnId).toBeUndefined();
+    expect(reacquired?.id).toBe(appended.item.id);
+
+    await runtime.close();
   });
 
   it("does not expose releaseInboundItem control when the store has no release API", async () => {
@@ -508,6 +560,86 @@ describe("durable inbound and Human Approval integration", () => {
     await runtime.close();
   });
 
+  it("automatically starts a new turn for durable inbound queued during active turn cleanup", async () => {
+    const inboundStore = createInMemoryDurableInboundStore();
+    const capturedMessages: Array<Array<{ data: { role: string; content: unknown } }>> = [];
+    const chat = vi.fn(async (messages) => {
+      capturedMessages.push([...(messages as Array<{ data: { role: string; content: unknown } }>)]);
+      return { text: `answer ${capturedMessages.length}`, toolCalls: [] };
+    });
+    currentClient = { chat };
+    const queuedAppend = await inboundStore.append({
+      agentName: "default",
+      conversationId: "conv-cleanup-queued",
+      envelope: {
+        name: "message.created",
+        content: [{ type: "text", text: "arrived during cleanup" }],
+        properties: { id: "evt-cleanup-queued" },
+        conversationId: "conv-cleanup-queued",
+        source: {
+          connector: "test",
+          connectionName: "test",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      source: {
+        kind: "ingress",
+        connectionName: "test",
+        externalId: "evt-cleanup-queued",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      idempotencyKey: "ingress:test:default:conv-cleanup-queued:evt-cleanup-queued",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+
+    const runtime = await createHarness(baseConfig({
+      durableInbound: { enabled: true, store: inboundStore as any },
+    }));
+    let queuedDisposition: "queued" | "started" | undefined;
+    let queuedStartAttempt: Promise<void> | undefined;
+    const unsubscribe = runtime.events.on("turn.done", () => {
+      if (queuedStartAttempt) {
+        return;
+      }
+      queuedStartAttempt = (runtime as any).startTurn(
+        "default",
+        queuedAppend.item.envelope,
+        {
+          conversationId: "conv-cleanup-queued",
+          turnId: "turn-cleanup-queued-attempt",
+        },
+        {
+          item: queuedAppend.item,
+          commitRef: `inbound:${queuedAppend.item.id}:user-message`,
+        },
+      ).then((started: { started: boolean }) => {
+        queuedDisposition = started.started ? "started" : "queued";
+      });
+    });
+
+    const first = await runtime.processTurn("default", "first", {
+      conversationId: "conv-cleanup-queued",
+      idempotencyKey: "direct-cleanup-first",
+    });
+
+    await queuedStartAttempt;
+    await vi.waitFor(() => expect(chat).toHaveBeenCalledTimes(2));
+    const [item] = await inboundStore.listInboundItems({
+      conversationId: "conv-cleanup-queued",
+      status: ["consumed"],
+    });
+
+    expect(first.status).toBe("completed");
+    expect(queuedDisposition).toBe("queued");
+    expect(item.id).toBe(queuedAppend.item.id);
+    expect(capturedMessages[1].some((message) =>
+      message.data.role === "user" && message.data.content === "arrived during cleanup"
+    )).toBe(true);
+
+    unsubscribe();
+    await runtime.close();
+  });
+
   it("caches the active turn result for durable direct input delivered to that turn", async () => {
     const inboundStore = createInMemoryDurableInboundStore();
     let resolveFirstChat!: (response: LlmResponse) => void;
@@ -627,11 +759,6 @@ describe("durable inbound and Human Approval integration", () => {
       idempotencyKey: "direct-duplicate-delivered",
       now: "2026-01-01T00:00:00.000Z",
     });
-    await inboundStore.markDelivered({
-      id: delivered.item.id,
-      turnId: "turn-no-longer-active",
-      now: "2026-01-01T00:00:01.000Z",
-    });
     const blocked = await inboundStore.append({
       agentName: "default",
       conversationId: "conv-duplicates",
@@ -743,6 +870,11 @@ describe("durable inbound and Human Approval integration", () => {
     const runtime = await createHarness(baseConfig({
       durableInbound: { enabled: true, store: inboundStore as any },
     }));
+    await inboundStore.markDelivered({
+      id: delivered.item.id,
+      turnId: "turn-no-longer-active",
+      now: "2026-01-01T00:00:01.000Z",
+    });
 
     const pendingResult = await runtime.processTurn("default", "pending duplicate", {
       conversationId: "conv-duplicates",
@@ -1150,16 +1282,17 @@ describe("durable inbound and Human Approval integration", () => {
     const humanApprovalStore = createInMemoryHumanApprovalStore();
     const handlerArgs: unknown[] = [];
     const observedMiddlewareArgs: unknown[] = [];
+    const doubleAmountMiddleware: ToolCallMiddleware = async (ctx, next) => {
+      if (ctx.toolName !== "guarded") {
+        return next();
+      }
+      const amount = Number(ctx.toolArgs.amount);
+      return next({ toolArgs: { amount: amount * 2 } });
+    };
     const toolMiddlewareExtension: Extension = {
       name: "double-amount-middleware",
       register(api) {
-        api.pipeline.register("toolCall", async (ctx, next) => {
-          if (ctx.toolName !== "guarded") {
-            return next();
-          }
-          const amount = Number(ctx.toolArgs.amount);
-          return next({ toolArgs: { amount: amount * 2 } });
-        });
+        api.pipeline.register("toolCall", doubleAmountMiddleware);
         api.pipeline.register("toolCall", async (ctx, next) => {
           if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
             (ctx.toolArgs as { amount: number }).amount = 99;

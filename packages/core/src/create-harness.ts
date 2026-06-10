@@ -437,5 +437,7 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
   );
   runtimeRef = runtime;
 
+  await runtime.reconcileStaleDeliveredInboundItems();
+
   return runtime;
 }
