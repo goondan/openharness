@@ -7,9 +7,13 @@ import type {
   InboundEnvelope,
   LlmClient,
   LlmUsage,
+  UserModelMessage,
 } from "@goondan/openharness-types";
+import { createMessage, CORE_CREATED_BY } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
+import type { RecoveryRegistry } from "../recovery-registry.js";
+import type { PromptProjectionRegistry } from "../prompt-projection.js";
 import type { EventBus } from "../event-bus.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
@@ -21,6 +25,12 @@ import type {
 import { isHumanApprovalPendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
+import {
+  SlotBackingStore,
+  SLOT_BACKING,
+  emptySlotStore,
+  type SlotBackingCarrier,
+} from "../slot-store.js";
 
 type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
@@ -75,20 +85,23 @@ function appendEnvelopeAsUserMessage(
   }
 
   const text = extractText(envelope);
+  // createMessage force-mirrors `createdBy` into metadata.__createdBy *after*
+  // spreading envelope/extra metadata, so an envelope that carries its own
+  // __createdBy can never shadow the core provenance of this user message.
   conversationState.emit({
     type: "appendMessage",
-    message: {
+    message: createMessage<UserModelMessage>({
       id: generateMessageId(),
       data: {
         role: "user",
         content: text,
       },
+      createdBy: CORE_CREATED_BY,
       metadata: {
-        __createdBy: "core",
         ...envelope.metadata,
         ...metadata,
       },
-    },
+    }),
   });
 }
 
@@ -247,6 +260,8 @@ export async function executeTurn(
     llmClient: LlmClient;
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
+    recoveryRegistry: RecoveryRegistry;
+    promptRegistry: PromptProjectionRegistry;
     eventBus: EventBus;
     conversationState: ConversationStateImpl;
     maxSteps: number;
@@ -271,6 +286,8 @@ export async function executeTurn(
     llmClient,
     toolRegistry,
     middlewareRegistry,
+    recoveryRegistry,
+    promptRegistry,
     eventBus,
     conversationState,
     maxSteps,
@@ -312,6 +329,11 @@ export async function executeTurn(
   // Use external AbortController if provided, otherwise create a new one
   const abortController = deps.abortController ?? new AbortController();
 
+  // One slot backing store per turn (F6). It rides on the context under the
+  // SLOT_BACKING symbol; the middleware chain builds each layer's declaration-
+  // gated facade from it, so the base `slots` here is just the deny-all default.
+  const slotBacking = new SlotBackingStore();
+
   // Build TurnContext
   const turnCtx: TurnContext = {
     turnId,
@@ -323,7 +345,9 @@ export async function executeTurn(
     inboundItemId: inboundItem?.id,
     inboundCommitRef,
     llm: llmClient,
+    slots: emptySlotStore(),
   };
+  (turnCtx as SlotBackingCarrier)[SLOT_BACKING] = slotBacking;
 
   // 6. Emit turn.start
   eventBus.emit("turn.start", {
@@ -363,6 +387,8 @@ export async function executeTurn(
         llmClient,
         toolRegistry,
         middlewareRegistry,
+        recoveryRegistry,
+        promptRegistry,
         eventBus,
         humanApprovalStore,
       });

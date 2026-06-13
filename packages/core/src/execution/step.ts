@@ -11,8 +11,11 @@ import type {
   JsonObject,
   NonSystemMessage,
 } from "@goondan/openharness-types";
+import { createMessage, CORE_CREATED_BY } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
+import type { RecoveryRegistry, RecoveryRunHooks } from "../recovery-registry.js";
+import type { PromptProjectionRegistry } from "../prompt-projection.js";
 import type { EventBus } from "../event-bus.js";
 import {
   executeToolCall,
@@ -255,11 +258,21 @@ export async function executeStep(
     llmClient: LlmClient;
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
+    recoveryRegistry: RecoveryRegistry;
+    promptRegistry: PromptProjectionRegistry;
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
+  const {
+    llmClient,
+    toolRegistry,
+    middlewareRegistry,
+    recoveryRegistry,
+    promptRegistry,
+    eventBus,
+    humanApprovalStore,
+  } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -273,8 +286,12 @@ export async function executeStep(
 
   // 2. Core handler — the innermost logic
   const coreHandler = async (stepCtx: StepContext): Promise<StepResult> => {
-    // a. Get current messages
-    const messages = [...stepCtx.conversation.messages];
+    // a. Get the prompt view (F2). The durable conversation log is the truth;
+    //    the prompt view is a per-step, throwaway projection of it for the model.
+    //    The fast path (no projections registered) hands the model the raw log.
+    const messages = promptRegistry.isEmpty
+      ? [...stepCtx.conversation.messages]
+      : await promptRegistry.apply([...stepCtx.conversation.messages], stepCtx);
 
     // b. Get available tools
     const tools = toolRegistry.list() as ReturnType<ToolRegistry["list"]>;
@@ -411,16 +428,14 @@ export async function executeStep(
         return undefined;
       }
 
-      return {
+      return createMessage<AssistantModelMessage>({
         id: assistantMessageId,
         data: {
           role: "assistant",
           content: committedAssistantContent,
         },
-        metadata: {
-          __createdBy: "core",
-        },
-      };
+        createdBy: CORE_CREATED_BY,
+      });
     };
 
     const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
@@ -546,18 +561,16 @@ export async function executeStep(
       const firstToolCallId = pendingToolResultParts[0]?.toolCallId;
       stepCtx.conversation.emit({
         type: "appendMessage",
-        message: {
+        message: createMessage<ToolModelMessage>({
           id: pendingToolResultParts.length === 1 && firstToolCallId
             ? `tool-result-${firstToolCallId}`
             : `tool-results-${stepCtx.turnId}-${stepCtx.stepNumber}`,
           data: {
             role: "tool",
             content: [...pendingToolResultParts],
-          } satisfies ToolModelMessage,
-          metadata: {
-            __createdBy: "core",
           },
-        },
+          createdBy: CORE_CREATED_BY,
+        }),
       });
       pendingToolResultParts.length = 0;
     };
@@ -763,8 +776,78 @@ export async function executeStep(
     };
   };
 
-  // 3. Build step middleware chain
-  const chain = middlewareRegistry.buildChain<StepContext, StepResult>("step", coreHandler);
+  // 3. Wrap the core handler with the recovery loop (F4). Recovery owns ONE
+  //    retry loop around the LLM/tool core: a retry re-runs `coreHandler` (so the
+  //    prompt projection is re-applied) but deliberately does NOT re-run the step
+  //    middleware chain — the middleware onion wraps the recovering core, so a
+  //    retry replays only the model call, not the surrounding middleware. The
+  //    human-approval barrier and abort are control flow, never failures, so they
+  //    bypass recovery untouched.
+  const isRecoveryBypass = (err: unknown): boolean =>
+    isHumanApprovalPendingError(err) ||
+    ctx.abortSignal.aborted ||
+    (err instanceof Error && err.name === "AbortError");
+
+  const abortableSleep = (signal: AbortSignal, ms: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const abortError = () => {
+        const e = new Error("Aborted during recovery backoff");
+        e.name = "AbortError";
+        return e;
+      };
+      if (signal.aborted) {
+        reject(abortError());
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(abortError());
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+  const recoveringCoreHandler: typeof coreHandler = recoveryRegistry.isEmpty
+    ? coreHandler
+    : async (stepCtx) => {
+        const hooks: RecoveryRunHooks = {
+          eventCount: () => stepCtx.conversation.events.length,
+          onRetry: ({ attempt, error, claimName }) =>
+            eventBus.emit("step.retry", {
+              type: "step.retry",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              attempt,
+              error,
+              ...(claimName ? { claimName } : {}),
+            }),
+          onExhausted: ({ attempts, error, claimName }) =>
+            eventBus.emit("recovery.exhausted", {
+              type: "recovery.exhausted",
+              turnId,
+              agentName,
+              conversationId,
+              stepNumber,
+              attempts,
+              error,
+              ...(claimName ? { claimName } : {}),
+            }),
+          sleep: (ms) => abortableSleep(stepCtx.abortSignal, ms),
+          isBypass: isRecoveryBypass,
+        };
+        return recoveryRegistry.run(() => coreHandler(stepCtx), stepCtx, hooks);
+      };
+
+  // 4. Build step middleware chain around the recovering core handler
+  const chain = middlewareRegistry.buildChain<StepContext, StepResult>(
+    "step",
+    recoveringCoreHandler,
+  );
 
   // 4. Run chain, handling errors
   try {

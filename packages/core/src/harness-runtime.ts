@@ -7,7 +7,7 @@ import type {
   ProcessTurnOptions,
   TurnResult,
   LlmClient,
-  EventPayload,
+  HarnessEvents,
   DurableInboundReferenceStore,
   DurableInboundItem,
   DeadLetterInboundInput,
@@ -28,10 +28,13 @@ import type {
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { MiddlewareRegistry } from "./middleware-chain.js";
+import type { RecoveryRegistry } from "./recovery-registry.js";
+import type { PromptProjectionRegistry } from "./prompt-projection.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
 import { executeToolCall } from "./execution/tool-call.js";
+import { emptySlotStore } from "./slot-store.js";
 import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
@@ -48,6 +51,8 @@ export interface AgentDeps {
   llmClient: LlmClient;
   toolRegistry: ToolRegistry;
   middlewareRegistry: MiddlewareRegistry;
+  recoveryRegistry: RecoveryRegistry;
+  promptRegistry: PromptProjectionRegistry;
   eventBus: EventBus;
   maxSteps: number;
 }
@@ -637,6 +642,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         llmClient: agentDeps.llmClient,
         toolRegistry: agentDeps.toolRegistry,
         middlewareRegistry: agentDeps.middlewareRegistry,
+        recoveryRegistry: agentDeps.recoveryRegistry,
+        promptRegistry: agentDeps.promptRegistry,
         eventBus: agentDeps.eventBus,
         conversationState,
         maxSteps: agentDeps.maxSteps,
@@ -853,6 +860,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               llmClient: agentDeps.llmClient,
               toolRegistry: agentDeps.toolRegistry,
               middlewareRegistry: agentDeps.middlewareRegistry,
+              recoveryRegistry: agentDeps.recoveryRegistry,
+              promptRegistry: agentDeps.promptRegistry,
               eventBus: agentDeps.eventBus,
               conversationState,
               maxSteps: agentDeps.maxSteps,
@@ -1247,9 +1256,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
   get events(): HarnessRuntime["events"] {
     return {
-      on: <T extends EventPayload["type"]>(
+      on: <T extends keyof HarnessEvents>(
         event: T,
-        listener: (payload: Extract<EventPayload, { type: T }>) => void,
+        listener: (payload: HarnessEvents[T]) => void,
       ) => this._runtimeEvents.on(event, listener),
     };
   }
@@ -1519,6 +1528,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       toolName: toolCall.toolName,
                       toolArgs: finalArgs,
                       abortSignal: resumeAbortController.signal,
+                      slots: emptySlotStore(),
                     }, {
                       toolRegistry: agentDeps.toolRegistry,
                       middlewareRegistry: agentDeps.middlewareRegistry,

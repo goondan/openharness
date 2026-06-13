@@ -28,7 +28,6 @@ export interface IngressPipelineConfig {
       connectionMiddleware: MiddlewareRegistry;
     }
   >;
-  agentMiddlewareByAgent: Map<string, MiddlewareRegistry>;
   registeredAgents: Set<string>;
   eventBus: EventBus;
   /**
@@ -74,7 +73,7 @@ export class IngressPipeline implements IngressApi {
    * Full 2-stage pipeline: ingress → route per envelope.
    *
    * Stage 1 (ingress): connection-level — verify + normalize raw payload into InboundEnvelope(s).
-   * Stage 2 (route): agent-level — route envelope to agent and dispatch turn.
+   * Stage 2 (route): connection-level — route envelope to agent and dispatch turn.
    */
   async receive(input: {
     connectionName: string;
@@ -142,14 +141,15 @@ export class IngressPipeline implements IngressApi {
       return [];
     }
 
-    // Stage 2: Route per envelope (agent-level middleware wrapping route + dispatch)
+    // Stage 2: Route per envelope (connection-level middleware wrapping route + dispatch)
     const results: IngressAcceptResult[] = [];
     for (const envelope of envelopes) {
       const result = await this._routeAndDispatch(
         connectionName,
         envelope,
         rules,
-        receivedAt
+        receivedAt,
+        connectionMiddleware
       );
       if (result !== null) {
         results.push(result);
@@ -182,7 +182,8 @@ export class IngressPipeline implements IngressApi {
       connectionName,
       envelope,
       connection.rules,
-      receivedAt
+      receivedAt,
+      connection.connectionMiddleware
     );
 
     if (result === null) {
@@ -211,17 +212,17 @@ export class IngressPipeline implements IngressApi {
   // -----------------------------------------------------------------------
 
   /**
-   * Route + dispatch for a single envelope (agent-level "route" middleware).
+   * Route + dispatch for a single envelope (connection-level "route" middleware).
    * Returns IngressAcceptResult on success, null on rejection.
    */
   private async _routeAndDispatch(
     connectionName: string,
     envelope: InboundEnvelope,
     rules: RoutingRule[],
-    receivedAt: string
+    receivedAt: string,
+    connectionMiddleware: MiddlewareRegistry
   ): Promise<IngressAcceptResult | null> {
-    const { agentMiddlewareByAgent, registeredAgents, eventBus, dispatchTurn } =
-      this._config;
+    const { registeredAgents, eventBus, dispatchTurn } = this._config;
 
     const routeMatch = routeEnvelope(envelope, rules, registeredAgents);
     if (!routeMatch.matched) {
@@ -242,12 +243,7 @@ export class IngressPipeline implements IngressApi {
       turnId: `turn-${randomUUID()}`,
     };
 
-    const routeMiddleware =
-      agentMiddlewareByAgent.get(routeMatch.agentName) ?? null;
-    const routeChain = (routeMiddleware ?? {
-      buildChain: <Ctx, Res>(_level: string, coreHandler: (ctx: Ctx) => Promise<Res>) =>
-        (ctx: Ctx) => coreHandler(ctx),
-    }).buildChain<RouteContext, RouteResult>(
+    const routeChain = connectionMiddleware.buildChain<RouteContext, RouteResult>(
       "route",
       async () => baseResult,
     );
