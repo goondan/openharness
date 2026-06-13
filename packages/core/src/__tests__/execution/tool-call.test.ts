@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { executeToolCall } from "../../execution/tool-call.js";
+import { makeStoreWrapCtxFor } from "../../execution/store-injection.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { createConversationState } from "../../conversation-state.js";
+import { createMemoryStoreBacking, createScopedStore } from "../../store.js";
 import { createInMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   ToolCallContext,
@@ -24,12 +27,8 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
     turnId: "turn-1",
     agentName: "test-agent",
     conversationId: "conv-1",
-    conversation: {
-      events: [],
-      messages: [],
-      restore: () => {},
-      emit: () => {},
-    },
+    conversation: createConversationState(),
+    store: createScopedStore(createMemoryStoreBacking(), "core", "conv-1"),
     abortSignal: makeAbortSignal(),
     input: {
       name: "test",
@@ -450,5 +449,81 @@ describe("executeToolCall", () => {
     expect(gateCreated).toHaveBeenCalledOnce();
     expect(taskCreated).toHaveBeenCalledOnce();
     expect(taskCreated.mock.calls[0][0].taskType).toBe("approval");
+  });
+
+  // P1 regression: toolCall middleware must receive a ctx.store scoped to its
+  // OWN registering extension (extension × conversationId), not the shared
+  // default/core store. Two extensions writing the same key must not see each
+  // other's data.
+  it("scopes ctx.store per registering extension across toolCall middleware", async () => {
+    const handler = vi.fn(async (): Promise<ToolResult> => ({ type: "text", text: "ok" }));
+    const toolRegistry = new ToolRegistry();
+    toolRegistry.register(makeTool("my_tool", handler));
+
+    // Shared backing for the whole conversation — isolation comes from the
+    // per-layer wrapCtx, not from separate backings.
+    const backing = createMemoryStoreBacking();
+
+    let seenByExtA: unknown;
+    let seenByExtB: unknown;
+
+    const middlewareRegistry = new MiddlewareRegistry();
+    // ext-a runs first (outer), writes its own value under "secret".
+    middlewareRegistry.register(
+      "toolCall",
+      async (rawCtx, next) => {
+        const ctx = rawCtx as ToolCallContext;
+        await ctx.store.set("secret", "from-a");
+        // Should never observe ext-b's value (different scope).
+        seenByExtA = await ctx.store.get("secret");
+        return next();
+      },
+      { name: "mw-a" },
+      "ext-a",
+    );
+    // ext-b runs second (inner), writes its own value under the SAME key.
+    middlewareRegistry.register(
+      "toolCall",
+      async (rawCtx, next) => {
+        const ctx = rawCtx as ToolCallContext;
+        // Before writing, ext-b must not see ext-a's value.
+        seenByExtB = await ctx.store.get("secret");
+        await ctx.store.set("secret", "from-b");
+        return next();
+      },
+      { name: "mw-b", after: "mw-a" },
+      "ext-b",
+    );
+
+    const ctx = makeToolCallContext({
+      toolName: "my_tool",
+      toolArgs: { value: "hello" },
+      conversationId: "conv-scope",
+      // Base ctx.store is the default "core" store; wrapCtx re-scopes each layer.
+      store: createScopedStore(backing, "core", "conv-scope"),
+    });
+
+    const deps = {
+      ...makeDeps({ toolRegistry, middlewareRegistry }),
+      storeWrapCtxFor: makeStoreWrapCtxFor<ToolCallContext>(backing, "conv-scope"),
+    };
+
+    const result = await executeToolCall("call-scope", ctx, deps);
+
+    expect(result).toEqual({ type: "text", text: "ok" });
+    // ext-a reads back its own write.
+    expect(seenByExtA).toBe("from-a");
+    // ext-b never saw ext-a's value despite the shared key.
+    expect(seenByExtB).toBeUndefined();
+
+    // The two writes landed in distinct, extension-scoped namespaces.
+    const storeA = createScopedStore(backing, "ext-a", "conv-scope");
+    const storeB = createScopedStore(backing, "ext-b", "conv-scope");
+    expect(await storeA.get("secret")).toBe("from-a");
+    expect(await storeB.get("secret")).toBe("from-b");
+
+    // The default "core" store was untouched by either extension.
+    const coreStore = createScopedStore(backing, "core", "conv-scope");
+    expect(await coreStore.get("secret")).toBeUndefined();
   });
 });

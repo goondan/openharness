@@ -60,10 +60,9 @@ function BasicSystemPrompt(text: string): Extension {
   return {
     name: "basic-system-prompt",
     register(api: ExtensionApi): void {
-      api.pipeline.register(
-        "turn",
+      api.useTurn(
         async (ctx, next) => {
-          ctx.conversation.emit(
+          ctx.conversation.append(
             appendEvent({
               id: `sys-${Date.now()}`,
               data: {
@@ -77,7 +76,7 @@ function BasicSystemPrompt(text: string): Extension {
           );
           return next();
         },
-        { priority: 10 },
+        { before: "*" },
       );
     },
   };
@@ -87,9 +86,9 @@ function MessageWindow(config: { maxMessages: number }): Extension {
   return {
     name: "message-window",
     register(api: ExtensionApi): void {
-      api.pipeline.register("step", async (ctx, next) => {
-        if (ctx.conversation.messages.length > config.maxMessages) {
-          ctx.conversation.emit({
+      api.useStep(async (ctx, next) => {
+        if (ctx.conversation.getMessages().length > config.maxMessages) {
+          ctx.conversation.append({
             type: "truncate",
             keepLast: config.maxMessages,
           });
@@ -328,48 +327,44 @@ describe("AC-4: Event sourcing — restore(events) produces identical messages",
   it("AC-4: A new ConversationState restored from events has deeply equal messages to the original", () => {
     const original = createConversationState();
 
-    // Manually activate turn so emit() works
-    original["_turnActive"] = true;
+    // Append several events
+    original.append(appendEvent(makeTextMessage("m1", "user", "hello")));
+    original.append(appendEvent(makeTextMessage("m2", "assistant", "hi there")));
+    original.append(appendEvent(makeTextMessage("m3", "user", "how are you?")));
+    original.append(appendEvent(makeTextMessage("m4", "assistant", "I am fine")));
 
-    // Emit several events
-    original.emit(appendEvent(makeTextMessage("m1", "user", "hello")));
-    original.emit(appendEvent(makeTextMessage("m2", "assistant", "hi there")));
-    original.emit(appendEvent(makeTextMessage("m3", "user", "how are you?")));
-    original.emit(appendEvent(makeTextMessage("m4", "assistant", "I am fine")));
-
-    const originalMessages = [...original.messages];
-    const originalEvents = [...original.events] as MessageEvent[];
+    const originalMessages = [...original.getMessages()];
+    const originalEvents = [...original.getEventLog()] as MessageEvent[];
 
     // Create a new ConversationState and restore from events
     const restored = createConversationState();
     restored.restore(originalEvents);
 
     // Messages must be deeply equal
-    expect(restored.messages).toEqual(originalMessages);
-    expect(restored.messages).toHaveLength(4);
-    expect(restored.messages[0]).toEqual(makeTextMessage("m1", "user", "hello"));
-    expect(restored.messages[1]).toEqual(makeTextMessage("m2", "assistant", "hi there"));
-    expect(restored.messages[2]).toEqual(makeTextMessage("m3", "user", "how are you?"));
-    expect(restored.messages[3]).toEqual(makeTextMessage("m4", "assistant", "I am fine"));
+    expect(restored.getMessages()).toEqual(originalMessages);
+    expect(restored.getMessages()).toHaveLength(4);
+    expect(restored.getMessages()[0]).toEqual(makeTextMessage("m1", "user", "hello"));
+    expect(restored.getMessages()[1]).toEqual(makeTextMessage("m2", "assistant", "hi there"));
+    expect(restored.getMessages()[2]).toEqual(makeTextMessage("m3", "user", "how are you?"));
+    expect(restored.getMessages()[3]).toEqual(makeTextMessage("m4", "assistant", "I am fine"));
   });
 
   it("AC-4: restore works with mixed event types (append + truncate)", () => {
     const original = createConversationState();
-    original["_turnActive"] = true;
 
     for (let i = 1; i <= 5; i++) {
-      original.emit(appendEvent(makeTextMessage(`m${i}`, "user", `message ${i}`)));
+      original.append(appendEvent(makeTextMessage(`m${i}`, "user", `message ${i}`)));
     }
-    original.emit({ type: "truncate", keepLast: 2 });
+    original.append({ type: "truncate", keepLast: 2 });
 
-    const events = [...original.events] as MessageEvent[];
+    const events = [...original.getEventLog()] as MessageEvent[];
 
     const restored = createConversationState();
     restored.restore(events);
 
     // After truncate keepLast: 2, we should have 2 messages
-    expect(restored.messages).toHaveLength(2);
-    expect(restored.messages).toEqual(original.messages);
+    expect(restored.getMessages()).toHaveLength(2);
+    expect(restored.getMessages()).toEqual(original.getMessages());
   });
 });
 
@@ -388,14 +383,14 @@ describe("AC-5 & AC-6: Persistence Extension presence/absence", () => {
         name: "persistence",
         register(api: ExtensionApi): void {
           // Use turn middleware to both restore (at start) and save (after next())
-          api.pipeline.register("turn", async (ctx, next) => {
+          api.useTurn(async (ctx, next) => {
             // At turn start, executeTurn has already appended the user message (1 event).
             // If we have saved history, we need to restore the previous events +
             // keep the newly added user message.
             const saved = eventStore.get(ctx.conversationId);
-            if (saved && saved.length > 0 && ctx.conversation.events.length === 1) {
+            if (saved && saved.length > 0 && ctx.conversation.getEventLog().length === 1) {
               // Capture the current (new) user message event
-              const currentEvents = [...ctx.conversation.events] as MessageEvent[];
+              const currentEvents = [...ctx.conversation.getEventLog()] as MessageEvent[];
               // Combine: saved history + new user message
               ctx.conversation.restore([...saved, ...currentEvents]);
             }
@@ -404,7 +399,7 @@ describe("AC-5 & AC-6: Persistence Extension presence/absence", () => {
             const result = await next();
 
             // Save all events after the turn completes
-            const events = [...ctx.conversation.events] as MessageEvent[];
+            const events = [...ctx.conversation.getEventLog()] as MessageEvent[];
             eventStore.set(ctx.conversationId, events);
 
             return result;
@@ -573,7 +568,7 @@ describe("AC-8: Middleware blocks ToolCall — tool handler not invoked", () => 
     const blockingExtension: Extension = {
       name: "blocking-middleware",
       register(api: ExtensionApi): void {
-        api.pipeline.register("toolCall", async (ctx: ToolCallContext, _next): Promise<ToolResult> => {
+        api.useToolCall(async (ctx: ToolCallContext, _next): Promise<ToolResult> => {
           if (ctx.toolName === "blocked-tool") {
             // Short-circuit: return error without calling next()
             return { type: "error", error: "Tool blocked by middleware policy" };
@@ -959,8 +954,8 @@ describe("AC-14: Third-party Extension with types-only import", () => {
       name: "third-party-system-prompt",
       register(api: ExtensionApi): void {
         // Register a turn middleware that prepends a system message
-        api.pipeline.register("turn", async (ctx, next) => {
-          ctx.conversation.emit(
+        api.useTurn(async (ctx, next) => {
+          ctx.conversation.append(
             appendEvent({
               id: `tp-sys-${Date.now()}`,
               data: { role: "system", content: "You are a third-party assistant." },

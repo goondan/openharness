@@ -1,8 +1,13 @@
 import type { ConversationState, Message } from "./conversation.js";
 import type { ToolResult, ToolDefinition, JsonObject } from "./tool.js";
-import type { InboundEnvelope, IngressAcceptResult } from "./ingress.js";
+import type { InboundEnvelope } from "./ingress.js";
+import type { ExtensionStore } from "./store.js";
 
-// Middleware level discriminant
+// Middleware level discriminant.
+//
+// `route` is a core-internal level used by ingress routing inside connection
+// extensions; it is NOT exposed on the extension surface (no `useRoute`). It
+// stays here so ingress/router internals keep type-checking.
 export type MiddlewareLevel =
   | "turn"
   | "step"
@@ -10,9 +15,27 @@ export type MiddlewareLevel =
   | "ingress"
   | "route";
 
+/**
+ * Declarative placement for a middleware registration. There is no numeric
+ * priority and no phase band: ordering is `before`/`after` edges plus the `'*'`
+ * sentinel, otherwise registration order.
+ *
+ * `before`/`after` are **entry order**: "A before B" ⇒ A enters before B (and,
+ * because of the onion, A's post-`next()` code runs *after* B's). Each value is
+ * another middleware's name, or `'*'` — `before: '*'` puts the middleware in the
+ * outermost band (enters before all others at its level), `after: '*'` in the
+ * innermost band. Unknown references and cycles are boot-time hard errors.
+ */
 export interface MiddlewareOptions {
-  /** default 100; lower runs first */
-  priority?: number;
+  /**
+   * Identity for diagnostics and before/after refs. Defaults to the extension
+   * name; required when one extension registers two middleware at one level.
+   */
+  name?: string;
+  /** "Enter before these" — other middleware names or `'*'`. Unknown ref = boot error. */
+  before?: string | string[];
+  /** "Enter after these" — other middleware names or `'*'`. Unknown ref = boot error. */
+  after?: string | string[];
 }
 
 // -----------------------------------------------------------------------
@@ -30,6 +53,8 @@ export interface TurnContext {
   inboundCommitRef?: string;
   /** LLM client bound to the current agent's model configuration. */
   llm: LlmClient;
+  /** Conversation-scoped persistent KV, namespaced by (extension × conversation). */
+  store: ExtensionStore;
 }
 
 export interface StepContext extends TurnContext {
@@ -46,6 +71,34 @@ export interface ToolCallContext extends StepContext {
   toolName: string;
   toolArgs: JsonObject;
 }
+
+// -----------------------------------------------------------------------
+// Model input assembly (useModelInput)
+//
+// The conversation event log is the durable truth. The *model input* is a
+// per-step, throwaway view of that truth for the model — windowing, hydration,
+// redaction, reordering. It never persists; if it ran zero times the durable
+// log would still be correct. A transform that wouldn't be is a
+// `conversation.append` mutation, not a model-input projection.
+// -----------------------------------------------------------------------
+
+/**
+ * The messages handed to the model for one step. Derived (and non-persistable)
+ * by construction — it comes from the `Object.freeze`d `getMessages()` snapshot,
+ * never the other way around.
+ */
+export type ModelInput = readonly Message[];
+
+/**
+ * Assembles the model input for a single step. Runs once at the end of the
+ * onion, immediately before the model call. Pure and side-effect-free with
+ * respect to durable state; async is allowed (hydration is the representative
+ * case). It must never touch `conversation`. Throwing fails the step loudly.
+ */
+export type ModelInputMiddleware = (
+  messages: ModelInput,
+  ctx: StepContext,
+) => ModelInput | Promise<ModelInput>;
 
 // -----------------------------------------------------------------------
 // Result types

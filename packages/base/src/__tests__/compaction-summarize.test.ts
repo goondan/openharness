@@ -1,282 +1,186 @@
 import { describe, it, expect, vi } from "vitest";
 import { CompactionSummarize } from "../extensions/compaction-summarize.js";
-import type {
-  ExtensionApi,
-  StepMiddleware,
-  StepContext,
-  StepResult,
-  ConversationState,
-  Message,
-  MessageEvent,
-} from "@goondan/openharness-types";
+import type { Message, StepMiddleware } from "@goondan/openharness-types";
+import {
+  makeMessages,
+  makeMockApi,
+  makeMockConversationState,
+  makeStepContext,
+} from "./_mock-api.js";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const stubStepResult = { toolCalls: [] };
 
-function makeMessages(count: number): Message[] {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `msg-${i}`,
-    data: {
-      role: "user" as const,
-      content: `Message ${i}`,
-    },
-  }));
+/** Pull the single registered step middleware out of the mock api. */
+function registerStep(
+  conversation: ReturnType<typeof makeMockConversationState>,
+  ext: ReturnType<typeof CompactionSummarize>,
+): StepMiddleware {
+  const { api, registered } = makeMockApi(conversation);
+  ext.register(api);
+  expect(registered).toHaveLength(1);
+  expect(registered[0].kind).toBe("step");
+  return registered[0].handler as StepMiddleware;
 }
-
-function makeMockConversationState(
-  messages: Message[],
-): ConversationState & { emitted: MessageEvent[] } {
-  const emitted: MessageEvent[] = [];
-  return {
-    messages,
-    events: [],
-    emitted,
-    emit: vi.fn((event: MessageEvent) => {
-      emitted.push(event);
-    }),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(conversation: ConversationState): {
-  api: ExtensionApi;
-  registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }>;
-} {
-  const registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }> = [];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn(
-        (level: string, handler: StepMiddleware, options?: { priority?: number }) => {
-          registeredMiddleware.push({ level, handler, options });
-        },
-      ) as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn(),
-      remove: vi.fn(),
-      list: vi.fn(() => []),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, registeredMiddleware };
-}
-
-function makeMockLlmClient() {
-  return {
-    chat: vi.fn().mockResolvedValue({ text: "LLM-generated summary of the conversation." }),
-  };
-}
-
-function makeStepContext(conversation: ConversationState): StepContext {
-  return {
-    turnId: "turn-1",
-    agentName: "test-agent",
-    conversationId: "conv-1",
-    conversation,
-    stepNumber: 1,
-    abortSignal: new AbortController().signal,
-    input: {
-      name: "test-event",
-      content: [{ type: "text", text: "hello" }],
-      properties: {},
-      source: {
-        connector: "test-connector",
-        connectionName: "test",
-        receivedAt: new Date().toISOString(),
-      },
-    },
-    llm: makeMockLlmClient(),
-  };
-}
-
-const stubStepResult: StepResult = {
-  toolCalls: [],
-};
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("CompactionSummarize", () => {
-  it("creates an Extension with name 'compaction-summarize'", () => {
-    const ext = CompactionSummarize({ threshold: 10 });
-    expect(ext.name).toBe("compaction-summarize");
+  it("creates an AgentExtension with name 'compaction-summarize'", () => {
+    expect(CompactionSummarize({ threshold: 10 }).name).toBe(
+      "compaction-summarize",
+    );
   });
 
-  it("registers step middleware via api.pipeline.register", () => {
+  it("registers step middleware via api.useStep", () => {
     const conversation = makeMockConversationState([]);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+    const { api, registered } = makeMockApi(conversation);
 
-    const ext = CompactionSummarize({ threshold: 10 });
-    ext.register(api);
+    CompactionSummarize({ threshold: 10 }).register(api);
 
-    expect(api.pipeline.register).toHaveBeenCalledOnce();
-    expect(registeredMiddleware[0].level).toBe("step");
+    expect(api.useStep).toHaveBeenCalledOnce();
+    expect(registered[0].kind).toBe("step");
   });
 
   it("does NOT compact when messages are below threshold", async () => {
-    const messages = makeMessages(5);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+    const conversation = makeMockConversationState(makeMessages(5));
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
-    const ext = CompactionSummarize({ threshold: 10 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
-    const ctx = makeStepContext(conversation);
     const next = vi.fn(async () => stubStepResult);
+    await mw(makeStepContext(conversation), next);
 
-    await middleware(ctx, next);
-
-    expect(conversation.emit).not.toHaveBeenCalled();
+    expect(conversation.append).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledOnce();
   });
 
-  it("compacts when messages exceed threshold", async () => {
-    const messages = makeMessages(12);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("durably removes oldest messages and appends a summary", async () => {
+    const conversation = makeMockConversationState(makeMessages(12));
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
-    const ext = CompactionSummarize({ threshold: 10 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
-    const ctx = makeStepContext(conversation);
     const next = vi.fn(async () => stubStepResult);
+    await mw(makeStepContext(conversation, "LLM summary"), next);
 
-    await middleware(ctx, next);
-
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-
-    // keepCount = floor(10/2) = 5, removeCount = 12 - 5 = 7
-    // Should have 7 remove events + 1 appendSystem event
-    const removeEvents = emitted.filter((e) => e.type === "remove");
-    const appendEvents = emitted.filter((e) => e.type === "appendSystem");
-
-    expect(removeEvents).toHaveLength(7);
-    expect(appendEvents).toHaveLength(1);
-
-    // The appended message should be a system summary
-    const appendEvent = appendEvents[0];
-    if (appendEvent.type === "appendSystem") {
-      expect(appendEvent.message.data.role).toBe("system");
-      expect(appendEvent.message.data.content).toContain("[Summary of earlier conversation]:");
-      expect(appendEvent.message.metadata?.__createdBy).toBe("compaction-summarize");
-    }
-
-    expect(next).toHaveBeenCalledOnce();
-  });
-
-  it("removes the oldest messages (not the newest)", async () => {
-    const messages = makeMessages(12);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
-
-    const ext = CompactionSummarize({ threshold: 10 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
-    const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
-
-    await middleware(ctx, next);
-
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-    const removeEvents = emitted.filter(
-      (e): e is Extract<typeof e, { type: "remove" }> => e.type === "remove",
+    // keepCount = floor(10/2) = 5, removeCount = 12 - 5 = 7.
+    const removes = conversation.appended.filter((e) => e.type === "remove");
+    const appends = conversation.appended.filter(
+      (e) => e.type === "appendSystem",
     );
+    expect(removes).toHaveLength(7);
+    expect(appends).toHaveLength(1);
 
-    // Should remove msg-0 through msg-6 (the oldest 7)
-    const removedIds = removeEvents.map((e) => e.messageId);
+    const append = appends[0];
+    if (append.type === "appendSystem") {
+      expect(append.message.data.role).toBe("system");
+      expect(append.message.data.content).toContain(
+        "[Summary of earlier conversation]:",
+      );
+      expect(append.message.data.content).toContain("LLM summary");
+      expect(append.message.createdBy).toBe("compaction-summarize");
+    }
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("removes the oldest messages, not the newest", async () => {
+    const conversation = makeMockConversationState(makeMessages(12));
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
+
+    await mw(makeStepContext(conversation), vi.fn(async () => stubStepResult));
+
+    const removedIds = conversation.appended
+      .filter((e): e is Extract<typeof e, { type: "remove" }> => e.type === "remove")
+      .map((e) => e.messageId);
     expect(removedIds).toContain("msg-0");
     expect(removedIds).toContain("msg-6");
     expect(removedIds).not.toContain("msg-7");
     expect(removedIds).not.toContain("msg-11");
   });
 
-  it("summary content includes text from removed messages", async () => {
-    const messages = makeMessages(12);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("never folds system messages into the summary candidates", async () => {
+    const system: Message = {
+      id: "sys",
+      data: { role: "system", content: "system prompt" },
+    };
+    const summary: Message = {
+      id: "old-summary",
+      data: { role: "system", content: "earlier summary" },
+    };
+    const conversation = makeMockConversationState([
+      system,
+      summary,
+      ...makeMessages(12),
+    ]);
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
-    const ext = CompactionSummarize({ threshold: 10 });
-    ext.register(api);
+    await mw(makeStepContext(conversation), vi.fn(async () => stubStepResult));
 
-    const middleware = registeredMiddleware[0].handler;
-    const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const removedIds = conversation.appended
+      .filter((e): e is Extract<typeof e, { type: "remove" }> => e.type === "remove")
+      .map((e) => e.messageId);
+    // System messages are excluded from removal even though total count > threshold.
+    expect(removedIds).not.toContain("sys");
+    expect(removedIds).not.toContain("old-summary");
+    // removable = 12 user messages, keepCount = 5 → remove 7 oldest user msgs.
+    expect(removedIds).toHaveLength(7);
+    expect(removedIds).toContain("msg-0");
+    expect(removedIds).not.toContain("msg-7");
+  });
 
-    await middleware(ctx, next);
+  it("invokes the agent LLM to produce the summary", async () => {
+    const conversation = makeMockConversationState(makeMessages(12));
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
-    // Verify LLM was called for summarization
+    const ctx = makeStepContext(conversation, "LLM-generated summary");
+    await mw(ctx, vi.fn(async () => stubStepResult));
+
     expect(ctx.llm.chat).toHaveBeenCalledOnce();
-
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-    const appendEvent = emitted.find((e) => e.type === "appendSystem");
-    if (appendEvent && appendEvent.type === "appendSystem") {
-      const content = appendEvent.message.data.content as string;
-      // Should include the LLM-generated summary
-      expect(content).toContain("LLM-generated summary of the conversation.");
+    const append = conversation.appended.find((e) => e.type === "appendSystem");
+    if (append && append.type === "appendSystem") {
+      expect(append.message.data.content).toContain("LLM-generated summary");
     }
   });
 
-  it("uses custom summarizer when provided", async () => {
-    const messages = makeMessages(12);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("uses a custom summarizer when provided", async () => {
+    const conversation = makeMockConversationState(makeMessages(12));
+    const summarizer = vi.fn(
+      async (msgs: Message[]) => `Custom summary of ${msgs.length} messages`,
+    );
+    const mw = registerStep(
+      conversation,
+      CompactionSummarize({ threshold: 10, summarizer }),
+    );
 
-    const summarizer = vi.fn(async (msgs: Message[]) => {
-      return `Custom summary of ${msgs.length} messages`;
-    });
-
-    const ext = CompactionSummarize({ threshold: 10, summarizer });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
-    const ctx = makeStepContext(conversation);
     const next = vi.fn(async () => stubStepResult);
+    await mw(makeStepContext(conversation), next);
 
-    await middleware(ctx, next);
-
-    // summarizer should have been called with the 7 removed messages
     expect(summarizer).toHaveBeenCalledOnce();
+    expect(summarizer.mock.calls[0][0]).toHaveLength(7);
     expect(summarizer).toHaveBeenCalledWith(
       expect.arrayContaining([
         expect.objectContaining({ id: "msg-0" }),
         expect.objectContaining({ id: "msg-6" }),
       ]),
     );
-    expect(summarizer.mock.calls[0][0]).toHaveLength(7);
 
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted;
-    const appendEvent = emitted.find((e) => e.type === "appendSystem");
-    if (appendEvent && appendEvent.type === "appendSystem") {
-      const content = appendEvent.message.data.content as string;
-      expect(content).toContain("Custom summary of 7 messages");
+    const append = conversation.appended.find((e) => e.type === "appendSystem");
+    if (append && append.type === "appendSystem") {
+      expect(append.message.data.content).toContain("Custom summary of 7 messages");
     }
+    expect(next).toHaveBeenCalledOnce();
+  });
 
+  it("does nothing when removable count is at or below keepCount", async () => {
+    // 11 messages but 7 are system → only 4 removable, keepCount = 5.
+    const systems: Message[] = Array.from({ length: 7 }, (_, i) => ({
+      id: `sys-${i}`,
+      data: { role: "system", content: `s${i}` },
+    }));
+    const conversation = makeMockConversationState([
+      ...systems,
+      ...makeMessages(4),
+    ]);
+    const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
+
+    const next = vi.fn(async () => stubStepResult);
+    await mw(makeStepContext(conversation), next);
+
+    expect(conversation.append).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledOnce();
   });
 });

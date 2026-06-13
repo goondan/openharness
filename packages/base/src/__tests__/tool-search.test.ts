@@ -1,70 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { ToolSearch } from "../extensions/tool-search.js";
-import type {
-  ExtensionApi,
-  ConversationState,
-  ToolDefinition,
-  ToolContext,
-} from "@goondan/openharness-types";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeMockConversationState(): ConversationState {
-  return {
-    messages: [],
-    events: [],
-    emit: vi.fn(),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(
-  conversation: ConversationState,
-  availableTools: ToolDefinition[] = [],
-): {
-  api: ExtensionApi;
-  registeredTools: ToolDefinition[];
-} {
-  const registeredTools: ToolDefinition[] = [...availableTools];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn() as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn((tool: ToolDefinition) => {
-        registeredTools.push(tool);
-      }),
-      remove: vi.fn(),
-      list: vi.fn(() => registeredTools as readonly ToolDefinition[]),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, registeredTools };
-}
-
-function makeDummyTool(name: string, description: string): ToolDefinition {
-  return {
-    name,
-    description,
-    parameters: { type: "object", properties: {} },
-    handler: async () => ({ type: "text", text: "ok" }),
-  };
-}
+import type { ToolContext, ToolDefinition } from "@goondan/openharness-types";
+import { makeDummyTool, makeMockApi } from "./_mock-api.js";
 
 function makeToolContext(): ToolContext {
   return {
@@ -74,44 +11,39 @@ function makeToolContext(): ToolContext {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+function searchToolOf(api: ReturnType<typeof makeMockApi>["api"]): ToolDefinition {
+  const tool = (api.tools.list() as ToolDefinition[]).find(
+    (t) => t.name === "search_tools",
+  );
+  if (!tool) throw new Error("search_tools not registered");
+  return tool;
+}
 
 describe("ToolSearch", () => {
-  it("creates an Extension with name 'tool-search'", () => {
-    const ext = ToolSearch();
-    expect(ext.name).toBe("tool-search");
+  it("creates an AgentExtension with name 'tool-search'", () => {
+    expect(ToolSearch().name).toBe("tool-search");
   });
 
   it("registers a meta-tool named 'search_tools'", () => {
-    const conversation = makeMockConversationState();
-    const { api, registeredTools } = makeMockApi(conversation);
-
-    const ext = ToolSearch();
-    ext.register(api);
+    const { api, registeredTools } = makeMockApi();
+    ToolSearch().register(api);
 
     expect(api.tools.register).toHaveBeenCalledOnce();
-    const searchTool = registeredTools.find((t) => t.name === "search_tools");
-    expect(searchTool).toBeDefined();
+    expect(registeredTools.find((t) => t.name === "search_tools")).toBeDefined();
   });
 
-  it("search_tools returns tools matching keyword in name", async () => {
-    const conversation = makeMockConversationState();
-    const seedTools = [
+  it("matches tools by keyword in the name", async () => {
+    const { api } = makeMockApi(undefined, [
       makeDummyTool("weather_get", "Get current weather"),
       makeDummyTool("calendar_add", "Add a calendar event"),
       makeDummyTool("weather_forecast", "Get weather forecast"),
-    ];
-    const { api } = makeMockApi(conversation, seedTools);
+    ]);
+    ToolSearch().register(api);
 
-    const ext = ToolSearch();
-    ext.register(api);
-
-    const searchTool = (api.tools.list() as ToolDefinition[]).find(
-      (t) => t.name === "search_tools",
-    )!;
-    const result = await searchTool.handler({ query: "weather" }, makeToolContext());
+    const result = await searchToolOf(api).handler(
+      { query: "weather" },
+      makeToolContext(),
+    );
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
@@ -122,21 +54,17 @@ describe("ToolSearch", () => {
     }
   });
 
-  it("search_tools returns tools matching keyword in description", async () => {
-    const conversation = makeMockConversationState();
-    const seedTools = [
+  it("matches tools by keyword in the description", async () => {
+    const { api } = makeMockApi(undefined, [
       makeDummyTool("tool_a", "Send an email to a recipient"),
       makeDummyTool("tool_b", "Read a file from disk"),
-    ];
-    const { api } = makeMockApi(conversation, seedTools);
+    ]);
+    ToolSearch().register(api);
 
-    const ext = ToolSearch();
-    ext.register(api);
-
-    const searchTool = (api.tools.list() as ToolDefinition[]).find(
-      (t) => t.name === "search_tools",
-    )!;
-    const result = await searchTool.handler({ query: "email" }, makeToolContext());
+    const result = await searchToolOf(api).handler(
+      { query: "email" },
+      makeToolContext(),
+    );
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
@@ -146,18 +74,16 @@ describe("ToolSearch", () => {
     }
   });
 
-  it("search_tools returns empty array when no match", async () => {
-    const conversation = makeMockConversationState();
-    const seedTools = [makeDummyTool("calculator", "Perform math operations")];
-    const { api } = makeMockApi(conversation, seedTools);
+  it("returns an empty array when nothing matches", async () => {
+    const { api } = makeMockApi(undefined, [
+      makeDummyTool("calculator", "Perform math operations"),
+    ]);
+    ToolSearch().register(api);
 
-    const ext = ToolSearch();
-    ext.register(api);
-
-    const searchTool = (api.tools.list() as ToolDefinition[]).find(
-      (t) => t.name === "search_tools",
-    )!;
-    const result = await searchTool.handler({ query: "nonexistent" }, makeToolContext());
+    const result = await searchToolOf(api).handler(
+      { query: "nonexistent" },
+      makeToolContext(),
+    );
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
@@ -165,23 +91,20 @@ describe("ToolSearch", () => {
     }
   });
 
-  it("search is case-insensitive", async () => {
-    const conversation = makeMockConversationState();
-    const seedTools = [makeDummyTool("WeatherTool", "Get Weather Data")];
-    const { api } = makeMockApi(conversation, seedTools);
+  it("searches case-insensitively", async () => {
+    const { api } = makeMockApi(undefined, [
+      makeDummyTool("WeatherTool", "Get Weather Data"),
+    ]);
+    ToolSearch().register(api);
 
-    const ext = ToolSearch();
-    ext.register(api);
-
-    const searchTool = (api.tools.list() as ToolDefinition[]).find(
-      (t) => t.name === "search_tools",
-    )!;
-    const result = await searchTool.handler({ query: "weather" }, makeToolContext());
+    const result = await searchToolOf(api).handler(
+      { query: "weather" },
+      makeToolContext(),
+    );
 
     expect(result.type).toBe("json");
     if (result.type === "json") {
-      const data = result.data as unknown as ToolDefinition[];
-      expect(data).toHaveLength(1);
+      expect((result.data as unknown as ToolDefinition[])).toHaveLength(1);
     }
   });
 });

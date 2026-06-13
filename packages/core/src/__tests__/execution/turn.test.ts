@@ -3,6 +3,8 @@ import { executeTurn, type TurnSteeringController } from "../../execution/turn.j
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { ModelInputRegistry } from "../../model-input.js";
+import { createMemoryStoreBacking } from "../../store.js";
 import { createConversationState } from "../../conversation-state.js";
 import type {
   LlmClient,
@@ -80,6 +82,7 @@ interface MakeDepsOptions {
   toolRegistry?: ToolRegistry;
   middlewareRegistry?: MiddlewareRegistry;
   eventBus?: EventBus;
+  modelInputRegistry?: ModelInputRegistry;
   maxSteps?: number;
 }
 
@@ -90,6 +93,8 @@ function makeDeps(opts?: MakeDepsOptions) {
     toolRegistry: opts?.toolRegistry ?? new ToolRegistry(),
     middlewareRegistry: opts?.middlewareRegistry ?? new MiddlewareRegistry(),
     eventBus: opts?.eventBus ?? new EventBus(),
+    modelInputRegistry: opts?.modelInputRegistry ?? new ModelInputRegistry(),
+    storeBacking: createMemoryStoreBacking(),
     conversationState,
     maxSteps: opts?.maxSteps ?? 10,
   };
@@ -587,7 +592,7 @@ describe("executeTurn", () => {
 
     await executeTurn("agent-1", "hello from user", undefined, deps);
 
-    const messages = deps.conversationState.messages;
+    const messages = deps.conversationState.getMessages();
     const userMessages = messages.filter((m) => messageRole(m) === "user");
     expect(userMessages).toHaveLength(1);
     expect(messageContent(userMessages[0])).toContain("hello from user");
@@ -609,7 +614,7 @@ describe("executeTurn", () => {
     const deps = makeDeps({ llmClient, toolRegistry });
     await executeTurn("agent-1", "Calculate something", undefined, deps);
 
-    const messages = deps.conversationState.messages;
+    const messages = deps.conversationState.getMessages();
 
     // Should have: user message, assistant (with tool-call), tool result, assistant (final)
     const userMessages = messages.filter((m) => messageRole(m) === "user");
@@ -685,25 +690,34 @@ describe("executeTurn", () => {
     expect(capturedCtx!.conversationId).toBe("envelope-conv-id");
   });
 
-  // Additional: _turnActive is reset to false after turn completes
-  it("conversationState._turnActive is set to false after turn completes", async () => {
+  // append is always allowed (no turn-active gate): the inbound message is
+  // recorded and survives a completed turn.
+  it("records the inbound message on a completed turn", async () => {
     const llmClient = makeLlmClient({ text: "response" });
     const deps = makeDeps({ llmClient });
 
-    expect(deps.conversationState._turnActive).toBe(false);
     await executeTurn("agent-1", "input", undefined, deps);
-    expect(deps.conversationState._turnActive).toBe(false);
+
+    const userMessages = deps.conversationState
+      .getMessages()
+      .filter((m) => m.data.role === "user");
+    expect(userMessages).toHaveLength(1);
   });
 
-  // Additional: _turnActive is reset to false even on error
-  it("conversationState._turnActive is reset to false even on error", async () => {
+  // ...and survives an errored turn too — append is never gated by turn state.
+  it("records the inbound message even when the turn errors", async () => {
     const llmClient: LlmClient = {
       chat: vi.fn().mockRejectedValue(new Error("crash")),
     };
     const deps = makeDeps({ llmClient });
 
-    await executeTurn("agent-1", "input", undefined, deps);
-    expect(deps.conversationState._turnActive).toBe(false);
+    const result = await executeTurn("agent-1", "input", undefined, deps);
+    expect(result.status).toBe("error");
+
+    const userMessages = deps.conversationState
+      .getMessages()
+      .filter((m) => m.data.role === "user");
+    expect(userMessages).toHaveLength(1);
   });
 
   // -----------------------------------------------------------------------
@@ -796,7 +810,7 @@ describe("executeTurn", () => {
       const deps = makeDeps({ llmClient, middlewareRegistry });
       await executeTurn("agent-1", "user input", undefined, deps);
 
-      const messages = deps.conversationState.messages;
+      const messages = deps.conversationState.getMessages();
       // "side-channel response"가 대화 메시지에 포함되지 않아야 한다
       const allContent = messages.map((m) => {
         const c = m.data.content;

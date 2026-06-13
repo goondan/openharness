@@ -8,6 +8,7 @@ import type {
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { WrapCtxFor } from "./store-injection.js";
 import { normalizeToolArgs } from "../tool-args.js";
 
 export class HumanApprovalPendingError extends Error {
@@ -50,9 +51,11 @@ export async function probeHumanApprovalGate(
     middlewareRegistry?: MiddlewareRegistry;
     eventBus: EventBus;
     humanApprovalStore?: HumanApprovalReferenceStore;
+    /** Per-layer ctx.store injection for the toolCall chain. */
+    storeWrapCtxFor?: WrapCtxFor<ToolCallContext>;
   },
 ): Promise<HumanApprovalGateProbeResult> {
-  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
+  const { toolRegistry, middlewareRegistry, eventBus, humanApprovalStore, storeWrapCtxFor } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber } = ctx;
   const toolCallId = ctx.toolCallId;
   if (!toolCallId) {
@@ -151,7 +154,11 @@ export async function probeHumanApprovalGate(
   };
 
   const chain = middlewareRegistry
-    ? middlewareRegistry.buildChain<ToolCallContext, ToolResult>("toolCall", coreHandler)
+    ? middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
+        "toolCall",
+        coreHandler,
+        storeWrapCtxFor ? { wrapCtxFor: storeWrapCtxFor } : undefined,
+      )
     : coreHandler;
   middlewareApplied = !!middlewareRegistry;
 
@@ -199,6 +206,8 @@ export async function executeToolCall(
     skipHumanApproval?: boolean;
     lockedToolArgs?: JsonObject;
     onToolArgsResolved?: (toolArgs: JsonObject) => void;
+    /** Per-layer ctx.store injection for the toolCall chain. */
+    storeWrapCtxFor?: WrapCtxFor<ToolCallContext>;
   }
 ): Promise<ToolResult> {
   const {
@@ -209,6 +218,7 @@ export async function executeToolCall(
     skipHumanApproval,
     lockedToolArgs,
     onToolArgsResolved,
+    storeWrapCtxFor,
   } = deps;
   const { toolName, toolArgs, turnId, agentName, conversationId, stepNumber, abortSignal } = ctx;
   const normalizedToolArgs = normalizeToolArgs(toolArgs);
@@ -322,19 +332,22 @@ export async function executeToolCall(
   const chain = middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
     "toolCall",
     coreHandler,
-    lockedToolArgsSnapshot
-      ? {
-          mergeOverride: (currentCtx, override) => ({
-            ...currentCtx,
-            ...override,
-            toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
-          }),
-          prepareNextCtx: (nextCtx) => ({
-            ...nextCtx,
-            toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
-          }),
-        }
-      : undefined,
+    {
+      ...(lockedToolArgsSnapshot
+        ? {
+            mergeOverride: (currentCtx, override) => ({
+              ...currentCtx,
+              ...override,
+              toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
+            }),
+            prepareNextCtx: (nextCtx) => ({
+              ...nextCtx,
+              toolArgs: cloneToolArgs(lockedToolArgsSnapshot),
+            }),
+          }
+        : {}),
+      ...(storeWrapCtxFor ? { wrapCtxFor: storeWrapCtxFor } : {}),
+    },
   );
 
   // 4. Run the chain, handling errors

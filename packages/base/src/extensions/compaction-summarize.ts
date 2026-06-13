@@ -1,10 +1,19 @@
-import type { Extension, ExtensionApi, Message, LlmChatOptions } from "@goondan/openharness-types";
+import {
+  type AgentExtension,
+  type AgentExtensionApi,
+  type Message,
+  type LlmChatOptions,
+  type SystemModelMessage,
+  createMessage,
+} from "@goondan/openharness-types";
 import { randomUUID } from "node:crypto";
 
 const DEFAULT_SUMMARY_PROMPT =
   "You are a conversation compactor. Summarize the following messages into a concise summary " +
   "that preserves all important context, decisions, facts, and action items. " +
   "Be thorough but brief. Output only the summary text, nothing else.";
+
+const CREATED_BY = "compaction-summarize";
 
 /**
  * Extract plain-text representation of a Message for summarization.
@@ -20,7 +29,14 @@ function messageToText(m: Message): string {
 
 /**
  * CompactionSummarize extension — when message count exceeds `threshold`,
- * removes the oldest messages and replaces them with an LLM-generated summary.
+ * removes the oldest *non-system* messages and replaces them with an
+ * LLM-generated summary.
+ *
+ * This is a durable mutation, not a projection: removing history and recording a
+ * summary changes the log itself, and must survive replay. It runs as step
+ * middleware (`useStep`) so it assembles context before the model call. System
+ * messages are never folded into the summary — filtering them out keeps stale
+ * prompts/summaries out of the new summary.
  *
  * By default, uses the agent's own LLM (`ctx.llm`) to produce the summary.
  * A custom `summarizer` callback can override this for advanced use cases
@@ -36,17 +52,23 @@ export function CompactionSummarize(config: {
   /** LLM options for the summarization call (e.g. model override for cheaper summarization). */
   llmOptions?: LlmChatOptions;
   summarizer?: (messages: Message[]) => Promise<string>;
-}): Extension {
+}): AgentExtension {
   return {
     name: "compaction-summarize",
 
-    register(api: ExtensionApi): void {
-      api.pipeline.register("step", async (ctx, next) => {
-        const messages = ctx.conversation.messages;
+    register(api: AgentExtensionApi): void {
+      api.useStep(async (ctx, next) => {
+        const messages = ctx.conversation.getMessages();
         if (messages.length > config.threshold) {
           const keepCount = Math.floor(config.threshold / 2);
-          const removeCount = messages.length - keepCount;
-          const toRemove = messages.slice(0, removeCount);
+          // Only non-system messages are compaction candidates. System
+          // messages (the prompt, prior summaries) must lead the view and
+          // must not be summarized away.
+          const removable = messages.filter((m) => m.data.role !== "system");
+          if (removable.length <= keepCount) return next();
+
+          const removeCount = removable.length - keepCount;
+          const toRemove = removable.slice(0, removeCount);
 
           let summaryText: string;
 
@@ -60,8 +82,16 @@ export function CompactionSummarize(config: {
 
             const llmResponse = await ctx.llm.chat(
               [
-                { id: `compaction-sys-${randomUUID()}`, data: { role: "system", content: prompt }, metadata: {} },
-                { id: `compaction-usr-${randomUUID()}`, data: { role: "user", content: transcript }, metadata: {} },
+                createMessage<SystemModelMessage>({
+                  id: `compaction-sys-${randomUUID()}`,
+                  data: { role: "system", content: prompt },
+                  createdBy: CREATED_BY,
+                }),
+                createMessage({
+                  id: `compaction-usr-${randomUUID()}`,
+                  data: { role: "user", content: transcript },
+                  createdBy: CREATED_BY,
+                }),
               ],
               [], // no tools needed for summarization
               ctx.abortSignal,
@@ -71,30 +101,23 @@ export function CompactionSummarize(config: {
             summaryText = llmResponse.text ?? transcript;
           }
 
-          // Remove old messages, replace first with summary for stable ordering
-          const [firstToRemove, ...restToRemove] = toRemove;
-          // Replace the first message with the summary
-          ctx.conversation.emit({
-            type: "remove",
-            messageId: firstToRemove.id,
-          });
-          for (const msg of restToRemove) {
-            ctx.conversation.emit({ type: "remove", messageId: msg.id });
+          // Remove the old non-system messages. Durable — survives replay.
+          for (const msg of toRemove) {
+            ctx.conversation.append({ type: "remove", messageId: msg.id });
           }
 
-          // Prepend summary as a system message
-          ctx.conversation.emit({
+          // Record the summary as a system message so it keeps leading the
+          // durable log and the model-input view stays valid.
+          ctx.conversation.append({
             type: "appendSystem",
-            message: {
+            message: createMessage<SystemModelMessage>({
               id: `summary-${randomUUID()}`,
               data: {
                 role: "system",
                 content: `[Summary of earlier conversation]: ${summaryText}`,
               },
-              metadata: {
-                __createdBy: "compaction-summarize",
-              },
-            },
+              createdBy: CREATED_BY,
+            }),
           });
         }
         return next();

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { buildChain, MiddlewareRegistry } from "../middleware-chain.js";
+import {
+  buildChain,
+  MiddlewareRegistry,
+  planMiddlewareOrder,
+  type ChainEntry,
+  type NormalizedPlacement,
+} from "../middleware-chain.js";
+import { MiddlewareOrderError } from "../errors.js";
 
 // Helper: a simple context type
 interface Ctx {
@@ -11,17 +18,17 @@ interface Res {
   result: number;
 }
 
+type Handler = (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>) => Promise<Res>;
+
 describe("buildChain", () => {
-  // Test 1: Empty chain → core handler runs directly
   it("empty middleware list runs core handler directly", async () => {
     const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value * 2 });
-    const chain = buildChain([], core);
+    const chain = buildChain<Ctx, Res>([], core);
 
     const result = await chain({ value: 5 });
     expect(result).toEqual({ result: 10 });
   });
 
-  // Test 2: Single middleware wraps core handler (before/after)
   it("single middleware wraps core handler with before/after hooks", async () => {
     const log: string[] = [];
 
@@ -30,25 +37,20 @@ describe("buildChain", () => {
       return { result: ctx.value };
     };
 
-    const mw = {
-      handler: async (ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        log.push("before");
-        const res = await next();
-        log.push("after");
-        return res;
-      },
-      priority: 100,
-      order: 0,
+    const mw: Handler = async (_ctx, next) => {
+      log.push("before");
+      const res = await next();
+      log.push("after");
+      return res;
     };
 
-    const chain = buildChain([mw], core);
+    const chain = buildChain<Ctx, Res>([mw], core);
     await chain({ value: 1 });
 
     expect(log).toEqual(["before", "core", "after"]);
   });
 
-  // Test 3: Multiple middlewares execute in priority order (50 → 100 → 200)
-  it("multiple middlewares execute in ascending priority order", async () => {
+  it("wraps handlers outermost-first (index 0 is outermost)", async () => {
     const log: string[] = [];
 
     const core = async (_ctx: Ctx): Promise<Res> => {
@@ -56,59 +58,14 @@ describe("buildChain", () => {
       return { result: 0 };
     };
 
-    const makeMw = (name: string, priority: number, order: number) => ({
-      handler: async (_ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        log.push(`${name}:before`);
-        const res = await next();
-        log.push(`${name}:after`);
-        return res;
-      },
-      priority,
-      order,
-    });
-
-    const chain = buildChain(
-      [makeMw("p200", 200, 2), makeMw("p50", 50, 0), makeMw("p100", 100, 1)],
-      core
-    );
-    await chain({ value: 1 });
-
-    expect(log).toEqual([
-      "p50:before",
-      "p100:before",
-      "p200:before",
-      "core",
-      "p200:after",
-      "p100:after",
-      "p50:after",
-    ]);
-  });
-
-  // Test 4: Same priority → declaration (registration) order
-  it("same priority respects registration (declaration) order", async () => {
-    const log: string[] = [];
-
-    const core = async (_ctx: Ctx): Promise<Res> => {
-      log.push("core");
-      return { result: 0 };
+    const makeMw = (name: string): Handler => async (_ctx, next) => {
+      log.push(`${name}:before`);
+      const res = await next();
+      log.push(`${name}:after`);
+      return res;
     };
 
-    const makeMw = (name: string, order: number) => ({
-      handler: async (_ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        log.push(`${name}:before`);
-        const res = await next();
-        log.push(`${name}:after`);
-        return res;
-      },
-      priority: 100,
-      order,
-    });
-
-    // Registered in order: A(0), B(1), C(2) — all same priority
-    const chain = buildChain(
-      [makeMw("A", 0), makeMw("B", 1), makeMw("C", 2)],
-      core
-    );
+    const chain = buildChain<Ctx, Res>([makeMw("A"), makeMw("B"), makeMw("C")], core);
     await chain({ value: 1 });
 
     expect(log).toEqual([
@@ -122,7 +79,6 @@ describe("buildChain", () => {
     ]);
   });
 
-  // Test 5: Middleware that doesn't call next() → core handler NOT executed
   it("middleware that skips next() prevents core handler from running", async () => {
     const coreRan = vi.fn();
 
@@ -131,53 +87,36 @@ describe("buildChain", () => {
       return { result: 99 };
     };
 
-    const shortCircuit = {
-      handler: async (_ctx: Ctx, _next: () => Promise<Res>): Promise<Res> => {
-        // Do NOT call next
-        return { result: 42 };
-      },
-      priority: 100,
-      order: 0,
-    };
+    const shortCircuit: Handler = async () => ({ result: 42 });
 
-    const chain = buildChain([shortCircuit], core);
+    const chain = buildChain<Ctx, Res>([shortCircuit], core);
     const result = await chain({ value: 1 });
 
     expect(result).toEqual({ result: 42 });
     expect(coreRan).not.toHaveBeenCalled();
   });
 
-  // Test 6: Middleware that throws → error propagates to caller
   it("middleware that throws propagates the error to the caller", async () => {
     const core = async (_ctx: Ctx): Promise<Res> => ({ result: 0 });
 
-    const throwing = {
-      handler: async (_ctx: Ctx, _next: () => Promise<Res>): Promise<Res> => {
-        throw new Error("middleware-error");
-      },
-      priority: 100,
-      order: 0,
+    const throwing: Handler = async () => {
+      throw new Error("middleware-error");
     };
 
-    const chain = buildChain([throwing], core);
+    const chain = buildChain<Ctx, Res>([throwing], core);
 
     await expect(chain({ value: 1 })).rejects.toThrow("middleware-error");
   });
 
-  // Test 7: Middleware can modify context before next()
   it("middleware can modify context before calling next()", async () => {
     const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value });
 
-    const modifier = {
-      handler: async (ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        ctx.value = ctx.value + 10;
-        return next();
-      },
-      priority: 100,
-      order: 0,
+    const modifier: Handler = async (ctx, next) => {
+      ctx.value = ctx.value + 10;
+      return next();
     };
 
-    const chain = buildChain([modifier], core);
+    const chain = buildChain<Ctx, Res>([modifier], core);
     const result = await chain({ value: 5 });
 
     expect(result).toEqual({ result: 15 });
@@ -188,23 +127,13 @@ describe("buildChain", () => {
     const originalCtx = { value: 5 };
     const innerObservedValues: number[] = [];
 
-    const outer = {
-      handler: async (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>): Promise<Res> => {
-        return next({ value: ctx.value + 10 });
-      },
-      priority: 50,
-      order: 0,
-    };
-    const inner = {
-      handler: async (ctx: Ctx, next: (override?: Partial<Ctx>) => Promise<Res>): Promise<Res> => {
-        innerObservedValues.push(ctx.value);
-        return next();
-      },
-      priority: 100,
-      order: 1,
+    const outer: Handler = async (ctx, next) => next({ value: ctx.value + 10 });
+    const inner: Handler = async (ctx, next) => {
+      innerObservedValues.push(ctx.value);
+      return next();
     };
 
-    const chain = buildChain([outer, inner], core);
+    const chain = buildChain<Ctx, Res>([outer, inner], core);
     const result = await chain(originalCtx);
 
     expect(innerObservedValues).toEqual([15]);
@@ -212,66 +141,40 @@ describe("buildChain", () => {
     expect(originalCtx).toEqual({ value: 5 });
   });
 
-  // Test 8: Middleware can modify result after next()
   it("middleware can modify the result after next() returns", async () => {
     const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value });
 
-    const resultModifier = {
-      handler: async (ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        const res = await next();
-        return { result: res.result * 3 };
-      },
-      priority: 100,
-      order: 0,
+    const resultModifier: Handler = async (_ctx, next) => {
+      const res = await next();
+      return { result: res.result * 3 };
     };
 
-    const chain = buildChain([resultModifier], core);
+    const chain = buildChain<Ctx, Res>([resultModifier], core);
     const result = await chain({ value: 7 });
 
     expect(result).toEqual({ result: 21 });
   });
 
-  // Test 9: Extension isolation (NFR-003): middleware A throws → middleware B (lower priority) still functions in subsequent calls
-  it("NFR-003: one middleware throwing does not break other middlewares in subsequent calls", async () => {
-    let callCount = 0;
-    const core = async (ctx: Ctx): Promise<Res> => ({ result: ctx.value });
-
-    // mwA has priority 50 (runs outermost) and throws on first call
-    const mwA = {
-      handler: async (ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        callCount++;
-        if (callCount === 1) {
-          throw new Error("transient error from mwA");
-        }
-        return next();
-      },
-      priority: 50,
-      order: 0,
+  it("applies a per-layer wrapCtx transform to the handler and downstream", async () => {
+    const observed: number[] = [];
+    const core = async (ctx: Ctx): Promise<Res> => {
+      observed.push(ctx.value);
+      return { result: ctx.value };
     };
 
-    // mwB has priority 100 (runs inside mwA)
-    const mwBRan = vi.fn();
-    const mwB = {
-      handler: async (ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
-        mwBRan();
+    const entry: ChainEntry<Ctx, Res> = {
+      handler: async (ctx, next) => {
+        observed.push(ctx.value);
         return next();
       },
-      priority: 100,
-      order: 1,
+      wrapCtx: (ctx) => ({ ...ctx, value: ctx.value + 100 }),
     };
 
-    const chain = buildChain([mwA, mwB], core);
+    const chain = buildChain<Ctx, Res>([entry], core);
+    await chain({ value: 1 });
 
-    // First call: mwA throws — chain invocation fails
-    await expect(chain({ value: 1 })).rejects.toThrow("transient error from mwA");
-
-    // mwB should NOT have been called on first invocation (mwA threw before calling next)
-    expect(mwBRan).not.toHaveBeenCalled();
-
-    // Second call: mwA no longer throws, mwB should run fine
-    const result = await chain({ value: 5 });
-    expect(result).toEqual({ result: 5 });
-    expect(mwBRan).toHaveBeenCalledOnce();
+    // The handler and the core both see the wrapped (101) value.
+    expect(observed).toEqual([101, 101]);
   });
 });
 
@@ -280,7 +183,7 @@ describe("MiddlewareRegistry", () => {
     const registry = new MiddlewareRegistry();
 
     const log: string[] = [];
-    registry.register("turn", (async (ctx: Ctx, next: () => Promise<Res>) => {
+    registry.register("turn", (async (_ctx: Ctx, next: () => Promise<Res>) => {
       log.push("mw:before");
       const res = await next();
       log.push("mw:after");
@@ -299,47 +202,198 @@ describe("MiddlewareRegistry", () => {
     expect(log).toEqual(["mw:before", "core", "mw:after"]);
   });
 
-  it("respects priority option when registering", async () => {
+  it("orders by registration when no before/after is given", async () => {
     const registry = new MiddlewareRegistry();
     const log: string[] = [];
 
-    registry.register(
-      "turn",
+    const makeMw = (name: string) =>
       (async (_ctx: Ctx, next: () => Promise<Res>) => {
-        log.push("p200:before");
+        log.push(`${name}:before`);
         const res = await next();
-        log.push("p200:after");
+        log.push(`${name}:after`);
         return res;
-      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
-      { priority: 200 }
-    );
+      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>;
 
-    registry.register(
-      "turn",
-      (async (_ctx: Ctx, next: () => Promise<Res>) => {
-        log.push("p50:before");
-        const res = await next();
-        log.push("p50:after");
-        return res;
-      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
-      { priority: 50 }
-    );
+    registry.register("turn", makeMw("A"), { name: "A" });
+    registry.register("turn", makeMw("B"), { name: "B" });
 
     const core = async (_ctx: Ctx): Promise<Res> => {
       log.push("core");
       return { result: 0 };
     };
-
     const chain = registry.buildChain<Ctx, Res>("turn", core);
     await chain({ value: 1 });
 
-    expect(log).toEqual([
-      "p50:before",
-      "p200:before",
-      "core",
-      "p200:after",
-      "p50:after",
-    ]);
+    expect(log).toEqual(["A:before", "B:before", "core", "B:after", "A:after"]);
+  });
+
+  it("honors before/after edges over registration order", async () => {
+    const registry = new MiddlewareRegistry();
+    const log: string[] = [];
+
+    const makeMw = (name: string) =>
+      (async (_ctx: Ctx, next: () => Promise<Res>) => {
+        log.push(name);
+        return next();
+      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>;
+
+    // Registered B then A, but A declares before:B → A enters first.
+    registry.register("turn", makeMw("B"), { name: "B" });
+    registry.register("turn", makeMw("A"), { name: "A", before: "B" });
+
+    const core = async (_ctx: Ctx): Promise<Res> => ({ result: 0 });
+    const chain = registry.buildChain<Ctx, Res>("turn", core);
+    await chain({ value: 1 });
+
+    expect(log).toEqual(["A", "B"]);
+  });
+
+  it("'*' band: before:'*' enters outermost, after:'*' enters innermost", async () => {
+    const registry = new MiddlewareRegistry();
+    const log: string[] = [];
+
+    const makeMw = (name: string) =>
+      (async (_ctx: Ctx, next: () => Promise<Res>) => {
+        log.push(name);
+        return next();
+      }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>;
+
+    // Registration order deliberately scrambled relative to desired order.
+    registry.register("turn", makeMw("mid"), { name: "mid" });
+    registry.register("turn", makeMw("last"), { name: "last", after: "*" });
+    registry.register("turn", makeMw("first"), { name: "first", before: "*" });
+
+    const core = async (_ctx: Ctx): Promise<Res> => ({ result: 0 });
+    const chain = registry.buildChain<Ctx, Res>("turn", core);
+    await chain({ value: 1 });
+
+    expect(log).toEqual(["first", "mid", "last"]);
+  });
+
+  it("throws a boot error on an unknown before/after reference", () => {
+    const registry = new MiddlewareRegistry();
+    registry.register(
+      "turn",
+      (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+        c: unknown,
+        n: () => Promise<unknown>,
+      ) => Promise<unknown>,
+      { name: "A", before: "ghost" },
+    );
+
+    expect(() => registry.validate()).toThrow(MiddlewareOrderError);
+    expect(() => registry.validate()).toThrow(/unknown middleware/);
+  });
+
+  it("throws a boot error on a cycle", () => {
+    const registry = new MiddlewareRegistry();
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    registry.register("turn", noop, { name: "A", before: "B" });
+    registry.register("turn", noop, { name: "B", before: "A" });
+
+    expect(() => registry.validate()).toThrow(MiddlewareOrderError);
+    expect(() => registry.validate()).toThrow(/cycle/);
+  });
+
+  it("throws a boot error on a duplicate name at one level", () => {
+    const registry = new MiddlewareRegistry();
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    registry.register("turn", noop, { name: "dup" });
+    registry.register("turn", noop, { name: "dup" });
+
+    expect(() => registry.validate()).toThrow(MiddlewareOrderError);
+    expect(() => registry.validate()).toThrow(/Duplicate middleware name/);
+  });
+
+  it("rejects '*' as a middleware name", () => {
+    const registry = new MiddlewareRegistry();
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    registry.register("turn", noop, { name: "*" });
+
+    expect(() => registry.validate()).toThrow(MiddlewareOrderError);
+  });
+
+  it("rejects registration at a disallowed level (scope enforcement)", () => {
+    const registry = new MiddlewareRegistry(["turn", "step", "toolCall"]);
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    expect(() => registry.register("ingress", noop)).toThrow(MiddlewareOrderError);
+  });
+
+  it("warns once per level when multiple unordered middleware coexist", () => {
+    const warnings: string[] = [];
+    const registry = new MiddlewareRegistry(undefined, (m) => warnings.push(m));
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    registry.register("turn", noop, { name: "A" });
+    registry.register("turn", noop, { name: "B" });
+    registry.register("turn", noop, { name: "C" });
+
+    registry.validate();
+
+    const turnWarnings = warnings.filter((w) => w.includes('Level "turn"'));
+    expect(turnWarnings).toHaveLength(1);
+    expect(turnWarnings[0]).toMatch(/no before\/after placement/);
+  });
+
+  it("does not warn when unordered middleware are placed with before/after", () => {
+    const warnings: string[] = [];
+    const registry = new MiddlewareRegistry(undefined, (m) => warnings.push(m));
+    const noop = (async (_c: unknown, n: () => Promise<unknown>) => n()) as (
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<unknown>;
+
+    registry.register("turn", noop, { name: "A", before: "*" });
+    registry.register("turn", noop, { name: "B", after: "A" });
+
+    registry.validate();
+
+    expect(warnings.filter((w) => w.includes('Level "turn"'))).toHaveLength(0);
+  });
+
+  it("injects a per-layer scoped ctx via wrapCtxFor", async () => {
+    const registry = new MiddlewareRegistry();
+    const seen: Array<string | undefined> = [];
+
+    interface ScopedCtx {
+      scope?: string;
+    }
+    registry.register(
+      "turn",
+      (async (ctx: ScopedCtx, next: () => Promise<Res>) => {
+        seen.push(ctx.scope);
+        return next();
+      }) as (c: unknown, n: () => Promise<unknown>) => Promise<unknown>,
+      { name: "A" },
+      "ext-a",
+    );
+
+    const core = async (_ctx: ScopedCtx): Promise<Res> => ({ result: 0 });
+    const chain = registry.buildChain<ScopedCtx, Res>("turn", core, {
+      wrapCtxFor: (extensionName) => (ctx) => ({ ...ctx, scope: extensionName }),
+    });
+    await chain({});
+
+    expect(seen).toEqual(["ext-a"]);
   });
 
   it("unregistered level builds chain with no middlewares (core only)", async () => {
@@ -350,5 +404,44 @@ describe("MiddlewareRegistry", () => {
     const result = await chain({ value: 4 });
 
     expect(result).toEqual({ result: 8 });
+  });
+});
+
+describe("planMiddlewareOrder", () => {
+  const place = (
+    name: string,
+    order: number,
+    opts: Partial<NormalizedPlacement> = {},
+  ): NormalizedPlacement => ({
+    name,
+    before: [],
+    after: [],
+    bandBefore: false,
+    bandAfter: false,
+    level: "turn",
+    order,
+    ...opts,
+  });
+
+  it("returns registration order with no edges", () => {
+    const plan = planMiddlewareOrder([place("A", 0), place("B", 1), place("C", 2)]);
+    expect(plan.map((p) => p.name)).toEqual(["A", "B", "C"]);
+  });
+
+  it("resolves a before edge regardless of registration order", () => {
+    const plan = planMiddlewareOrder([
+      place("B", 0),
+      place("A", 1, { before: ["B"] }),
+    ]);
+    expect(plan.map((p) => p.name)).toEqual(["A", "B"]);
+  });
+
+  it("bandBefore precedes all non-band, bandAfter follows all non-band", () => {
+    const plan = planMiddlewareOrder([
+      place("mid", 0),
+      place("last", 1, { bandAfter: true }),
+      place("first", 2, { bandBefore: true }),
+    ]);
+    expect(plan.map((p) => p.name)).toEqual(["first", "mid", "last"]);
   });
 });

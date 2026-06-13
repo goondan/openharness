@@ -4,6 +4,8 @@ import { HumanApprovalPendingError } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { ModelInputRegistry } from "../../model-input.js";
+import { createMemoryStoreBacking, createScopedStore } from "../../store.js";
 import { createConversationState } from "../../conversation-state.js";
 import { InMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
@@ -37,10 +39,11 @@ function makeMessage(
 }
 
 function makeConversation() {
-  const conv = createConversationState();
-  // Must be active for emit() to work
-  conv._turnActive = true;
-  return conv;
+  return createConversationState();
+}
+
+function makeStore() {
+  return createScopedStore(createMemoryStoreBacking(), "core", "conv-1");
 }
 
 function makeMockLlmClient(): LlmClient {
@@ -68,6 +71,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
     },
     stepNumber: 1,
     llm: makeMockLlmClient(),
+    store: makeStore(),
     ...overrides,
   };
 }
@@ -101,12 +105,14 @@ function makeDeps(opts?: {
   toolRegistry?: ToolRegistry;
   middlewareRegistry?: MiddlewareRegistry;
   eventBus?: EventBus;
+  modelInputRegistry?: ModelInputRegistry;
 }) {
   return {
     llmClient: opts?.llmClient ?? makeLlmClient({ text: "default response" }),
     toolRegistry: opts?.toolRegistry ?? new ToolRegistry(),
     middlewareRegistry: opts?.middlewareRegistry ?? new MiddlewareRegistry(),
     eventBus: opts?.eventBus ?? new EventBus(),
+    modelInputRegistry: opts?.modelInputRegistry ?? new ModelInputRegistry(),
   };
 }
 
@@ -221,7 +227,7 @@ describe("executeStep", () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0]).toEqual({ value: "rewritten" });
     expect(result.toolCalls[0].args).toEqual({ value: "rewritten" });
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
@@ -424,7 +430,7 @@ describe("executeStep", () => {
       "ThrottlingOverride\\|throttling_overrides\\|throttling_seconds",
     );
 
-    const assistantMessage = ctx.conversation.messages.find((m: Message) => m.data.role === "assistant");
+    const assistantMessage = ctx.conversation.getMessages().find((m: Message) => m.data.role === "assistant");
     const assistantContent = assistantMessage?.data.content as Array<{
       type: string;
       toolCallId?: string;
@@ -437,7 +443,7 @@ describe("executeStep", () => {
       ]),
     );
 
-    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    const toolMessages = ctx.conversation.getMessages().filter((m: Message) => m.data.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0].data.content).toEqual([
       expect.objectContaining({
@@ -489,7 +495,7 @@ describe("executeStep", () => {
 
     await executeStep(ctx, deps);
 
-    const messages = ctx.conversation.messages;
+    const messages = ctx.conversation.getMessages();
     const assistantMessages = messages.filter((m: Message) => m.data.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].data.content).toEqual(
@@ -515,7 +521,7 @@ describe("executeStep", () => {
 
     await executeStep(ctx, deps);
 
-    const messages = ctx.conversation.messages;
+    const messages = ctx.conversation.getMessages();
     const toolMessages = messages.filter((m: Message) => m.data.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0].data.content).toEqual(
@@ -548,7 +554,7 @@ describe("executeStep", () => {
 
     await executeStep(ctx, deps);
 
-    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    const toolMessages = ctx.conversation.getMessages().filter((m: Message) => m.data.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0].data.content[0]).toEqual(
       expect.objectContaining({
@@ -617,7 +623,7 @@ describe("executeStep", () => {
       },
     });
 
-    const assistantMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "assistant");
+    const assistantMessages = ctx.conversation.getMessages().filter((m: Message) => m.data.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].data.content).toEqual(
       expect.arrayContaining([
@@ -630,7 +636,7 @@ describe("executeStep", () => {
       ])
     );
 
-    const toolMessages = ctx.conversation.messages.filter((m: Message) => m.data.role === "tool");
+    const toolMessages = ctx.conversation.getMessages().filter((m: Message) => m.data.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0].data.content).toEqual(
       expect.arrayContaining([
@@ -663,7 +669,7 @@ describe("executeStep", () => {
 
     await executeStep(ctx, deps);
 
-    const messages = ctx.conversation.messages;
+    const messages = ctx.conversation.getMessages();
     const assistantMessages = messages.filter((m: Message) => m.data.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     const assistantContent = assistantMessages[0].data.content as Array<{ type: string }>;
@@ -727,7 +733,7 @@ describe("executeStep", () => {
     ]);
 
     // tool-result parts are appended in one tool message in LLM-returned order.
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(1);
@@ -749,7 +755,7 @@ describe("executeStep", () => {
 
     const conv = makeConversation();
     // Pre-populate conversation with a message
-    conv.emit({
+    conv.append({
       type: "appendMessage",
       message: makeMessage("msg-1", "user", "Hello") as Extract<
         MessageEvent,
@@ -833,7 +839,7 @@ describe("executeStep", () => {
       }),
     ]);
 
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
@@ -842,7 +848,7 @@ describe("executeStep", () => {
     expect(assistantContent[0].toolCallId).toBe("call-approval");
 
     // The approval tool's result is added by the resume flow, not here.
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(0);
@@ -885,7 +891,7 @@ describe("executeStep", () => {
     expect(approvalHandler).not.toHaveBeenCalled();
     const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
     expect(approval?.toolCall.toolArgs).toEqual({ value: "rewritten" });
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
@@ -926,7 +932,7 @@ describe("executeStep", () => {
     expect(approvalHandler).not.toHaveBeenCalled();
     const approval = await humanApprovalStore.getApproval("turn-1:call-approval:humanApproval");
     expect(approval?.toolCall.toolArgs).toEqual({ value: "original" });
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(0);
@@ -1021,14 +1027,14 @@ describe("executeStep", () => {
       }),
     ]);
 
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
     const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
     expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-approval"]);
 
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(0);
@@ -1080,14 +1086,14 @@ describe("executeStep", () => {
       error: expect.stringContaining("Invalid arguments:"),
     });
 
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
     const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
     expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
 
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(1);
@@ -1155,14 +1161,14 @@ describe("executeStep", () => {
       error: "approval store unavailable",
     });
 
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
     const assistantContent = assistantMessages[0].data.content as Array<{ toolCallId?: string }>;
     expect(assistantContent.map((part) => part.toolCallId)).toEqual(["call-before", "call-approval", "call-after"]);
 
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(1);
@@ -1249,7 +1255,7 @@ describe("executeStep", () => {
       }),
     ]);
 
-    const assistantMessages = ctx.conversation.messages.filter(
+    const assistantMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "assistant",
     );
     expect(assistantMessages).toHaveLength(1);
@@ -1257,7 +1263,7 @@ describe("executeStep", () => {
     expect(assistantContent).toHaveLength(1);
     expect(assistantContent[0].toolCallId).toBe("call-approval-2");
 
-    const toolMessages = ctx.conversation.messages.filter(
+    const toolMessages = ctx.conversation.getMessages().filter(
       (m: Message) => m.data.role === "tool",
     );
     expect(toolMessages).toHaveLength(0);
@@ -1338,7 +1344,7 @@ describe("executeStep", () => {
 
       expect(result.text).toBe("before  after");
 
-      const assistantMessages = ctx.conversation.messages.filter(
+      const assistantMessages = ctx.conversation.getMessages().filter(
         (m: Message) => m.data.role === "assistant",
       );
       expect(assistantMessages).toHaveLength(1);

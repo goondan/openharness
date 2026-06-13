@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { registerExtensions, createExtensionApi } from "../extension-registry.js";
 import { EventBus } from "../event-bus.js";
 import { MiddlewareRegistry } from "../middleware-chain.js";
+import { ModelInputRegistry } from "../model-input.js";
+import { createConversationState } from "../conversation-state.js";
 import type {
-  Extension,
-  ExtensionApi,
+  AgentExtension,
+  AgentExtensionApi,
   RuntimeInfo,
   ToolDefinition,
 } from "@goondan/openharness-types";
-import type { ConversationState } from "@goondan/openharness-types";
 
 // ---------------------------------------------------------------------------
 // Minimal mock ToolRegistry
@@ -23,18 +24,6 @@ function makeMockToolRegistry() {
     }),
     list: vi.fn((): readonly ToolDefinition[] => [...tools]),
   };
-}
-
-// ---------------------------------------------------------------------------
-// Minimal mock ConversationState
-// ---------------------------------------------------------------------------
-function makeMockConversationState(): ConversationState {
-  return {
-    events: [],
-    messages: [],
-    emit: vi.fn(),
-    restore: vi.fn(),
-  } as unknown as ConversationState;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,16 +42,24 @@ const baseRuntimeInfo: RuntimeInfo = {
 };
 
 // ---------------------------------------------------------------------------
-// Helper: build default deps
+// Helper: build default agent-scoped deps
 // ---------------------------------------------------------------------------
 function makeDeps() {
   return {
+    scope: "agent" as const,
     toolRegistry: makeMockToolRegistry(),
     eventBus: new EventBus(),
-    middlewareRegistry: new MiddlewareRegistry(),
+    middlewareRegistry: new MiddlewareRegistry(["turn", "step", "toolCall"]),
+    modelInputRegistry: new ModelInputRegistry(),
     runtimeInfo: baseRuntimeInfo,
-    conversationState: makeMockConversationState(),
+    conversationState: createConversationState(),
   };
+}
+
+// `createExtensionApi` is typed as the agent/connection union; in these tests the
+// scope is always "agent", so narrow once at the call boundary.
+function agentApi(deps: ReturnType<typeof makeDeps>, name: string): AgentExtensionApi {
+  return createExtensionApi(deps, name) as AgentExtensionApi;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,17 +72,20 @@ describe("registerExtensions + createExtensionApi", () => {
     deps = makeDeps();
   });
 
-  // Test 1: Register extension → extension.register(api) called with ExtensionApi
-  it("calls extension.register(api) with a valid ExtensionApi object", () => {
+  // Test 1: Register extension → extension.register(api) called with AgentExtensionApi
+  it("calls extension.register(api) with a valid AgentExtensionApi object", () => {
     const registerFn = vi.fn();
-    const ext: Extension = { name: "my-ext", register: registerFn };
+    const ext: AgentExtension = { name: "my-ext", register: registerFn };
 
     registerExtensions([ext], deps);
 
     expect(registerFn).toHaveBeenCalledOnce();
-    const api: ExtensionApi = registerFn.mock.calls[0][0];
+    const api: AgentExtensionApi = registerFn.mock.calls[0][0];
     expect(api).toBeDefined();
-    expect(typeof api.pipeline.register).toBe("function");
+    expect(typeof api.useTurn).toBe("function");
+    expect(typeof api.useStep).toBe("function");
+    expect(typeof api.useToolCall).toBe("function");
+    expect(typeof api.useModelInput).toBe("function");
     expect(typeof api.tools.register).toBe("function");
     expect(typeof api.tools.remove).toBe("function");
     expect(typeof api.tools.list).toBe("function");
@@ -96,8 +96,8 @@ describe("registerExtensions + createExtensionApi", () => {
 
   // Test 2: Duplicate extension name → throws
   it("throws when two extensions share the same name", () => {
-    const ext1: Extension = { name: "dup", register: vi.fn() };
-    const ext2: Extension = { name: "dup", register: vi.fn() };
+    const ext1: AgentExtension = { name: "dup", register: vi.fn() };
+    const ext2: AgentExtension = { name: "dup", register: vi.fn() };
 
     expect(() => registerExtensions([ext1, ext2], deps)).toThrow();
 
@@ -110,16 +110,16 @@ describe("registerExtensions + createExtensionApi", () => {
   it("rolls back all registrations when one extension.register() throws", () => {
     const registered: string[] = [];
 
-    const ext1: Extension = {
+    const ext1: AgentExtension = {
       name: "ext1",
       register: (api) => {
         // Register a middleware so we can check if it gets rolled back
-        api.pipeline.register("turn", async (_ctx, next) => next());
+        api.useTurn(async (_ctx, next) => next());
         registered.push("ext1");
       },
     };
 
-    const ext2: Extension = {
+    const ext2: AgentExtension = {
       name: "ext2",
       register: (_api) => {
         registered.push("ext2");
@@ -127,10 +127,12 @@ describe("registerExtensions + createExtensionApi", () => {
       },
     };
 
-    const ext3: Extension = {
+    const ext3: AgentExtension = {
       name: "ext3",
       register: vi.fn(),
     };
+
+    const middlewareSpy = vi.spyOn(deps.middlewareRegistry, "register");
 
     expect(() => registerExtensions([ext1, ext2, ext3], deps)).toThrow(
       "ext2 registration failed"
@@ -145,7 +147,6 @@ describe("registerExtensions + createExtensionApi", () => {
     // No partial state: the real middlewareRegistry and toolRegistry must have
     // received NO calls — all operations were buffered in the recording layer
     // and discarded when ext2 threw.
-    const middlewareSpy = vi.spyOn(deps.middlewareRegistry, "register");
     expect(middlewareSpy).not.toHaveBeenCalled();
     expect(deps.toolRegistry.register).not.toHaveBeenCalled();
   });
@@ -159,14 +160,14 @@ describe("registerExtensions + createExtensionApi", () => {
       handler: async () => ({ type: "text", text: "a" }),
     };
 
-    const ext1: Extension = {
+    const ext1: AgentExtension = {
       name: "ext1-tool",
       register: (api) => {
         api.tools.register(toolA);
       },
     };
 
-    const ext2: Extension = {
+    const ext2: AgentExtension = {
       name: "ext2-throw",
       register: () => {
         throw new Error("ext2 boom");
@@ -181,17 +182,15 @@ describe("registerExtensions + createExtensionApi", () => {
     expect(deps.toolRegistry.list()).toHaveLength(0);
   });
 
-  // Test 4: ExtensionApi.pipeline.register adds middleware to correct level
-  it("pipeline.register delegates to middlewareRegistry with the correct level", async () => {
+  // Test 4: useStep/useToolCall add middleware to the correct level
+  it("useStep/useToolCall delegate to middlewareRegistry with the correct level", async () => {
     const spy = vi.spyOn(deps.middlewareRegistry, "register");
 
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "pipeline-ext",
       register: (api) => {
-        api.pipeline.register("step", async (_ctx, next) => next());
-        api.pipeline.register("toolCall", async (_ctx, next) => next(), {
-          priority: 50,
-        });
+        api.useStep(async (_ctx, next) => next());
+        api.useToolCall(async (_ctx, next) => next(), { after: "*" });
       },
     };
 
@@ -201,12 +200,12 @@ describe("registerExtensions + createExtensionApi", () => {
     expect(spy.mock.calls[0][0]).toBe("step");
     expect(spy.mock.calls[1][0]).toBe("toolCall");
     // Options are forwarded
-    expect(spy.mock.calls[1][2]).toEqual({ priority: 50 });
+    expect(spy.mock.calls[1][2]).toEqual({ after: "*" });
   });
 
   // Test 5: ExtensionApi.tools delegates to ToolRegistry
   it("api.tools.register/remove/list delegate to toolRegistry", () => {
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "tools-ext",
       register: (api) => {
         const tool: ToolDefinition = {
@@ -224,8 +223,24 @@ describe("registerExtensions + createExtensionApi", () => {
     registerExtensions([ext], deps);
 
     expect(deps.toolRegistry.register).toHaveBeenCalledOnce();
-    expect(deps.toolRegistry.list).toHaveBeenCalledOnce();
+    expect(deps.toolRegistry.list).toHaveBeenCalled();
     expect(deps.toolRegistry.remove).toHaveBeenCalledWith("my-tool");
+  });
+
+  // Test 5b: useModelInput delegates to modelInputRegistry
+  it("api.useModelInput delegates to modelInputRegistry", () => {
+    const spy = vi.spyOn(deps.modelInputRegistry, "register");
+
+    const ext: AgentExtension = {
+      name: "model-input-ext",
+      register: (api) => {
+        api.useModelInput((messages) => messages);
+      },
+    };
+
+    registerExtensions([ext], deps);
+
+    expect(spy).toHaveBeenCalledOnce();
   });
 
   // Test 6: ExtensionApi.on delegates to EventBus
@@ -233,7 +248,7 @@ describe("registerExtensions + createExtensionApi", () => {
     const spy = vi.spyOn(deps.eventBus, "on");
 
     const listener = vi.fn();
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "event-ext",
       register: (api) => {
         api.on("turn.start", listener);
@@ -250,7 +265,7 @@ describe("registerExtensions + createExtensionApi", () => {
   it("api.runtime returns the runtimeInfo passed in deps", () => {
     let capturedRuntime: RuntimeInfo | undefined;
 
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "runtime-ext",
       register: (api) => {
         capturedRuntime = api.runtime;
@@ -269,7 +284,7 @@ describe("registerExtensions + createExtensionApi", () => {
   it("api.runtime is a readonly snapshot — external mutation does not affect the snapshot", () => {
     let capturedRuntime: RuntimeInfo | undefined;
 
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "snapshot-ext",
       register: (api) => {
         capturedRuntime = api.runtime;
@@ -293,15 +308,15 @@ describe("registerExtensions + createExtensionApi", () => {
   it("calls extension.register() in declaration order", () => {
     const order: string[] = [];
 
-    const extA: Extension = {
+    const extA: AgentExtension = {
       name: "alpha",
       register: () => order.push("alpha"),
     };
-    const extB: Extension = {
+    const extB: AgentExtension = {
       name: "beta",
       register: () => order.push("beta"),
     };
-    const extC: Extension = {
+    const extC: AgentExtension = {
       name: "gamma",
       register: () => order.push("gamma"),
     };
@@ -313,9 +328,9 @@ describe("registerExtensions + createExtensionApi", () => {
 
   // Extra: conversation property is the same reference as conversationState
   it("api.conversation is the conversationState reference from deps", () => {
-    let capturedConversation: ConversationState | undefined;
+    let capturedConversation: AgentExtensionApi["conversation"] | undefined;
 
-    const ext: Extension = {
+    const ext: AgentExtension = {
       name: "conv-ext",
       register: (api) => {
         capturedConversation = api.conversation;
@@ -329,11 +344,11 @@ describe("registerExtensions + createExtensionApi", () => {
 });
 
 describe("createExtensionApi", () => {
-  it("returns a well-formed ExtensionApi without calling register", () => {
+  it("returns a well-formed AgentExtensionApi without calling register", () => {
     const deps = makeDeps();
-    const api = createExtensionApi(deps);
+    const api = agentApi(deps, "standalone");
 
-    expect(typeof api.pipeline.register).toBe("function");
+    expect(typeof api.useTurn).toBe("function");
     expect(typeof api.tools.register).toBe("function");
     expect(typeof api.on).toBe("function");
     expect(api.conversation).toBe(deps.conversationState);

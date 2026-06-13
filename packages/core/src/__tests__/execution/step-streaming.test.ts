@@ -3,6 +3,8 @@ import { executeStep } from "../../execution/step.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { ModelInputRegistry } from "../../model-input.js";
+import { createMemoryStoreBacking, createScopedStore } from "../../store.js";
 import { createConversationState } from "../../conversation-state.js";
 import type {
   StepContext,
@@ -23,9 +25,11 @@ function makeAbortSignal(): AbortSignal {
 }
 
 function makeConversation() {
-  const conv = createConversationState();
-  conv._turnActive = true;
-  return conv;
+  return createConversationState();
+}
+
+function makeStore() {
+  return createScopedStore(createMemoryStoreBacking(), "core", "conv-1");
 }
 
 function makeStepContext(overrides?: Partial<StepContext>): StepContext {
@@ -49,6 +53,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
     llm: {
       chat: vi.fn().mockResolvedValue({ text: "unused" }),
     },
+    store: makeStore(),
     ...overrides,
   };
 }
@@ -58,12 +63,15 @@ function makeDeps(opts?: {
   toolRegistry?: ToolRegistry;
   middlewareRegistry?: MiddlewareRegistry;
   eventBus?: EventBus;
+  modelInputRegistry?: ModelInputRegistry;
 }) {
   return {
-    llmClient: opts?.llmClient ?? { chat: vi.fn().mockResolvedValue({ text: "default" }) },
+    llmClient: (opts?.llmClient ??
+      { chat: vi.fn().mockResolvedValue({ text: "default" }) }) as LlmClient,
     toolRegistry: opts?.toolRegistry ?? new ToolRegistry(),
     middlewareRegistry: opts?.middlewareRegistry ?? new MiddlewareRegistry(),
     eventBus: opts?.eventBus ?? new EventBus(),
+    modelInputRegistry: opts?.modelInputRegistry ?? new ModelInputRegistry(),
   };
 }
 
@@ -310,7 +318,7 @@ describe("executeStep — streaming (FR-CORE-010)", () => {
     });
 
     const conv = makeConversation();
-    conv.emit({
+    conv.append({
       type: "appendMessage",
       message: {
         id: "msg-1",

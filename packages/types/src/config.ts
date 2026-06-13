@@ -1,6 +1,7 @@
-import type { Extension } from "./extension.js";
+import type { AgentExtension, ConnectionExtension } from "./extension.js";
 import type { HumanApprovalStore, ToolDefinition } from "./tool.js";
 import type { Connector, DurableInboundStore, RoutingRule } from "./ingress.js";
+import type { StoreBacking } from "./store.js";
 
 // -----------------------------------------------------------------------
 // EnvRef — branded type for deferred environment variable resolution
@@ -38,14 +39,14 @@ export interface ModelConfig {
 
 export interface AgentConfig {
   model: ModelConfig;
-  extensions?: Extension[];
+  extensions?: AgentExtension[];
   tools?: ToolDefinition[];
   maxSteps?: number;
 }
 
 export interface ConnectionConfig {
   connector: Connector;
-  extensions?: Extension[];
+  extensions?: ConnectionExtension[];
   rules: RoutingRule[];
 }
 
@@ -94,12 +95,22 @@ export interface ConversationTurnCoordinator {
 // Top-level harness config
 // -----------------------------------------------------------------------
 
+export interface StoreConfig {
+  /**
+   * Conversation-scoped KV backing. The host wires a memory / Redis / MySQL
+   * implementation; omitted ⇒ the core uses an in-memory backing. The core
+   * namespaces every access by (extension × conversationId).
+   */
+  backing?: StoreBacking;
+}
+
 export interface HarnessConfig {
   agents: Record<string, AgentConfig>;
   connections?: Record<string, ConnectionConfig>;
   durableInbound?: DurableInboundConfig;
   humanApproval?: HumanApprovalConfig;
   conversationTurnCoordinator?: ConversationTurnCoordinator;
+  store?: StoreConfig;
 }
 
 // -----------------------------------------------------------------------
