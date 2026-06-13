@@ -1,4 +1,4 @@
-import type { Extension } from "./extension.js";
+import type { AgentExtension, ConnectionExtension } from "./extension.js";
 import type { HumanApprovalStore, ToolDefinition } from "./tool.js";
 import type { Connector, DurableInboundStore, RoutingRule } from "./ingress.js";
 
@@ -38,14 +38,14 @@ export interface ModelConfig {
 
 export interface AgentConfig {
   model: ModelConfig;
-  extensions?: Extension[];
+  extensions?: AgentExtension[];
   tools?: ToolDefinition[];
   maxSteps?: number;
 }
 
 export interface ConnectionConfig {
   connector: Connector;
-  extensions?: Extension[];
+  extensions?: ConnectionExtension[];
   rules: RoutingRule[];
 }
 
