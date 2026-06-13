@@ -48,7 +48,40 @@ export type {
   ConversationState,
   NonSystemMessage,
   SystemMessage,
+  CreateMessageInput,
 } from "./conversation.js";
+export {
+  createMessage,
+  getCreatedBy,
+  isCreatedBy,
+  isSynthetic,
+  CORE_CREATED_BY,
+  UNKNOWN_CREATED_BY,
+  CREATED_BY_METADATA_KEY,
+} from "./conversation.js";
+
+// slots (F6)
+export type { SlotKey, SlotProvision, SlotStore } from "./slots.js";
+export { createSlot } from "./slots.js";
+
+// recovery (F4)
+export type {
+  ErrorClass,
+  RecoveryMatcher,
+  RecoveryInfo,
+  RecoveryOutcome,
+  RecoveryClaimOptions,
+  RecoveryClaimMeta,
+  RecoveryApi,
+} from "./recovery.js";
+
+// prompt (F2)
+export type {
+  PromptView,
+  PromptProjection,
+  PromptTransformOptions,
+  PromptApi,
+} from "./prompt.js";
 export type {
   ModelMessage,
   SystemModelMessage,
@@ -104,6 +137,7 @@ export type {
 // middleware
 export type {
   MiddlewareLevel,
+  MiddlewarePhase,
   MiddlewareOptions,
   TurnContext,
   StepContext,
@@ -135,6 +169,11 @@ export type {
   ExtensionInfo,
   AgentInfo,
   RuntimeInfo,
+  EventsApi,
+  AgentExtensionApi,
+  ConnectionExtensionApi,
+  AgentExtension,
+  ConnectionExtension,
   ExtensionApi,
   Extension,
 } from "./extension.js";
@@ -173,8 +212,17 @@ export type {
   HumanApprovalCompletedPayload,
   HumanApprovalFailedPayload,
   HumanApprovalCanceledPayload,
+  StepRetryPayload,
+  RecoveryExhaustedPayload,
+  CoreHarnessEvents,
+  CustomHarnessEvents,
+  HarnessEvents,
+  CoreHarnessEventType,
+  AgentScopeEventType,
+  ConnectionScopeEventType,
   EventPayload,
 } from "./events.js";
+export { AGENT_SCOPE_EVENTS, CONNECTION_SCOPE_EVENTS } from "./events.js";
 
 // config — includes value exports (defineHarness, env)
 export type {

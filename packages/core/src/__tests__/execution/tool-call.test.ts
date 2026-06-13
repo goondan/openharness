@@ -3,6 +3,7 @@ import { executeToolCall } from "../../execution/tool-call.js";
 import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
+import { emptySlotStore } from "../../slot-store.js";
 import { createInMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   ToolCallContext,
@@ -41,6 +42,7 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
     toolName: "my_tool",
     toolArgs: { value: "hello" },
     llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
+    slots: emptySlotStore(),
     ...overrides,
   };
 }

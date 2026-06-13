@@ -60,6 +60,38 @@ export interface StepErrorPayload {
   error: Error;
 }
 
+// -----------------------------------------------------------------------
+// Recovery event payloads (F4)
+// -----------------------------------------------------------------------
+
+export interface StepRetryPayload {
+  type: "step.retry";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  /** 1-based attempt number that is about to start. */
+  attempt: number;
+  /** The error that triggered the retry. */
+  error: Error;
+  /** Name of the claim that decided to retry, when known. */
+  claimName?: string;
+}
+
+export interface RecoveryExhaustedPayload {
+  type: "recovery.exhausted";
+  turnId: string;
+  agentName: string;
+  conversationId: string;
+  stepNumber: number;
+  /** Total attempts made before giving up. */
+  attempts: number;
+  /** The final error being propagated. */
+  error: Error;
+  /** Name of the claim that owned the error, when known. */
+  claimName?: string;
+}
+
 export interface ToolStartPayload {
   type: "tool.start";
   turnId: string;
@@ -106,6 +138,9 @@ export interface StepTextDeltaPayload {
   conversationId: string;
   stepNumber: number;
   delta: string;
+  /** Present when this delta belongs to a recovery retry; reporters reset
+   * their delta buffer when `attempt` increases. Absent on the first attempt. */
+  attempt?: number;
 }
 
 export interface StepToolCallDeltaPayload {
@@ -117,6 +152,8 @@ export interface StepToolCallDeltaPayload {
   toolCallId: string;
   toolName: string;
   argsDelta: string;
+  /** See {@link StepTextDeltaPayload.attempt}. */
+  attempt?: number;
 }
 
 export interface StepToolCallsSuppressedPayload {
@@ -295,39 +332,124 @@ export interface HumanApprovalCanceledPayload {
 }
 
 // -----------------------------------------------------------------------
-// Union
+// Event registry (F5)
+//
+// `CoreHarnessEvents` is the fixed map of event name → payload that the runtime
+// emits. `CustomHarnessEvents` is an open interface extensions augment via
+// `declare module` to add their own typed events. `HarnessEvents` is the merged
+// view used for typed `on`/`emit`/`tap`.
 // -----------------------------------------------------------------------
 
-export type EventPayload =
-  | TurnStartPayload
-  | TurnDonePayload
-  | TurnErrorPayload
-  | StepStartPayload
-  | StepDonePayload
-  | StepErrorPayload
-  | StepTextDeltaPayload
-  | StepToolCallDeltaPayload
-  | StepToolCallsSuppressedPayload
-  | ToolStartPayload
-  | ToolDonePayload
-  | ToolErrorPayload
-  | IngressReceivedPayload
-  | IngressAcceptedPayload
-  | IngressRejectedPayload
-  | InboundAppendedPayload
-  | InboundDuplicatePayload
-  | InboundLeasedPayload
-  | InboundDeliveredPayload
-  | InboundBlockedPayload
-  | InboundConsumedPayload
-  | InboundFailedPayload
-  | InboundDeadLetteredPayload
-  | HumanApprovalCreatedPayload
-  | HumanTaskCreatedPayload
-  | HumanTaskResolvedPayload
-  | HumanTaskRejectedPayload
-  | HumanApprovalReadyPayload
-  | HumanApprovalResumingPayload
-  | HumanApprovalCompletedPayload
-  | HumanApprovalFailedPayload
-  | HumanApprovalCanceledPayload;
+export interface CoreHarnessEvents {
+  "turn.start": TurnStartPayload;
+  "turn.done": TurnDonePayload;
+  "turn.error": TurnErrorPayload;
+  "step.start": StepStartPayload;
+  "step.done": StepDonePayload;
+  "step.error": StepErrorPayload;
+  "step.retry": StepRetryPayload;
+  "recovery.exhausted": RecoveryExhaustedPayload;
+  "step.textDelta": StepTextDeltaPayload;
+  "step.toolCallDelta": StepToolCallDeltaPayload;
+  "step.toolCallsSuppressed": StepToolCallsSuppressedPayload;
+  "tool.start": ToolStartPayload;
+  "tool.done": ToolDonePayload;
+  "tool.error": ToolErrorPayload;
+  "ingress.received": IngressReceivedPayload;
+  "ingress.accepted": IngressAcceptedPayload;
+  "ingress.rejected": IngressRejectedPayload;
+  "inbound.appended": InboundAppendedPayload;
+  "inbound.duplicate": InboundDuplicatePayload;
+  "inbound.leased": InboundLeasedPayload;
+  "inbound.delivered": InboundDeliveredPayload;
+  "inbound.blocked": InboundBlockedPayload;
+  "inbound.consumed": InboundConsumedPayload;
+  "inbound.failed": InboundFailedPayload;
+  "inbound.deadLettered": InboundDeadLetteredPayload;
+  "humanApproval.created": HumanApprovalCreatedPayload;
+  "humanTask.created": HumanTaskCreatedPayload;
+  "humanTask.resolved": HumanTaskResolvedPayload;
+  "humanTask.rejected": HumanTaskRejectedPayload;
+  "humanApproval.ready": HumanApprovalReadyPayload;
+  "humanApproval.resuming": HumanApprovalResumingPayload;
+  "humanApproval.completed": HumanApprovalCompletedPayload;
+  "humanApproval.failed": HumanApprovalFailedPayload;
+  "humanApproval.canceled": HumanApprovalCanceledPayload;
+}
+
+/**
+ * Open interface for extension-defined events. Augment it with `declare module`:
+ *
+ * @example
+ * declare module "@goondan/openharness-types" {
+ *   interface CustomHarnessEvents {
+ *     "myext.cacheWarmed": { type: "myext.cacheWarmed"; keys: number };
+ *   }
+ * }
+ */
+// biome-ignore lint/suspicious/noEmptyInterface: augmentation target
+export interface CustomHarnessEvents {}
+
+/** Merged event map: core events plus any declared custom events. */
+export type HarnessEvents = CoreHarnessEvents & CustomHarnessEvents;
+
+/** All core event names. */
+export type CoreHarnessEventType = keyof CoreHarnessEvents;
+
+/**
+ * @deprecated Use {@link HarnessEvents} keys with typed `on`/`emit`. Retained as
+ * the union of core payloads for back-compat.
+ */
+export type EventPayload = CoreHarnessEvents[CoreHarnessEventType];
+
+// -----------------------------------------------------------------------
+// Scope split (F5)
+//
+// Agent-scoped events flow on a per-agent bus (turn/step/tool/human-approval
+// lifecycle, plus the turn-coupled inbound transitions). Connection-scoped
+// events belong to ingress/dispatch. The two arrays are disjoint and together
+// cover every core event; `create-harness` wiring is verified against them.
+// -----------------------------------------------------------------------
+
+export const AGENT_SCOPE_EVENTS = [
+  "turn.start",
+  "turn.done",
+  "turn.error",
+  "step.start",
+  "step.done",
+  "step.error",
+  "step.retry",
+  "recovery.exhausted",
+  "step.textDelta",
+  "step.toolCallDelta",
+  "step.toolCallsSuppressed",
+  "tool.start",
+  "tool.done",
+  "tool.error",
+  "inbound.delivered",
+  "inbound.consumed",
+  "inbound.failed",
+  "inbound.deadLettered",
+  "humanApproval.created",
+  "humanTask.created",
+  "humanTask.resolved",
+  "humanTask.rejected",
+  "humanApproval.ready",
+  "humanApproval.resuming",
+  "humanApproval.completed",
+  "humanApproval.failed",
+  "humanApproval.canceled",
+] as const;
+
+export const CONNECTION_SCOPE_EVENTS = [
+  "ingress.received",
+  "ingress.accepted",
+  "ingress.rejected",
+  "inbound.appended",
+  "inbound.duplicate",
+  "inbound.leased",
+  "inbound.blocked",
+] as const;
+
+export type AgentScopeEventType = (typeof AGENT_SCOPE_EVENTS)[number];
+export type ConnectionScopeEventType = (typeof CONNECTION_SCOPE_EVENTS)[number];

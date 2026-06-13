@@ -1292,19 +1292,21 @@ describe("durable inbound and Human Approval integration", () => {
     const toolMiddlewareExtension: Extension = {
       name: "double-amount-middleware",
       register(api) {
-        api.pipeline.register("toolCall", doubleAmountMiddleware);
+        api.pipeline.register("toolCall", doubleAmountMiddleware, {
+          name: "double-amount",
+        });
         api.pipeline.register("toolCall", async (ctx, next) => {
           if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
             (ctx.toolArgs as { amount: number }).amount = 99;
           }
           return next();
-        });
+        }, { name: "resume-override", after: "double-amount" });
         api.pipeline.register("toolCall", async (ctx, next) => {
           if (ctx.toolName === "guarded") {
             observedMiddlewareArgs.push(ctx.toolArgs);
           }
           return next();
-        });
+        }, { name: "observe-args", after: "resume-override" });
       },
     };
     const guardedTool: ToolDefinition = {

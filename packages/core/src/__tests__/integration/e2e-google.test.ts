@@ -57,7 +57,7 @@ describeE2E("E2E: Google Gemini API", () => {
               });
               return next();
             },
-            { priority: 10 },
+            { phase: "observe" },
           );
         },
       };

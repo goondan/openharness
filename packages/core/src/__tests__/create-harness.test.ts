@@ -4,6 +4,7 @@ import type {
   LlmClient,
   LlmResponse,
   Extension,
+  ConnectionExtension,
   TurnResult,
   Message,
   ToolDefinition,
@@ -906,30 +907,29 @@ describe("createHarness", () => {
   });
 
   // -----------------------------------------------------------------------
-  // Test 13: route middleware comes from the matched agent only
+  // Test 13: route middleware is connection-scoped (F5)
   // -----------------------------------------------------------------------
-  it("runs route middleware only for the matched agent's extensions", async () => {
-    const routeCalls: string[] = [];
+  it("runs connection-level route middleware and observes the matched agent", async () => {
+    const routedAgents: string[] = [];
 
-    const routeExtension = (agentLabel: string): Extension => ({
-      name: `route-${agentLabel}`,
+    const routeObserver: ConnectionExtension = {
+      name: "route-observer",
       register(api) {
         api.pipeline.register("route", async (_ctx, next) => {
-          routeCalls.push(agentLabel);
-          return next();
+          const result = await next();
+          routedAgents.push(result.agentName);
+          return result;
         });
       },
-    });
+    };
 
     const runtime = await createHarness({
       agents: {
         agentA: {
           model: { provider: "openai", model: "gpt-4", apiKey: "key-a" },
-          extensions: [routeExtension("agentA")],
         },
         agentB: {
           model: { provider: "openai", model: "gpt-4", apiKey: "key-b" },
-          extensions: [routeExtension("agentB")],
         },
       },
       connections: {
@@ -948,6 +948,7 @@ describe("createHarness", () => {
               },
             }),
           },
+          extensions: [routeObserver],
           rules: [{ match: { event: "message" }, agent: "agentB" }],
         },
       },
@@ -959,7 +960,7 @@ describe("createHarness", () => {
     });
 
     expect(results).toHaveLength(1);
-    expect(routeCalls).toEqual(["agentB"]);
+    expect(routedAgents).toEqual(["agentB"]);
 
     await runtime.close();
   });

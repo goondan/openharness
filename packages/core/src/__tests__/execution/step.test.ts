@@ -5,6 +5,9 @@ import { ToolRegistry } from "../../tool-registry.js";
 import { MiddlewareRegistry } from "../../middleware-chain.js";
 import { EventBus } from "../../event-bus.js";
 import { createConversationState } from "../../conversation-state.js";
+import { emptySlotStore } from "../../slot-store.js";
+import { RecoveryRegistry } from "../../recovery-registry.js";
+import { PromptProjectionRegistry } from "../../prompt-projection.js";
 import { InMemoryHumanApprovalStore } from "@goondan/openharness-adapters";
 import type {
   StepContext,
@@ -68,6 +71,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
     },
     stepNumber: 1,
     llm: makeMockLlmClient(),
+    slots: emptySlotStore(),
     ...overrides,
   };
 }
@@ -106,6 +110,8 @@ function makeDeps(opts?: {
     llmClient: opts?.llmClient ?? makeLlmClient({ text: "default response" }),
     toolRegistry: opts?.toolRegistry ?? new ToolRegistry(),
     middlewareRegistry: opts?.middlewareRegistry ?? new MiddlewareRegistry(),
+    recoveryRegistry: new RecoveryRegistry(),
+    promptRegistry: new PromptProjectionRegistry(),
     eventBus: opts?.eventBus ?? new EventBus(),
   };
 }

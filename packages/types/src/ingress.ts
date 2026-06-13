@@ -15,7 +15,13 @@ export interface EventSource {
 export interface InboundEnvelope {
   name: string;
   content: InboundContentPart[];
-  properties: Record<string, string | number | boolean>;
+  /**
+   * Connector-supplied scalars. Read-only (F6): middleware must not mutate the
+   * envelope to pass values downstream — use a typed slot (`ctx.slots`) instead.
+   * Recipe: read a slot first and fall back to `properties` (main agent uses the
+   * connector original; a subagent uses the slot).
+   */
+  properties: Readonly<Record<string, string | number | boolean>>;
   conversationId?: string;
   source: EventSource;
   metadata?: Record<string, unknown>;

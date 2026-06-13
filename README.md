@@ -84,8 +84,8 @@ oh run "요약해줘" --agent assistant --conversation demo-1
 - 코어는 _실행 루프_ 만 제공합니다.
 - 시스템 프롬프트도 기본 제공되지 않습니다. `BasicSystemPrompt` 같은 Extension이 있어야 들어갑니다.
 - 도구도 선언해야만 보입니다. "기본 툴"은 없습니다.
-- 메시지는 `Message { id, data: ModelMessage, metadata }` envelope로 다룹니다.
-- `metadata.__createdBy`는 코어 예약 provenance 키입니다.
+- 메시지는 `Message { id, data: ModelMessage, createdBy?, metadata }` envelope로 다룹니다.
+- 출처는 1급 필드 `createdBy`로 다룹니다(`createMessage`/`getCreatedBy`). `metadata.__createdBy`는 1.x 동안 유지되는 미러이며 2.0에서 제거 예정입니다.
 
 즉, OpenHarness는 "에이전트를 그냥 쓰는 프레임워크"라기보다 "에이전트 하네스를 명시적으로 조립하는 런타임"에 가깝습니다.
 
@@ -103,5 +103,6 @@ README는 _처음 시작하는 데 필요한 최소한_ 만 담습니다.
 
 ## 현재 상태
 
-아직 alpha 단계입니다.
-기본 철학은 꽤 분명하지만, API는 사용성 피드백을 받아 계속 다듬는 중입니다.
+`1.0.0-rc.1`. 확장 간 계약을 문자열·숫자 관례에서 라이브러리 타입으로 승격한 breaking 재설계입니다(미들웨어 순서 `phase`/`before`/`after`, 프롬프트 projection, 출처 1급화, `recovery.claim`, 타입드 이벤트, 타입드 슬롯). 변경·마이그레이션은 [CHANGELOG.md](CHANGELOG.md)를 참고하세요.
+
+rc 단계인 이유는 헤비 소비자 이주 검증을 한 번 거친 뒤 1.0.0을 확정하기 위함입니다. 0.5 이벤트 로그는 그대로 replay되어 영속 데이터 호환은 유지됩니다.

@@ -2,9 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { registerExtensions, createExtensionApi } from "../extension-registry.js";
 import { EventBus } from "../event-bus.js";
 import { MiddlewareRegistry } from "../middleware-chain.js";
+import { RecoveryRegistry } from "../recovery-registry.js";
+import { PromptProjectionRegistry } from "../prompt-projection.js";
 import type {
   Extension,
   ExtensionApi,
+  AgentExtensionApi,
   RuntimeInfo,
   ToolDefinition,
 } from "@goondan/openharness-types";
@@ -57,9 +60,12 @@ const baseRuntimeInfo: RuntimeInfo = {
 // ---------------------------------------------------------------------------
 function makeDeps() {
   return {
+    scope: "agent" as const,
     toolRegistry: makeMockToolRegistry(),
     eventBus: new EventBus(),
-    middlewareRegistry: new MiddlewareRegistry(),
+    middlewareRegistry: new MiddlewareRegistry(["turn", "step", "toolCall"]),
+    recoveryRegistry: new RecoveryRegistry(),
+    promptRegistry: new PromptProjectionRegistry(),
     runtimeInfo: baseRuntimeInfo,
     conversationState: makeMockConversationState(),
   };
@@ -190,7 +196,7 @@ describe("registerExtensions + createExtensionApi", () => {
       register: (api) => {
         api.pipeline.register("step", async (_ctx, next) => next());
         api.pipeline.register("toolCall", async (_ctx, next) => next(), {
-          priority: 50,
+          phase: "guard",
         });
       },
     };
@@ -201,7 +207,7 @@ describe("registerExtensions + createExtensionApi", () => {
     expect(spy.mock.calls[0][0]).toBe("step");
     expect(spy.mock.calls[1][0]).toBe("toolCall");
     // Options are forwarded
-    expect(spy.mock.calls[1][2]).toEqual({ priority: 50 });
+    expect(spy.mock.calls[1][2]).toEqual({ phase: "guard" });
   });
 
   // Test 5: ExtensionApi.tools delegates to ToolRegistry
@@ -331,7 +337,7 @@ describe("registerExtensions + createExtensionApi", () => {
 describe("createExtensionApi", () => {
   it("returns a well-formed ExtensionApi without calling register", () => {
     const deps = makeDeps();
-    const api = createExtensionApi(deps);
+    const api = createExtensionApi(deps, "test-ext") as AgentExtensionApi;
 
     expect(typeof api.pipeline.register).toBe("function");
     expect(typeof api.tools.register).toBe("function");

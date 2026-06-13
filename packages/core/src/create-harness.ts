@@ -1,7 +1,6 @@
 import type {
   HarnessConfig,
   HarnessRuntime,
-  Extension,
   Connector,
   RoutingRule,
   InboundEnvelope,
@@ -11,7 +10,7 @@ import type {
   ToolInfo,
   ExtensionInfo,
   ModelConfig,
-  EventPayload,
+  HarnessEvents,
   DurableInboundStore,
   DurableInboundReferenceStore,
   HumanApprovalStore,
@@ -23,7 +22,9 @@ import { createLlmClient } from "./models/index.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { EventBus } from "./event-bus.js";
 import { MiddlewareRegistry } from "./middleware-chain.js";
-import { registerExtensions, createExtensionApi } from "./extension-registry.js";
+import { RecoveryRegistry } from "./recovery-registry.js";
+import { PromptProjectionRegistry } from "./prompt-projection.js";
+import { registerExtensions } from "./extension-registry.js";
 import { IngressPipeline } from "./ingress/pipeline.js";
 import { HarnessRuntimeImpl, type AgentDeps } from "./harness-runtime.js";
 import { createConversationState } from "./conversation-state.js";
@@ -157,10 +158,13 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     // Create per-agent infrastructure
     const toolRegistry = new ToolRegistry();
     const eventBus = new EventBus();
-    eventBus.tap((payload: EventPayload) => {
-      runtimeEventBus.emit(payload.type, payload);
+    eventBus.tap((payload) => {
+      const typed = payload as { type: keyof HarnessEvents };
+      runtimeEventBus.emit(typed.type, payload as never);
     });
-    const middlewareRegistry = new MiddlewareRegistry();
+    const middlewareRegistry = new MiddlewareRegistry(["turn", "step", "toolCall"]);
+    const recoveryRegistry = new RecoveryRegistry();
+    const promptRegistry = new PromptProjectionRegistry();
     const maxSteps = agentMaxStepsMap.get(agentName) ?? DEFAULT_MAX_STEPS;
 
     // Register extensions
@@ -178,13 +182,16 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       };
 
       const conversationState = createConversationState();
-      // Temporarily set _turnActive so extensions can read conversation if needed
-      // (extensions only register, they don't emit events)
+      // Extensions only register here; they do not emit turn events. The
+      // conversation reference is the one the step loop later drives.
 
       registerExtensions(agentConfig.extensions, {
+        scope: "agent",
         toolRegistry,
         eventBus,
         middlewareRegistry,
+        recoveryRegistry,
+        promptRegistry,
         runtimeInfo,
         conversationState,
       });
@@ -201,6 +208,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       llmClient,
       toolRegistry,
       middlewareRegistry,
+      recoveryRegistry,
+      promptRegistry,
       eventBus,
       maxSteps,
     });
@@ -215,13 +224,14 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     { connector: Connector; rules: RoutingRule[]; connectionMiddleware: MiddlewareRegistry }
   >();
   const ingressEventBus = new EventBus();
-  ingressEventBus.tap((payload: EventPayload) => {
-    runtimeEventBus.emit(payload.type, payload);
+  ingressEventBus.tap((payload) => {
+    const typed = payload as { type: keyof HarnessEvents };
+    runtimeEventBus.emit(typed.type, payload as never);
   });
 
   if (config.connections) {
     for (const [connName, connConfig] of Object.entries(config.connections)) {
-      const connectionMiddleware = new MiddlewareRegistry();
+      const connectionMiddleware = new MiddlewareRegistry(["ingress", "route"]);
 
       // Register connection-level extensions
       if (connConfig.extensions && connConfig.extensions.length > 0) {
@@ -236,14 +246,11 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           connections: connectionInfoMap,
         };
 
-        const conversationState = createConversationState();
-
         registerExtensions(connConfig.extensions, {
-          toolRegistry: new ToolRegistry(),
+          scope: "connection",
           eventBus: ingressEventBus,
           middlewareRegistry: connectionMiddleware,
           runtimeInfo,
-          conversationState,
         });
       }
 
@@ -272,12 +279,6 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
 
   const ingressPipeline = new IngressPipeline({
     connections: connectionsMap,
-    agentMiddlewareByAgent: new Map(
-      Array.from(agentDepsMap.entries()).map(([agentName, deps]) => [
-        agentName,
-        deps.middlewareRegistry,
-      ]),
-    ),
     registeredAgents,
     eventBus: ingressEventBus,
     dispatchTurn: async (turnId, agentName, envelope, conversationId) => {

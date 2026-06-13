@@ -1,90 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
-import { BasicSystemPrompt } from "../extensions/basic-system-prompt.js";
+import {
+  BasicSystemPrompt,
+  getSystemPromptText,
+} from "../extensions/basic-system-prompt.js";
 import type {
-  ExtensionApi,
   TurnMiddleware,
-  TurnContext,
   TurnResult,
-  ConversationState,
   Message,
-  MessageEvent,
+  PromptView,
 } from "@goondan/openharness-types";
+import {
+  makeMockApi,
+  makeMockConversationState,
+  makeTurnContext,
+} from "./helpers.js";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeMockConversationState(): ConversationState & { emitted: MessageEvent[] } {
-  const emitted: MessageEvent[] = [];
-  const messages: Message[] = [];
-  return {
-    messages,
-    events: [],
-    emitted,
-    emit: vi.fn((event: MessageEvent) => {
-      emitted.push(event);
-      if (event.type === "appendSystem" || event.type === "appendMessage") {
-        messages.push(event.message);
-      }
-    }),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(conversation: ConversationState): {
-  api: ExtensionApi;
-  registeredMiddleware: Array<{ level: string; handler: TurnMiddleware; options?: { priority?: number } }>;
-} {
-  const registeredMiddleware: Array<{ level: string; handler: TurnMiddleware; options?: { priority?: number } }> = [];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn((level: string, handler: TurnMiddleware, options?: { priority?: number }) => {
-        registeredMiddleware.push({ level, handler, options });
-      }) as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn(),
-      remove: vi.fn(),
-      list: vi.fn(() => []),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, registeredMiddleware };
-}
-
-function makeTurnContext(conversation: ConversationState): TurnContext {
-  return {
-    turnId: "turn-1",
-    agentName: "test-agent",
-    conversationId: "conv-1",
-    conversation,
-    abortSignal: new AbortController().signal,
-    input: {
-      name: "test-event",
-      content: [{ type: "text", text: "hello" }],
-      properties: {},
-      source: {
-        connector: "test-connector",
-        connectionName: "test",
-        receivedAt: new Date().toISOString(),
-      },
-    },
-    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
-  };
-}
+const LEGACY_ID = "sys-basic-system-prompt";
 
 const stubTurnResult: TurnResult = {
   turnId: "turn-1",
@@ -94,47 +25,87 @@ const stubTurnResult: TurnResult = {
   steps: [],
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("BasicSystemPrompt", () => {
   it("creates an Extension with name 'basic-system-prompt'", () => {
     const ext = BasicSystemPrompt("You are helpful.");
     expect(ext.name).toBe("basic-system-prompt");
   });
 
-  it("register() calls api.pipeline.register with level 'turn'", () => {
-    const conversation = makeMockConversationState();
-    const { api, registeredMiddleware } = makeMockApi(conversation);
-
+  it("exposes the prompt text via getSystemPromptText", () => {
     const ext = BasicSystemPrompt("You are helpful.");
-    ext.register(api);
+    expect(ext.systemPromptText).toBe("You are helpful.");
+    expect(getSystemPromptText(ext)).toBe("You are helpful.");
+  });
 
-    expect(api.pipeline.register).toHaveBeenCalledOnce();
+  it("getSystemPromptText returns undefined for an unrelated extension", () => {
+    const other = { name: "other", register: () => {} };
+    expect(getSystemPromptText(other)).toBeUndefined();
+  });
+
+  it("registers a legacy-cleanup turn middleware (observe) and a prompt projection", () => {
+    const conversation = makeMockConversationState();
+    const { api, registeredMiddleware, projections } = makeMockApi(conversation);
+
+    BasicSystemPrompt("You are helpful.").register(api);
+
     expect(registeredMiddleware).toHaveLength(1);
     expect(registeredMiddleware[0].level).toBe("turn");
-    expect(typeof registeredMiddleware[0].handler).toBe("function");
+    expect(registeredMiddleware[0].options?.phase).toBe("observe");
+
+    expect(projections).toHaveLength(1);
+    expect(projections[0].name).toBe("basic-system-prompt");
   });
 
-  it("registers turn middleware with priority 10 (high priority)", () => {
+  it("projection prepends a system message with provenance", async () => {
     const conversation = makeMockConversationState();
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+    const { api, projections } = makeMockApi(conversation);
+    BasicSystemPrompt("You are helpful.").register(api);
 
-    const ext = BasicSystemPrompt("You are helpful.");
-    ext.register(api);
+    const view = [
+      { id: "u-0", data: { role: "user", content: "hi" } },
+    ] as PromptView;
+    const ctx = makeTurnContext(conversation);
+    // The projection only reads the view; a turn ctx satisfies the step shape it needs here.
+    const out = await projections[0].projection(view, ctx as never);
 
-    expect(registeredMiddleware[0].options?.priority).toBe(10);
+    expect(out).toHaveLength(2);
+    const system = out[0];
+    expect(system.id).toBe(LEGACY_ID);
+    expect(system.data.role).toBe("system");
+    expect(system.data.content).toBe("You are helpful.");
+    expect(system.createdBy).toBe("basic-system-prompt");
+    expect(system.metadata?.__createdBy).toBe("basic-system-prompt");
+    expect(out[1].id).toBe("u-0");
+    // Pure projection — durable log untouched.
+    expect(conversation.emit).not.toHaveBeenCalled();
   });
 
-  it("middleware appends a system message and calls next()", async () => {
+  it("projection is idempotent: applying twice does not duplicate the system message", async () => {
     const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    BasicSystemPrompt("You are helpful.").register(api);
+
+    const ctx = makeTurnContext(conversation);
+    const proj = projections[0].projection;
+
+    const once = await proj([{ id: "u-0", data: { role: "user", content: "hi" } }] as PromptView, ctx as never);
+    const twice = await proj(once, ctx as never);
+
+    const systemCount = twice.filter((m) => m.id === LEGACY_ID).length;
+    expect(systemCount).toBe(1);
+    expect(twice[0].id).toBe(LEGACY_ID);
+  });
+
+  it("cleanup middleware removes a legacy persisted system message once", async () => {
+    const legacy: Message = {
+      id: LEGACY_ID,
+      data: { role: "system", content: "old persisted prompt" },
+    };
+    const conversation = makeMockConversationState([legacy]);
     const { api, registeredMiddleware } = makeMockApi(conversation);
+    BasicSystemPrompt("You are helpful.").register(api);
 
-    const ext = BasicSystemPrompt("You are helpful.");
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
+    const middleware = registeredMiddleware[0].handler as TurnMiddleware;
     const ctx = makeTurnContext(conversation);
     const next = vi.fn(async () => stubTurnResult);
 
@@ -142,45 +113,25 @@ describe("BasicSystemPrompt", () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(result).toBe(stubTurnResult);
-
-    // Verify system message was emitted
-    expect(conversation.emit).toHaveBeenCalledOnce();
-    const emittedEvent = conversation.emitted[0];
-    expect(emittedEvent.type).toBe("appendSystem");
-    if (emittedEvent.type === "appendSystem") {
-      expect(emittedEvent.message.id).toBe("sys-basic-system-prompt");
-      expect(emittedEvent.message.data.role).toBe("system");
-      expect(emittedEvent.message.data.content).toBe("You are helpful.");
-      expect(emittedEvent.message.metadata?.__createdBy).toBe("basic-system-prompt");
+    const removes = conversation.emitted.filter((e) => e.type === "remove");
+    expect(removes).toHaveLength(1);
+    if (removes[0].type === "remove") {
+      expect(removes[0].messageId).toBe(LEGACY_ID);
     }
   });
 
-  it("does not duplicate the system message on subsequent turns", async () => {
+  it("cleanup middleware is a no-op when there is no legacy message", async () => {
     const conversation = makeMockConversationState();
     const { api, registeredMiddleware } = makeMockApi(conversation);
+    BasicSystemPrompt("You are helpful.").register(api);
 
-    const ext = BasicSystemPrompt("You are helpful.");
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
+    const middleware = registeredMiddleware[0].handler as TurnMiddleware;
+    const ctx = makeTurnContext(conversation);
     const next = vi.fn(async () => stubTurnResult);
 
-    // First turn — should appendSystem
-    const ctx1 = makeTurnContext(conversation);
-    await middleware(ctx1, next);
-    expect(conversation.emitted).toHaveLength(1);
+    await middleware(ctx, next);
 
-    // Second turn — system message already in conversation.messages, should skip
-    const ctx2 = makeTurnContext(conversation);
-    await middleware(ctx2, next);
-    expect(conversation.emitted).toHaveLength(1); // still 1, no new system event
-
-    // Third turn — still no duplication
-    const ctx3 = makeTurnContext(conversation);
-    await middleware(ctx3, next);
-    expect(conversation.emitted).toHaveLength(1);
-
-    // next() should have been called every turn
-    expect(next).toHaveBeenCalledTimes(3);
+    expect(conversation.emit).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledOnce();
   });
 });

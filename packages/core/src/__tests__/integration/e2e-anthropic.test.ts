@@ -57,7 +57,7 @@ describeE2E("E2E: Anthropic API", () => {
               });
               return next();
             },
-            { priority: 10 },
+            { phase: "observe" },
           );
         },
       };
