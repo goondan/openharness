@@ -84,10 +84,37 @@ oh run "요약해줘" --agent assistant --conversation demo-1
 - 코어는 _실행 루프_ 만 제공합니다.
 - 시스템 프롬프트도 기본 제공되지 않습니다. `BasicSystemPrompt` 같은 Extension이 있어야 들어갑니다.
 - 도구도 선언해야만 보입니다. "기본 툴"은 없습니다.
-- 메시지는 `Message { id, data: ModelMessage, metadata }` envelope로 다룹니다.
-- `metadata.__createdBy`는 코어 예약 provenance 키입니다.
+- 메시지는 `Message { id, data: ModelMessage, createdBy?, metadata }` envelope로 다룹니다.
+- 출처는 `Message.createdBy` 1급 필드입니다. 신규 메시지는 `createMessage({ data, createdBy })`로 만드세요. 1.x 동안 `metadata.__createdBy`로도 미러되지만, 충돌 시 필드가 우선입니다.
 
 즉, OpenHarness는 "에이전트를 그냥 쓰는 프레임워크"라기보다 "에이전트 하네스를 명시적으로 조립하는 런타임"에 가깝습니다.
+
+## 확장이 배우는 표면
+
+확장은 `register(api)` 안에서 아래만 알면 됩니다.
+
+```ts
+register(api) {
+  api.useTurn(mw, opts)      // 양파 미들웨어 (ctx, next) — agent
+  api.useStep(mw, opts)
+  api.useToolCall(mw, opts)
+  api.useIngress(mw, opts)   // connection 확장만
+  api.useModelInput((messages, ctx) => messages)  // 모델 입력 조립 — step 직전 1회, 순수, 영속 X
+  api.on("turn.done", cb)    // 런타임 이벤트 (EventBus)
+}
+```
+
+핸들러 `ctx`에서:
+
+- `ctx.conversation.getEventLog()` — append-only `MessageEvent[]` 원천 로그(이벤트 소싱).
+- `ctx.conversation.getMessages()` — 재생한 현재 상태. `Object.freeze`된 불변 스냅샷.
+- `ctx.conversation.append(event)` — 대화 변경의 유일한 경로(동기, 직후 반영).
+- `ctx.store.get/set(key)` — 대화 스코프 영속 KV. `(확장이름 × conversationId)`로 자동 네임스페이스.
+- `ctx.llm` / `ctx.conversationId` / `ctx.input`.
+
+두 가지 이벤트 레이어를 헷갈리지 마세요. `conversation.append`/`getEventLog`는 **상태 변경**(이벤트 소싱, 재생=복원)이고, `api.on`/`emit`은 **관측**(EventBus, 재생≠복원)입니다. `append`는 EventBus를 부르지 않습니다.
+
+순서는 숫자 priority나 phase가 아니라 다른 미들웨어 **이름**을 가리키는 `before`/`after`와 밴드 센티넬 `'*'`로 정합니다. 대부분은 생략하고 등록 순서에 맡기면 되고, 미지 참조·사이클은 부팅 시 하드 에러입니다.
 
 ## 어디까지 README에서 다루는가
 
@@ -98,10 +125,13 @@ README는 _처음 시작하는 데 필요한 최소한_ 만 담습니다.
 - [Migration: alpha → v0.1](docs/migration-alpha-to-v0.1.md): YAML/manifest 기반 alpha에서 code-first v0.1.x로 옮기는 방법
 - [Architecture](docs/architecture.md): Turn/Step/ToolCall, ingress, conversation state
 - [Extensions And Tools](docs/extensions-and-tools.md): 언제 Extension을 쓰고 언제 Tool을 쓰는지
-- [Message Envelope](docs/message-envelope.md): `ModelMessage`, `metadata.__createdBy`, 이벤트 기반 메시지 조작
+- [Message Envelope](docs/message-envelope.md): `ModelMessage`, `createdBy` 출처, 이벤트 기반 메시지 조작
 - [CONCEPTS.md](CONCEPTS.md): 왜 이런 구조인지에 대한 긴 설명
+- [CHANGELOG.md](CHANGELOG.md): 버전별 변경과 마이그레이션 가이드 (0.5 → 1.0 단순화 포함)
 
 ## 현재 상태
 
-아직 alpha 단계입니다.
-기본 철학은 꽤 분명하지만, API는 사용성 피드백을 받아 계속 다듬는 중입니다.
+1.0 단순화 작업 중입니다. 0.5에서 늘어난 확장 표면을 6개의 결정으로 줄였고
+(순서·모델 입력·대화 읽기/쓰기·출처·이벤트 레이어·store), 같은 일을 하는 길을
+하나로 모았습니다. 무엇이 어떻게 바뀌었고 기존 확장을 어떻게 옮기는지는
+[CHANGELOG.md](CHANGELOG.md)에 정리돼 있습니다. 0.5 이벤트 로그는 그대로 읽힙니다.

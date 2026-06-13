@@ -1,80 +1,104 @@
-import type { ConversationState, Message, MessageEvent } from "@goondan/openharness-types";
+import {
+  CREATED_BY_METADATA_KEY,
+  type ConversationState,
+  type Message,
+  type MessageEvent,
+} from "@goondan/openharness-types";
 
 /**
  * Implementation of ConversationState using event sourcing.
  *
- * - events is the sole source of truth (append-only)
- * - messages is derived by replaying events
- * - emit() only works during Turn execution (_turnActive must be true)
- * - restore() replaces the entire event stream and replays from scratch
+ * - `_events` is the sole source of truth (append-only). Its serialized bytes
+ *   stay byte-identical to the original log — createdBy lifting is applied only
+ *   to the derived `getMessages()` view, never to `_events`.
+ * - `_messages` is derived by replaying `_events`, with createdBy lifted from
+ *   `metadata.__createdBy` for legacy (0.5) messages, and is exposed as an
+ *   `Object.freeze`d immutable snapshot.
+ * - `append()` is the single write path. It is synchronous — the next
+ *   `getMessages()` reflects it immediately — and never touches the EventBus.
+ *   It is always allowed (no turn-active gating).
+ * - `restore()` replaces the entire event stream and replays from scratch.
  */
 export class ConversationStateImpl implements ConversationState {
-  /** Append-only event stream — the source of truth */
+  /** Append-only event stream — the source of truth (bytes never lifted). */
   _events: MessageEvent[] = [];
 
-  /** Derived message list from replaying _events */
-  private _messages: Message[] = [];
+  /** Derived, frozen message snapshot from replaying `_events` (createdBy lifted). */
+  private _messages: readonly Message[] = Object.freeze([]);
 
-  /** Guards emit() — must be true during Turn execution */
-  _turnActive: boolean = false;
-
-  get events(): readonly MessageEvent[] {
+  getEventLog(): readonly MessageEvent[] {
     return this._events;
   }
 
-  get messages(): readonly Message[] {
+  getMessages(): readonly Message[] {
     return this._messages;
   }
 
   /**
-   * Emit a MessageEvent. Only callable during Turn execution.
-   * Validates the event before appending; throws on invalid references.
+   * Append a MessageEvent. Validates first (lenient: missing-id remove/replace
+   * are idempotent no-ops), then appends to the event stream and recomputes the
+   * frozen derived snapshot. Always allowed.
    */
-  emit(event: MessageEvent): void {
-    if (!this._turnActive) {
-      throw new Error(
-        "emit() can only be called during Turn execution (inside middleware context). " +
-          "Turn is not currently active.",
-      );
-    }
-
-    // Validate event before appending (do NOT mutate events on error)
+  append(event: MessageEvent): void {
+    // Validate before mutating (do NOT mutate `_events` on a hard error).
     validateEventAgainstMessages(event, this._messages);
 
-    // Append to events stream
     this._events.push(event);
-
-    if (event.type === "appendSystem") {
-      this._messages = insertSystemMessage(this._messages, event.message);
-      return;
-    }
-
-    if (event.type === "appendMessage") {
-      this._messages = appendNonSystemMessage(this._messages, event.message);
-      return;
-    }
-
-    // Full replay for replace/remove/truncate
-    this._messages = replay(this._events);
+    this._messages = freeze(replay(this._events));
   }
 
   /**
-   * Replace the entire event stream and recompute messages.
-   * Throws if replay fails; preserves original state on error.
+   * Replace the entire event stream and recompute messages. Preserves the input
+   * `events` array byte-for-byte (lifting applies only to the derived view).
    */
   restore(events: MessageEvent[]): void {
-    const newMessages = replay(events);
-
-    this._events = [...events];
-    this._messages = newMessages;
+    const next = [...events];
+    const derived = freeze(replay(next));
+    this._events = next;
+    this._messages = derived;
   }
 }
 
+/** Recursively freeze a value and everything it transitively owns. A frozen
+ *  node is treated as fully frozen already, keeping this O(new objects). */
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const key of Object.keys(value)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+}
+
+function freeze(messages: Message[]): readonly Message[] {
+  // Deep-freeze each derived message — including nested payloads like
+  // `data.content` arrays — not just the array. A derived message can share its
+  // `data`/`metadata` (and their nested objects) with a source event (lifting
+  // only shallow-copies the top level), so a consumer pushing into `data.content`
+  // would otherwise mutate the shared object and corrupt `_events`/replay.
+  for (const message of messages) deepFreeze(message);
+  return Object.freeze(messages);
+}
+
 /**
- * Deterministic replay function: given a sequence of MessageEvents,
- * produce the derived messages array.
+ * Read-compat lifting (0.5): legacy logs carry `metadata.__createdBy` but no
+ * `createdBy` field. When building a *derived* message, lift it onto a shallow
+ * copy so the source event object stays byte-identical. Messages that already
+ * have `createdBy`, or that lack a string `__createdBy`, are returned as-is.
+ */
+function liftCreatedBy(message: Message): Message {
+  if (message.createdBy !== undefined) return message;
+  const mirrored = message.metadata?.[CREATED_BY_METADATA_KEY];
+  if (typeof mirrored !== "string") return message;
+  return { ...message, createdBy: mirrored };
+}
+
+/**
+ * Deterministic replay: given a sequence of MessageEvents, produce the derived
+ * messages array. Pure — same events → same messages. Derived messages have
+ * `createdBy` lifted from legacy metadata; source events are never mutated.
  *
- * This is a pure function — same events → same messages.
+ * Lenient like `append`: remove/replace against a non-existent id are idempotent
+ * no-ops rather than errors.
  */
 export function replay(events: readonly MessageEvent[]): Message[] {
   const messages: Message[] = [];
@@ -84,23 +108,25 @@ export function replay(events: readonly MessageEvent[]): Message[] {
 
     switch (event.type) {
       case "appendSystem": {
-        const nextMessages = insertSystemMessage(messages, event.message);
+        const nextMessages = insertSystemMessage(messages, liftCreatedBy(event.message));
         messages.splice(0, messages.length, ...nextMessages);
         break;
       }
       case "appendMessage": {
-        const nextMessages = appendNonSystemMessage(messages, event.message);
+        const nextMessages = appendNonSystemMessage(messages, liftCreatedBy(event.message));
         messages.splice(0, messages.length, ...nextMessages);
         break;
       }
       case "replace": {
         const idx = messages.findIndex((m) => m.id === event.messageId);
-        messages[idx] = event.message;
+        // Idempotent no-op when the id is absent.
+        if (idx !== -1) messages[idx] = liftCreatedBy(event.message);
         break;
       }
       case "remove": {
         const idx = messages.findIndex((m) => m.id === event.messageId);
-        messages.splice(idx, 1);
+        // Idempotent no-op when the id is absent.
+        if (idx !== -1) messages.splice(idx, 1);
         break;
       }
       case "truncate": {
@@ -135,10 +161,19 @@ function appendNonSystemMessage(messages: readonly Message[], message: Message):
   return next;
 }
 
+/**
+ * Validate an event against current messages.
+ *
+ * Robustness (spec): remove/replace against a non-existent message id is no
+ * longer a throw — it is a tolerated, idempotent no-op (the actual no-op happens
+ * in `replay`). Role-correctness for append/replace and a non-negative
+ * `keepLast` for truncate remain hard errors, since those indicate a malformed
+ * event rather than stale state.
+ */
 function validateEventAgainstMessages(
   event: MessageEvent,
   messages: readonly Message[],
-  source: "emit" | "replay" = "emit",
+  source: "append" | "replay" = "append",
 ): void {
   switch (event.type) {
     case "appendSystem":
@@ -149,11 +184,8 @@ function validateEventAgainstMessages(
       return;
     case "replace": {
       const existing = messages.find((message) => message.id === event.messageId);
-      if (!existing) {
-        throw new Error(
-          `${source}: replace references non-existent message id "${event.messageId}".`,
-        );
-      }
+      // Missing id = idempotent no-op (handled in replay); nothing to validate.
+      if (!existing) return;
       if (existing.data.role !== event.message.data.role) {
         throw new Error(
           `${source}: replace cannot change role from "${existing.data.role}" to "${event.message.data.role}" for message id "${event.messageId}". ` +
@@ -162,15 +194,9 @@ function validateEventAgainstMessages(
       }
       return;
     }
-    case "remove": {
-      const exists = messages.some((message) => message.id === event.messageId);
-      if (!exists) {
-        throw new Error(
-          `${source}: remove references non-existent message id "${event.messageId}".`,
-        );
-      }
+    case "remove":
+      // Missing id = idempotent no-op; nothing to validate.
       return;
-    }
     case "truncate":
       if (event.keepLast < 0) {
         throw new Error(
@@ -181,7 +207,11 @@ function validateEventAgainstMessages(
   }
 }
 
-function assertSystemRole(message: Message, eventType: "appendSystem", source: "emit" | "replay"): void {
+function assertSystemRole(
+  message: Message,
+  eventType: "appendSystem",
+  source: "append" | "replay",
+): void {
   if (message.data.role !== "system") {
     throw new Error(
       `${source}: ${eventType} requires role "system", got "${message.data.role}".`,
@@ -192,7 +222,7 @@ function assertSystemRole(message: Message, eventType: "appendSystem", source: "
 function assertNonSystemRole(
   message: Message,
   eventType: "appendMessage",
-  source: "emit" | "replay",
+  source: "append" | "replay",
 ): void {
   if (message.data.role === "system") {
     throw new Error(

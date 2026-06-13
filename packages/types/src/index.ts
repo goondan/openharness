@@ -48,6 +48,16 @@ export type {
   ConversationState,
   NonSystemMessage,
   SystemMessage,
+  CreateMessageInput,
+} from "./conversation.js";
+export {
+  createMessage,
+  getCreatedBy,
+  isCreatedBy,
+  isSynthetic,
+  CORE_CREATED_BY,
+  UNKNOWN_CREATED_BY,
+  CREATED_BY_METADATA_KEY,
 } from "./conversation.js";
 export type {
   ModelMessage,
@@ -61,6 +71,9 @@ export type {
   ToolCallPart,
   ToolResultPart,
 } from "ai";
+
+// store
+export type { ExtensionStore, StoreBacking } from "./store.js";
 
 // ingress
 export type {
@@ -114,6 +127,8 @@ export type {
   StepSummary,
   TurnResult,
   StepResult,
+  ModelInput,
+  ModelInputMiddleware,
   IngressContext,
   RouteContext,
   RouteResult,
@@ -135,6 +150,11 @@ export type {
   ExtensionInfo,
   AgentInfo,
   RuntimeInfo,
+  EventsApi,
+  AgentExtensionApi,
+  ConnectionExtensionApi,
+  AgentExtension,
+  ConnectionExtension,
   ExtensionApi,
   Extension,
 } from "./extension.js";
@@ -173,8 +193,15 @@ export type {
   HumanApprovalCompletedPayload,
   HumanApprovalFailedPayload,
   HumanApprovalCanceledPayload,
+  CoreHarnessEvents,
+  CustomHarnessEvents,
+  HarnessEvents,
+  CoreHarnessEventType,
+  AgentScopeEventType,
+  ConnectionScopeEventType,
   EventPayload,
 } from "./events.js";
+export { AGENT_SCOPE_EVENTS, CONNECTION_SCOPE_EVENTS } from "./events.js";
 
 // config — includes value exports (defineHarness, env)
 export type {
@@ -192,6 +219,7 @@ export type {
   ConversationTurnCoordinatorAcquireResult,
   ConversationTurnCoordinator,
   HarnessConfig,
+  StoreConfig,
   ProcessTurnOptions,
 } from "./config.js";
 export { defineHarness, env } from "./config.js";

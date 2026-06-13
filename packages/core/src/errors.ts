@@ -26,3 +26,14 @@ export class IngressRejectedError extends HarnessError {
     super(message);
   }
 }
+
+/**
+ * Boot-time failure while planning middleware order: a dependency cycle, an
+ * unknown `before`/`after` reference, or a duplicate name at one level. Carries
+ * enough context for the operator to find the offending registration.
+ */
+export class MiddlewareOrderError extends ConfigError {
+  constructor(message: string) {
+    super(message);
+  }
+}

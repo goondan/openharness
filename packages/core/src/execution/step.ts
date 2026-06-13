@@ -14,6 +14,8 @@ import type {
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { ModelInputRegistry } from "../model-input.js";
+import type { WrapCtxFor } from "./store-injection.js";
 import {
   executeToolCall,
   isHumanApprovalPendingError,
@@ -21,6 +23,7 @@ import {
   type HumanApprovalGateProbeResult,
 } from "./tool-call.js";
 import { normalizeToolArgsResult } from "../tool-args.js";
+import { createMessage, CORE_CREATED_BY } from "@goondan/openharness-types";
 
 // ─── XML invoke recovery ──────────────────────────────────────────────────────
 // Some models, instead of emitting a real tool call, write the call out as an
@@ -256,10 +259,24 @@ export async function executeStep(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    modelInputRegistry: ModelInputRegistry;
     humanApprovalStore?: HumanApprovalReferenceStore;
+    /** Per-layer ctx.store injection for the step chain. */
+    storeWrapCtxFor?: WrapCtxFor<StepContext>;
+    /** Per-layer ctx.store injection for the toolCall chains spawned by this step. */
+    storeWrapCtxForToolCall?: WrapCtxFor<ToolCallContext>;
   }
 ): Promise<StepResult> {
-  const { llmClient, toolRegistry, middlewareRegistry, eventBus, humanApprovalStore } = deps;
+  const {
+    llmClient,
+    toolRegistry,
+    middlewareRegistry,
+    eventBus,
+    modelInputRegistry,
+    humanApprovalStore,
+    storeWrapCtxFor,
+    storeWrapCtxForToolCall,
+  } = deps;
   const { turnId, agentName, conversationId, stepNumber } = ctx;
 
   // 1. Emit step.start
@@ -273,8 +290,14 @@ export async function executeStep(
 
   // 2. Core handler — the innermost logic
   const coreHandler = async (stepCtx: StepContext): Promise<StepResult> => {
-    // a. Get current messages
-    const messages = [...stepCtx.conversation.messages];
+    // a. Assemble the model input. The conversation event log is durable truth;
+    //    `useModelInput` projects a per-step, throwaway view of it (windowing,
+    //    hydration, redaction) immediately before the model call. It runs once,
+    //    is pure with respect to durable state, and never touches `conversation`.
+    const base = stepCtx.conversation.getMessages();
+    const messages = modelInputRegistry.isEmpty
+      ? [...base]
+      : [...(await modelInputRegistry.apply(base, stepCtx))];
 
     // b. Get available tools
     const tools = toolRegistry.list() as ReturnType<ToolRegistry["list"]>;
@@ -411,22 +434,20 @@ export async function executeStep(
         return undefined;
       }
 
-      return {
+      return createMessage<AssistantModelMessage>({
         id: assistantMessageId,
         data: {
           role: "assistant",
           content: committedAssistantContent,
         },
-        metadata: {
-          __createdBy: "core",
-        },
-      };
+        createdBy: CORE_CREATED_BY,
+      });
     };
 
     const appendAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
       const message = buildAssistantMessage(committedToolCalls);
       if (message) {
-        stepCtx.conversation.emit({
+        stepCtx.conversation.append({
           type: "appendMessage",
           message,
         });
@@ -436,7 +457,7 @@ export async function executeStep(
     const replaceAssistantMessage = (committedToolCalls: typeof canonicalToolCalls) => {
       const message = buildAssistantMessage(committedToolCalls);
       if (message) {
-        stepCtx.conversation.emit({
+        stepCtx.conversation.append({
           type: "replace",
           messageId: assistantMessageId,
           message,
@@ -544,20 +565,18 @@ export async function executeStep(
       }
 
       const firstToolCallId = pendingToolResultParts[0]?.toolCallId;
-      stepCtx.conversation.emit({
+      stepCtx.conversation.append({
         type: "appendMessage",
-        message: {
+        message: createMessage<ToolModelMessage>({
           id: pendingToolResultParts.length === 1 && firstToolCallId
             ? `tool-result-${firstToolCallId}`
             : `tool-results-${stepCtx.turnId}-${stepCtx.stepNumber}`,
           data: {
             role: "tool",
             content: [...pendingToolResultParts],
-          } satisfies ToolModelMessage,
-          metadata: {
-            __createdBy: "core",
           },
-        },
+          createdBy: CORE_CREATED_BY,
+        }),
       });
       pendingToolResultParts.length = 0;
     };
@@ -582,6 +601,7 @@ export async function executeStep(
         middlewareRegistry,
         eventBus,
         humanApprovalStore,
+        storeWrapCtxFor: storeWrapCtxForToolCall,
         onToolArgsResolved: (toolArgs) => {
           effectiveArgs = toolArgs;
         },
@@ -618,6 +638,7 @@ export async function executeStep(
         : middlewareRegistry.buildChain<ToolCallContext, ToolResult>(
             "toolCall",
             async () => probedResult,
+            storeWrapCtxForToolCall ? { wrapCtxFor: storeWrapCtxForToolCall } : undefined,
           );
 
       try {
@@ -702,6 +723,7 @@ export async function executeStep(
               middlewareRegistry,
               eventBus,
               humanApprovalStore,
+              storeWrapCtxFor: storeWrapCtxForToolCall,
             },
           );
           if (probeResult.status === "pending") {
@@ -763,8 +785,12 @@ export async function executeStep(
     };
   };
 
-  // 3. Build step middleware chain
-  const chain = middlewareRegistry.buildChain<StepContext, StepResult>("step", coreHandler);
+  // 3. Build step middleware chain (with per-layer ctx.store injection)
+  const chain = middlewareRegistry.buildChain<StepContext, StepResult>(
+    "step",
+    coreHandler,
+    storeWrapCtxFor ? { wrapCtxFor: storeWrapCtxFor } : undefined,
+  );
 
   // 4. Run chain, handling errors
   try {

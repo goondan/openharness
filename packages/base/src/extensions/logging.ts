@@ -1,15 +1,20 @@
-import type { Extension, ExtensionApi } from "@goondan/openharness-types";
+import type {
+  AgentExtension,
+  AgentExtensionApi,
+} from "@goondan/openharness-types";
 
 /**
  * Logging extension — subscribes to core events and logs them.
  */
-export function Logging(config?: { logger?: (msg: string) => void }): Extension {
+export function Logging(config?: {
+  logger?: (msg: string) => void;
+}): AgentExtension {
   const log = config?.logger ?? console.log;
 
   return {
     name: "logging",
 
-    register(api: ExtensionApi): void {
+    register(api: AgentExtensionApi): void {
       api.on("turn.start", (payload) => {
         log(`[turn.start] ${JSON.stringify(payload)}`);
       });
