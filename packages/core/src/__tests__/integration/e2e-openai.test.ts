@@ -57,7 +57,7 @@ describeE2E("E2E: OpenAI API", () => {
               });
               return next();
             },
-            { priority: 10 },
+            { phase: "observe" },
           );
         },
       };

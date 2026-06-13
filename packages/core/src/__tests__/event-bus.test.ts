@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventBus } from "../event-bus.js";
-import type { EventPayload } from "@goondan/openharness-types";
+import type { EventPayload, HarnessEvents } from "@goondan/openharness-types";
 
 describe("EventBus", () => {
   let bus: EventBus;
@@ -183,7 +183,9 @@ describe("EventBus", () => {
   });
 
   it("tap receives every emitted event regardless of type", () => {
-    const received: EventPayload[] = [];
+    // tap sees the full merged event map (core + any declared custom events),
+    // which is wider than the deprecated core-only EventPayload union.
+    const received: HarnessEvents[keyof HarnessEvents][] = [];
 
     bus.tap((payload) => {
       received.push(payload);

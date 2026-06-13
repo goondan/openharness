@@ -47,8 +47,11 @@ describe("buildChain", () => {
     expect(log).toEqual(["before", "core", "after"]);
   });
 
-  // Test 3: Multiple middlewares execute in priority order (50 → 100 → 200)
-  it("multiple middlewares execute in ascending priority order", async () => {
+  // Test 3: Multiple middlewares wrap in array order (index 0 = outermost).
+  // buildChain no longer sorts — MiddlewareRegistry owns ordering and hands
+  // buildChain a pre-ordered array. Index 0 enters first; its post-next() code
+  // runs last (the onion).
+  it("multiple middlewares wrap in array order (index 0 outermost)", async () => {
     const log: string[] = [];
 
     const core = async (_ctx: Ctx): Promise<Res> => {
@@ -56,31 +59,29 @@ describe("buildChain", () => {
       return { result: 0 };
     };
 
-    const makeMw = (name: string, priority: number, order: number) => ({
+    const makeMw = (name: string) => ({
       handler: async (_ctx: Ctx, next: () => Promise<Res>): Promise<Res> => {
         log.push(`${name}:before`);
         const res = await next();
         log.push(`${name}:after`);
         return res;
       },
-      priority,
-      order,
     });
 
     const chain = buildChain(
-      [makeMw("p200", 200, 2), makeMw("p50", 50, 0), makeMw("p100", 100, 1)],
+      [makeMw("first"), makeMw("second"), makeMw("third")],
       core
     );
     await chain({ value: 1 });
 
     expect(log).toEqual([
-      "p50:before",
-      "p100:before",
-      "p200:before",
+      "first:before",
+      "second:before",
+      "third:before",
       "core",
-      "p200:after",
-      "p100:after",
-      "p50:after",
+      "third:after",
+      "second:after",
+      "first:after",
     ]);
   });
 
@@ -299,30 +300,31 @@ describe("MiddlewareRegistry", () => {
     expect(log).toEqual(["mw:before", "core", "mw:after"]);
   });
 
-  it("respects priority option when registering", async () => {
+  it("respects before/after ordering (A before B ⇒ A enters first / outermost)", async () => {
     const registry = new MiddlewareRegistry();
     const log: string[] = [];
 
+    // "inner" registered first, but declares it runs after "outer".
     registry.register(
       "turn",
       (async (_ctx: Ctx, next: () => Promise<Res>) => {
-        log.push("p200:before");
+        log.push("inner:before");
         const res = await next();
-        log.push("p200:after");
+        log.push("inner:after");
         return res;
       }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
-      { priority: 200 }
+      { name: "inner", after: "outer" }
     );
 
     registry.register(
       "turn",
       (async (_ctx: Ctx, next: () => Promise<Res>) => {
-        log.push("p50:before");
+        log.push("outer:before");
         const res = await next();
-        log.push("p50:after");
+        log.push("outer:after");
         return res;
       }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
-      { priority: 50 }
+      { name: "outer" }
     );
 
     const core = async (_ctx: Ctx): Promise<Res> => {
@@ -333,12 +335,13 @@ describe("MiddlewareRegistry", () => {
     const chain = registry.buildChain<Ctx, Res>("turn", core);
     await chain({ value: 1 });
 
+    // "outer" enters first (before "inner"); its post-next() code runs last.
     expect(log).toEqual([
-      "p50:before",
-      "p200:before",
+      "outer:before",
+      "inner:before",
       "core",
-      "p200:after",
-      "p50:after",
+      "inner:after",
+      "outer:after",
     ]);
   });
 

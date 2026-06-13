@@ -1,56 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Logging } from "../extensions/logging.js";
-import type { ExtensionApi, ConversationState } from "@goondan/openharness-types";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeMockConversationState(): ConversationState {
-  return {
-    messages: [],
-    events: [],
-    emit: vi.fn(),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(conversation: ConversationState): {
-  api: ExtensionApi;
-  eventListeners: Map<string, Array<(payload: unknown) => void>>;
-} {
-  const eventListeners = new Map<string, Array<(payload: unknown) => void>>();
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn() as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn(),
-      remove: vi.fn(),
-      list: vi.fn(() => []),
-    },
-    on: vi.fn((event: string, listener: (payload: unknown) => void) => {
-      if (!eventListeners.has(event)) {
-        eventListeners.set(event, []);
-      }
-      eventListeners.get(event)!.push(listener);
-    }),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, eventListeners };
-}
+import { makeMockApi, makeMockConversationState } from "./helpers.js";
 
 function emit(
   eventListeners: Map<string, Array<(payload: unknown) => void>>,
@@ -61,10 +11,6 @@ function emit(
     l(payload);
   });
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("Logging", () => {
   it("creates an Extension with name 'logging'", () => {
@@ -182,7 +128,11 @@ describe("Logging", () => {
     ext.register(api);
 
     emit(eventListeners, "tool.start", { toolName: "bash", toolCallId: "tc-1" });
-    emit(eventListeners, "tool.done", { toolName: "bash", toolCallId: "tc-1", result: { type: "text", text: "ok" } });
+    emit(eventListeners, "tool.done", {
+      toolName: "bash",
+      toolCallId: "tc-1",
+      result: { type: "text", text: "ok" },
+    });
 
     expect(logger).toHaveBeenCalledTimes(2);
     expect(logger.mock.calls[0][0]).toContain("tool.start");

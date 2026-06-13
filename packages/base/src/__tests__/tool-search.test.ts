@@ -1,70 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { ToolSearch } from "../extensions/tool-search.js";
-import type {
-  ExtensionApi,
-  ConversationState,
-  ToolDefinition,
-  ToolContext,
-} from "@goondan/openharness-types";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeMockConversationState(): ConversationState {
-  return {
-    messages: [],
-    events: [],
-    emit: vi.fn(),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(
-  conversation: ConversationState,
-  availableTools: ToolDefinition[] = [],
-): {
-  api: ExtensionApi;
-  registeredTools: ToolDefinition[];
-} {
-  const registeredTools: ToolDefinition[] = [...availableTools];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn() as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn((tool: ToolDefinition) => {
-        registeredTools.push(tool);
-      }),
-      remove: vi.fn(),
-      list: vi.fn(() => registeredTools as readonly ToolDefinition[]),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, registeredTools };
-}
-
-function makeDummyTool(name: string, description: string): ToolDefinition {
-  return {
-    name,
-    description,
-    parameters: { type: "object", properties: {} },
-    handler: async () => ({ type: "text", text: "ok" }),
-  };
-}
+import type { ToolDefinition, ToolContext } from "@goondan/openharness-types";
+import { makeMockApi, makeMockConversationState, makeDummyTool } from "./helpers.js";
 
 function makeToolContext(): ToolContext {
   return {
@@ -74,10 +11,6 @@ function makeToolContext(): ToolContext {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("ToolSearch", () => {
   it("creates an Extension with name 'tool-search'", () => {
     const ext = ToolSearch();
@@ -86,13 +19,13 @@ describe("ToolSearch", () => {
 
   it("registers a meta-tool named 'search_tools'", () => {
     const conversation = makeMockConversationState();
-    const { api, registeredTools } = makeMockApi(conversation);
+    const { api } = makeMockApi(conversation);
 
     const ext = ToolSearch();
     ext.register(api);
 
     expect(api.tools.register).toHaveBeenCalledOnce();
-    const searchTool = registeredTools.find((t) => t.name === "search_tools");
+    const searchTool = api.tools.list().find((t) => t.name === "search_tools");
     expect(searchTool).toBeDefined();
   });
 

@@ -1,117 +1,47 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MessageWindow } from "../extensions/message-window.js";
-import type {
-  ExtensionApi,
-  StepMiddleware,
-  StepContext,
-  StepResult,
-  ConversationState,
-  Message,
-  MessageEvent,
-} from "@goondan/openharness-types";
+import type { Message, PromptView } from "@goondan/openharness-types";
+import {
+  makeMockApi,
+  makeMockConversationState,
+  makeStepContext,
+  makeMessages,
+} from "./helpers.js";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+function userMsg(id: string, content = id): Message {
+  return { id, data: { role: "user", content } };
+}
 
-function makeMessages(count: number): Message[] {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `msg-${i}`,
+function systemMsg(id: string, content = id): Message {
+  return { id, data: { role: "system", content } };
+}
+
+function assistantToolCall(id: string, toolCallId: string): Message {
+  return {
+    id,
     data: {
-      role: "user" as const,
-      content: `Message ${i}`,
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId, toolName: "x", input: {} }],
     },
-  }));
-}
-
-function makeMockConversationState(
-  messages: Message[],
-): ConversationState & { emitted: MessageEvent[] } {
-  const emitted: MessageEvent[] = [];
-  return {
-    messages,
-    events: [],
-    emitted,
-    emit: vi.fn((event: MessageEvent) => {
-      emitted.push(event);
-    }),
-    restore: vi.fn(),
   };
 }
 
-function makeMockApi(conversation: ConversationState): {
-  api: ExtensionApi;
-  registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }>;
-} {
-  const registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }> = [];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn(
-        (level: string, handler: StepMiddleware, options?: { priority?: number }) => {
-          registeredMiddleware.push({ level, handler, options });
+function toolResult(id: string, toolCallId: string): Message {
+  return {
+    id,
+    data: {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId,
+          toolName: "x",
+          output: { type: "text", value: "ok" },
         },
-      ) as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn(),
-      remove: vi.fn(),
-      list: vi.fn(() => []),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
+      ],
     },
   };
-
-  return { api, registeredMiddleware };
 }
-
-function makeStepContext(conversation: ConversationState): StepContext {
-  return {
-    turnId: "turn-1",
-    agentName: "test-agent",
-    conversationId: "conv-1",
-    conversation,
-    stepNumber: 1,
-    abortSignal: new AbortController().signal,
-    input: {
-      name: "test-event",
-      content: [{ type: "text", text: "hello" }],
-      properties: {},
-      source: {
-        connector: "test-connector",
-        connectionName: "test",
-        receivedAt: new Date().toISOString(),
-      },
-    },
-    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
-  };
-}
-
-const stubStepResult: StepResult = {
-  toolCalls: [],
-};
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("MessageWindow", () => {
   it("creates an Extension with name 'message-window'", () => {
@@ -119,76 +49,103 @@ describe("MessageWindow", () => {
     expect(ext.name).toBe("message-window");
   });
 
-  it("registers step middleware via api.pipeline.register", () => {
+  it("registers a prompt projection (not a durable middleware)", () => {
     const conversation = makeMockConversationState([]);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+    const { api, projections, registeredMiddleware } = makeMockApi(conversation);
 
     const ext = MessageWindow({ maxMessages: 5 });
     ext.register(api);
 
-    expect(api.pipeline.register).toHaveBeenCalledOnce();
-    expect(registeredMiddleware[0].level).toBe("step");
+    expect(api.prompt.transform).toHaveBeenCalledOnce();
+    expect(projections).toHaveLength(1);
+    expect(projections[0].name).toBe("message-window");
+    // Windowing is a view projection now — it must not register durable middleware.
+    expect(registeredMiddleware).toHaveLength(0);
   });
 
-  it("does NOT emit truncate when messages are within maxMessages", async () => {
-    const messages = makeMessages(3);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("returns the view unchanged when body is within maxMessages", async () => {
+    const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
+    const view = makeMessages(3) as PromptView;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const out = await projections[0].projection(view, ctx);
 
-    await middleware(ctx, next);
-
+    expect(out).toBe(view);
+    // A projection never mutates the durable log.
     expect(conversation.emit).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledOnce();
   });
 
-  it("emits truncate when messages exceed maxMessages", async () => {
-    const messages = makeMessages(8);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("keeps only the last maxMessages body messages when exceeded", async () => {
+    const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
+    const view = makeMessages(8) as PromptView;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const out = await projections[0].projection(view, ctx);
 
-    await middleware(ctx, next);
-
-    expect(conversation.emit).toHaveBeenCalledOnce();
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
-    expect(emitted.type).toBe("truncate");
-    if (emitted.type === "truncate") {
-      expect(emitted.keepLast).toBe(5);
-    }
-    expect(next).toHaveBeenCalledOnce();
+    expect(out).toHaveLength(5);
+    expect(out.map((m) => m.id)).toEqual(["msg-3", "msg-4", "msg-5", "msg-6", "msg-7"]);
+    expect(conversation.emit).not.toHaveBeenCalled();
   });
 
-  it("emits truncate with exact maxMessages count", async () => {
-    const messages = makeMessages(6);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("always retains leading system messages on top of the window", async () => {
+    const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    MessageWindow({ maxMessages: 3 }).register(api);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
-
-    const middleware = registeredMiddleware[0].handler;
+    const view = [
+      systemMsg("sys-0"),
+      ...makeMessages(6),
+    ] as PromptView;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const out = await projections[0].projection(view, ctx);
 
-    await middleware(ctx, next);
+    // system always survives + last 3 body messages
+    expect(out.map((m) => m.id)).toEqual(["sys-0", "msg-3", "msg-4", "msg-5"]);
+  });
 
-    expect(conversation.emit).toHaveBeenCalledOnce();
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
-    if (emitted.type === "truncate") {
-      expect(emitted.keepLast).toBe(5);
-    }
+  it("extends the boundary left so the window never opens on an orphan tool-result", async () => {
+    const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    // maxMessages 3 would normally start the window at the tool-result, severing
+    // it from its assistant tool-call. The boundary must back up to include the call.
+    MessageWindow({ maxMessages: 3 }).register(api);
+
+    const view = [
+      userMsg("u-0"),
+      userMsg("u-1"),
+      assistantToolCall("a-2", "call-1"),
+      toolResult("t-3", "call-1"),
+      userMsg("u-4"),
+    ] as PromptView;
+    const ctx = makeStepContext(conversation);
+    const out = await projections[0].projection(view, ctx);
+
+    // raw start = 5 - 3 = 2 (the assistant call) — already not a tool-result, so
+    // the window is [a-2, t-3, u-4]; the call/result pair stays whole.
+    expect(out.map((m) => m.id)).toEqual(["a-2", "t-3", "u-4"]);
+    const first = out[0];
+    expect(first.data.role).toBe("assistant");
+  });
+
+  it("backs up past a tool-result that would otherwise lead the window", async () => {
+    const conversation = makeMockConversationState();
+    const { api, projections } = makeMockApi(conversation);
+    MessageWindow({ maxMessages: 2 }).register(api);
+
+    const view = [
+      userMsg("u-0"),
+      assistantToolCall("a-1", "call-1"),
+      toolResult("t-2", "call-1"),
+      userMsg("u-3"),
+    ] as PromptView;
+    const ctx = makeStepContext(conversation);
+    const out = await projections[0].projection(view, ctx);
+
+    // raw start = 4 - 2 = 2 (the tool-result) → back up to index 1 (the call).
+    expect(out.map((m) => m.id)).toEqual(["a-1", "t-2", "u-3"]);
   });
 });

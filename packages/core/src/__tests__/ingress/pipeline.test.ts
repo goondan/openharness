@@ -57,7 +57,6 @@ interface MakePipelineOptions {
   agentNames?: string[];
   connectionName?: string;
   connectionMiddleware?: MiddlewareRegistry;
-  agentMiddlewareByAgent?: Map<string, MiddlewareRegistry>;
   dispatchTurn?: (
     turnId: string,
     agentName: string,
@@ -72,10 +71,7 @@ function makePipeline(opts: MakePipelineOptions = {}) {
     rules = makeRules(),
     agentNames = ["agent1"],
     connectionName = "conn1",
-    connectionMiddleware = new MiddlewareRegistry(),
-    agentMiddlewareByAgent = new Map(
-      agentNames.map((agentName) => [agentName, new MiddlewareRegistry()]),
-    ),
+    connectionMiddleware = new MiddlewareRegistry(["ingress", "route"]),
     dispatchTurn = vi.fn((turnId: string) => ({ turnId, disposition: "started" as const })),
   } = opts;
 
@@ -96,7 +92,6 @@ function makePipeline(opts: MakePipelineOptions = {}) {
 
   const pipeline = new IngressPipeline({
     connections,
-    agentMiddlewareByAgent,
     registeredAgents,
     eventBus,
     dispatchTurn,
@@ -375,39 +370,17 @@ describe("IngressPipeline", () => {
     expect(ingressMiddlewareCalled).toHaveBeenCalledOnce();
   });
 
-  // Test 11: Agent-level middleware on route stage
-  it("agent-level middleware runs on route stage", async () => {
+  // Test 11: Connection-level middleware on route stage
+  // Route is connection-scoped (F5): the route chain is built from the
+  // connection's middleware registry, not from any per-agent registry.
+  it("connection-level middleware runs on route stage", async () => {
     const routeMiddlewareCalled = vi.fn();
 
-    const agentMiddleware = new MiddlewareRegistry();
-
-    agentMiddleware.register(
-      "route",
-      async (ctx: unknown, next: () => Promise<unknown>) => {
-        routeMiddlewareCalled(ctx);
-        return next();
-      }
-    );
-
-    const { pipeline } = makePipeline({
-      agentMiddlewareByAgent: new Map([["agent1", agentMiddleware]]),
-    });
-
-    await pipeline.receive({ connectionName: "conn1", payload: {} });
-
-    expect(routeMiddlewareCalled).toHaveBeenCalledOnce();
-  });
-
-  // Test 12: Scope enforcement — Connection Extension cannot affect route stage
-  it("scope enforcement: connection middleware does NOT affect route stage", async () => {
-    const routeIntercepted = vi.fn();
-
-    // Register "route" middleware on the connection registry — should be ignored
-    const connectionMiddleware = new MiddlewareRegistry();
+    const connectionMiddleware = new MiddlewareRegistry(["ingress", "route"]);
     connectionMiddleware.register(
       "route",
       async (ctx: unknown, next: () => Promise<unknown>) => {
-        routeIntercepted(); // should NOT be called
+        routeMiddlewareCalled(ctx);
         return next();
       }
     );
@@ -416,32 +389,33 @@ describe("IngressPipeline", () => {
 
     await pipeline.receive({ connectionName: "conn1", payload: {} });
 
-    // Route middleware registered on connectionMiddleware should NOT have been called
-    expect(routeIntercepted).not.toHaveBeenCalled();
+    expect(routeMiddlewareCalled).toHaveBeenCalledOnce();
+    // The route middleware sees the RouteContext (connectionName + envelope).
+    const ctx = routeMiddlewareCalled.mock.calls[0][0] as RouteContext;
+    expect(ctx.connectionName).toBe("conn1");
+    expect(ctx.envelope).toBeDefined();
   });
 
-  // Test 13: Scope enforcement — Agent Extension cannot affect ingress stage
-  it("scope enforcement: agent middleware does NOT affect ingress stage", async () => {
-    const ingressIntercepted = vi.fn();
-
-    // Register "ingress" middleware on the agent registry — should be ignored
-    const agentMiddleware = new MiddlewareRegistry();
-    agentMiddleware.register(
-      "ingress",
-      async (ctx: unknown, next: () => Promise<unknown>) => {
-        ingressIntercepted(); // should NOT be called
-        return next();
+  // Test 12: Route middleware can rewrite the routing decision
+  it("route middleware can override the resolved agent/conversation", async () => {
+    const connectionMiddleware = new MiddlewareRegistry(["ingress", "route"]);
+    connectionMiddleware.register(
+      "route",
+      async (_ctx: unknown, next: () => Promise<unknown>) => {
+        const result = (await next()) as { conversationId: string };
+        return { ...result, conversationId: "rewritten-conv" };
       }
     );
 
-    const { pipeline } = makePipeline({
-      agentMiddlewareByAgent: new Map([["agent1", agentMiddleware]]),
-    });
+    const { pipeline, dispatchTurn } = makePipeline({ connectionMiddleware });
 
-    await pipeline.receive({ connectionName: "conn1", payload: {} });
+    const results = await pipeline.receive({ connectionName: "conn1", payload: {} });
 
-    // Ingress middleware registered on agentMiddleware should NOT have been called
-    expect(ingressIntercepted).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].conversationId).toBe("rewritten-conv");
+    expect(dispatchTurn).toHaveBeenCalledWith(
+      expect.any(String), "agent1", expect.any(Object), "rewritten-conv"
+    );
   });
 
   // Test 14: listConnections() returns all registered connections
@@ -468,10 +442,6 @@ describe("IngressPipeline", () => {
 
     const pipeline = new IngressPipeline({
       connections,
-      agentMiddlewareByAgent: new Map([
-        ["agent1", new MiddlewareRegistry()],
-        ["agent2", new MiddlewareRegistry()],
-      ]),
       registeredAgents: new Set(["agent1", "agent2"]),
       eventBus: new EventBus(),
       dispatchTurn: vi.fn(),

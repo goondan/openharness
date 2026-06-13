@@ -77,7 +77,7 @@ function BasicSystemPrompt(text: string): Extension {
           );
           return next();
         },
-        { priority: 10 },
+        { phase: "observe" },
       );
     },
   };
