@@ -6,7 +6,7 @@
 형식은 [Keep a Changelog](https://keepachangelog.com/)를 느슨하게 따르고,
 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
-## [Unreleased] — 1.0 단순화
+## [1.0.0-rc.1] — 1.0 단순화
 
 0.5에서 실험적으로 늘어난 확장 표면을 6개의 결정으로 줄였습니다. 확장이 배워야 하는
 표면이 작아졌고, 같은 일을 하는 길이 하나로 모였습니다. 0.5 이벤트 로그는 **그대로
