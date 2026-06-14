@@ -14,21 +14,22 @@ OpenHarness는 대화 상태를 메시지 배열 직접 수정이 아니라 이�
 
 ### 3.1 Flow: 이벤트 추가
 
-**ID:** `STATE-EMIT-01`
+**ID:** `STATE-APPEND-01`
 
-- Trigger: active turn 안에서 `conversation.emit(event)` 호출
+- Trigger: `conversation.append(event)` 호출 (turn-active 게이팅 없음 — 언제나 허용)
 - Preconditions:
-  - `_turnActive === true`
-  - event가 현재 메시지 상태에 대해 유효하다
+  - event가 현재 메시지 상태에 대해 유효하다 (role 계약, `keepLast >= 0`)
 - Main Flow:
-  1. event 유효성을 검사한다.
+  1. event 유효성을 검사한다 (`_events` 변형 전에 hard error를 먼저 던진다).
   2. `_events` 끝에 event를 append 한다.
-  3. `appendSystem`과 `appendMessage`는 증분 반영하고, 나머지 이벤트는 전체 replay로 `_messages`를 재계산한다.
+  3. `_events`를 deterministic replay 하여 `_messages` 스냅샷을 재계산하고 `Object.freeze` 한다.
 - Postconditions:
-  - `events`와 `messages`가 동일한 의미 상태를 가리킨다.
+  - `getEventLog()`와 `getMessages()`가 동일한 의미 상태를 가리킨다.
+  - `append`는 동기다 — 직후 `getMessages()`가 즉시 반영한다.
+  - `append`는 EventBus(`api.on`/`emit`)를 호출하지 않는다 (상태 변경 ≠ 관측).
 - Failure:
-  - active turn이 아니면 예외를 던진다.
-  - 존재하지 않는 메시지에 대한 `replace/remove`, 음수 `keepLast`, event 종류와 맞지 않는 role, role을 바꾸는 `replace`는 예외를 던지고 상태를 바꾸지 않는다.
+  - 음수 `keepLast`, event 종류와 맞지 않는 role, role을 바꾸는 `replace`는 hard error로 실패하고 상태를 바꾸지 않는다.
+  - 존재하지 않는 메시지에 대한 `replace`/`remove`는 더 이상 throw가 아니라 멱등 no-op이다. 이벤트는 그대로 `_events`에 기록되지만 `_messages`는 변하지 않는다.
 
 ### 3.2 Flow: 상태 복원
 
@@ -40,6 +41,7 @@ OpenHarness는 대화 상태를 메시지 배열 직접 수정이 아니라 이�
   2. replay가 성공하면 `_events`, `_messages`를 한 번에 교체한다.
 - Postconditions:
   - 복원된 상태는 replay 결과와 동일하다.
+  - 0.5 로그(`metadata.__createdBy`만 있고 `createdBy` 필드 없음)도 그대로 replay 된다. `createdBy`는 파생 `getMessages()` 뷰에서만 metadata로부터 lift 되고, `getEventLog()`의 직렬화 바이트는 원본과 동일하게 보존된다.
 - Failure:
   - replay 실패 시 기존 `_events`, `_messages`는 보존된다.
 
@@ -57,15 +59,17 @@ OpenHarness는 대화 상태를 메시지 배열 직접 수정이 아니라 이�
 
 ## 4. Constraint Specification
 
-### STATE-CONST-001 - events가 원천이다
+### STATE-CONST-001 - event log가 원천이다
 
-- `messages`는 `events`의 파생값이다.
-- `messages`를 직접 수정하는 API는 없다.
+- `getMessages()`는 `getEventLog()`의 파생값이다 (이벤트 소싱, replay == restore).
+- 변경 유일 경로는 `append(event)`이며, `getMessages()` 스냅샷을 직접 수정하는 API는 없다.
+- `getMessages()`는 `Object.freeze`된 불변 스냅샷이므로 변형 시도는 throw 한다.
 
-### STATE-CONST-002 - emit는 turn-scoped다
+### STATE-CONST-002 - append는 단일 쓰기 경로다
 
-- `emit()`은 middleware/turn 실행 컨텍스트 밖에서 사용할 수 없다.
-- 이 제약 덕분에 message mutation 타이밍이 Turn 수명주기 안으로 제한된다.
+- `append(event)`은 conversation 상태를 바꾸는 유일한 길이다 (구 `replace`/`remove`/`truncate`/`appendSystem`/`appendMessage`는 모두 `append`에 넘기는 MessageEvent다).
+- `append`은 turn-active 게이팅이 없다 — middleware/turn 실행 컨텍스트 밖에서도 언제나 허용된다.
+- `append`은 동기이며 EventBus를 호출하지 않는다. 상태 변경(MessageEvent)과 관측(HarnessEvents)은 분리된 레이어다.
 
 ### STATE-CONST-003 - restore는 원자적이다
 
@@ -99,15 +103,19 @@ OpenHarness는 대화 상태를 메시지 배열 직접 수정이 아니라 이�
 
 ```ts
 interface ConversationState {
-  readonly events: readonly MessageEvent[];
-  readonly messages: readonly Message[];
+  // 원천: append-only event log (이벤트 소싱). 직렬화 바이트는 원본과 동일.
+  getEventLog(): readonly MessageEvent[];
+  // 파생: replay한 현재 상태. Object.freeze된 불변 스냅샷 (createdBy lifted).
+  getMessages(): readonly Message[];
+  // 변경 유일 경로. 동기 — 직후 getMessages()가 즉시 반영. EventBus 호출 안 함.
+  append(event: MessageEvent): void;
+  // 전체 로그(0.5 레거시 또는 신규)를 교체하고 replay.
   restore(events: MessageEvent[]): void;
-  emit(event: MessageEvent): void;
 }
 
 type MessageEvent =
-  | { type: "appendSystem"; message: Message<SystemModelMessage> }
-  | { type: "appendMessage"; message: Message<UserModelMessage | AssistantModelMessage | ToolModelMessage> }
+  | { type: "appendSystem"; message: SystemMessage }
+  | { type: "appendMessage"; message: NonSystemMessage }
   | { type: "replace"; messageId: string; message: Message }
   | { type: "remove"; messageId: string }
   | { type: "truncate"; keepLast: number };
@@ -123,9 +131,9 @@ type MessageEvent =
 
 ### 5.2 runtime에서의 사용 규칙
 
-- live turn에서 상태를 읽고 수정할 때는 `ctx.conversation`을 사용한다.
-- `api.conversation`은 extension 표면에 존재하지만, 특정 turn/conversation 선택 수단으로 의존하면 안 된다.
-- persistence, compaction, windowing은 turn middleware에서 `ctx.conversation`을 기준으로 구현한다.
+- 상태를 읽고 수정할 때는 핸들러 ctx의 `ctx.conversation`(읽기 `getEventLog()`/`getMessages()`, 쓰기 `append()`)을 사용한다. `register(api)` 시점에는 conversation 핸들이 없다 — 항상 미들웨어 ctx에서 받는다.
+- persistence, compaction, windowing 같은 durable 변형은 turn middleware에서 `ctx.conversation.append(...)`로 구현한다.
+- 모델 입력 조립처럼 영속이 아닌(non-durable) 메시지 변형은 conversation을 변형하지 말고 `api.useModelInput((messages, ctx) => messages)` projection으로 구현한다. projection은 `getMessages()` 스냅샷을 입력으로 받아 모델 호출 직전 1회 실행되는 순수 함수이며, conversation/ctx를 변형하지 않는다.
 
 ## 6. Realization Specification
 
@@ -134,8 +142,8 @@ type MessageEvent =
   - state object 생성/재사용: [harness-runtime.ts](/Users/channy/workspace/openharness/packages/core/src/harness-runtime.ts:1)
   - core append 시점: [turn.ts](/Users/channy/workspace/openharness/packages/core/src/execution/turn.ts:1), [step.ts](/Users/channy/workspace/openharness/packages/core/src/execution/step.ts:1)
 - Performance:
-  - `appendSystem`, `appendMessage`는 증분 반영
-  - `replace/remove/truncate/restore`는 deterministic replay
+  - `append`은 매번 `_events`를 deterministic replay 하여 frozen `_messages` 스냅샷을 재계산한다 (replay == restore의 단일 경로).
+  - `getMessages()` 스냅샷은 깊은 freeze로 공유 payload(`data.content` 등) 변형을 막아 `_events`/replay 무결성을 보존한다.
 
 ## 7. Dependency Map
 
@@ -145,9 +153,10 @@ type MessageEvent =
 
 ## 8. Acceptance Criteria
 
-- Given 메시지 3개를 `appendMessage` 후 하나를 replace 하면, When `messages`를 읽으면, Then 순서는 유지되고 대상 메시지만 교체된다.
-- Given invalid `appendSystem`/`appendMessage`/`replace`/`remove`/`truncate` 이벤트를 emit 하면, When 예외가 발생하면, Then 기존 `events/messages`는 유지된다.
-- Given 저장된 event stream이 있으면, When `restore(events)`를 호출하면, Then 같은 `messages`가 재구성된다.
+- Given 메시지 3개를 `appendMessage` event로 `append` 후 하나를 `replace` 하면, When `getMessages()`를 읽으면, Then 순서는 유지되고 대상 메시지만 교체된다.
+- Given role을 위반하는 `appendSystem`/`appendMessage`/`replace` 또는 음수 `keepLast`의 `truncate` 이벤트를 `append` 하면, When hard error가 발생하면, Then 기존 `getEventLog()`/`getMessages()`는 유지된다.
+- Given 존재하지 않는 message id에 대한 `remove`/`replace` 이벤트를 `append` 하면, When 예외 없이 멱등 no-op으로 처리되면, Then 이벤트는 `getEventLog()`에 기록되지만 `getMessages()`는 변하지 않는다.
+- Given 저장된 event stream이 있으면, When `restore(events)`를 호출하면, Then 같은 `getMessages()`가 재구성된다.
 - Given `agentA`와 `agentB`가 모두 `conversationId="shared"`를 사용하면, When 각각 Turn을 실행하면, Then 서로의 메시지가 섞이지 않는다.
-- Given user 메시지 뒤에 system 메시지를 `appendSystem` 하면, When `messages`를 읽으면, Then system 메시지는 맨 앞 구간으로 이동해 있다.
-- Given 기존 assistant 메시지를 system 메시지로 replace 하려고 하면, When `emit(replace)`를 호출하면, Then 예외가 발생하고 상태는 바뀌지 않는다.
+- Given user 메시지 뒤에 system 메시지를 `appendSystem`으로 `append` 하면, When `getMessages()`를 읽으면, Then system 메시지는 맨 앞 구간으로 이동해 있다.
+- Given 기존 assistant 메시지를 system 메시지로 replace 하려고 하면, When 그 `replace` 이벤트를 `append` 하면, Then hard error가 발생하고 상태는 바뀌지 않는다.

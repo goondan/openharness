@@ -39,7 +39,7 @@
 - Trigger: Turn loop 내부에서 step 시작
 - Main Flow:
   1. `step.start` 이벤트를 발행한다.
-  2. `ctx.conversation.messages`를 LLM 입력으로 수집한다.
+  2. 모델 입력을 조립한다. `ctx.conversation.getMessages()`로 현재 상태의 불변 스냅샷(append-only event log를 재생한 파생)을 읽고, 등록된 `useModelInput((messages, ctx) => messages)` projection 체인을 이 스냅샷에 적용해 LLM 입력을 만든다. projection은 모델 호출 직전에 step당 1회만 실행되며, 순수하고(async 허용) conversation/ctx를 변형하지 않는 throwaway view다(windowing·hydration·redaction 등). projection이 비어 있으면 스냅샷을 그대로 입력으로 쓴다.
   3. 현재 tool registry snapshot을 읽는다.
   4. `streamChat()`이 있으면 사용하고, 없으면 `chat()`으로 폴백한다.
   5. 스트리밍 중간에 `step.textDelta`, `step.toolCallDelta` 이벤트를 발행한다.
@@ -115,7 +115,8 @@
 
 ### EXEC-CONST-006 - LLM 입력은 conversation 불변식을 그대로 따른다
 
-- 실행 루프는 `ctx.conversation.messages` 순서를 그대로 provider adapter에 전달한다.
+- 실행 루프는 `ctx.conversation.getMessages()` 스냅샷에 `useModelInput` projection을 적용한 결과 순서를 그대로 provider adapter에 전달한다. projection이 없으면 스냅샷 순서가 곧 입력 순서다.
+- projection은 모델 입력만 step당 1회 변형하는 throwaway view이며 durable 상태(append-only event log)를 바꾸지 않는다. system 프롬프트 주입·windowing·압축 요약 같은 durable 개입은 projection이 아니라 `conversation.append`(예: `appendSystem`)으로 이뤄진다.
 - system 메시지가 선두라는 보장은 execution 단계가 아니라 `appendSystem` 이벤트와 conversation 상태 불변식에서 온다.
 
 ### EXEC-CONST-007 - active turn 등록은 turn.start보다 앞선다
