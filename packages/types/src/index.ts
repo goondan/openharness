@@ -124,6 +124,7 @@ export type {
   ToolCallNextOverride,
   ToolCallSummary,
   LlmUsage,
+  LlmProviderMetadata,
   StepSummary,
   TurnResult,
   StepResult,

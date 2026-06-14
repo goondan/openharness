@@ -792,6 +792,7 @@ export async function executeStep(
       rawFinishReason: llmResponse.rawFinishReason,
       toolCalls: toolCallResults,
       ...(llmResponse.usage ? { usage: llmResponse.usage } : {}),
+      ...(llmResponse.providerMetadata ? { providerMetadata: llmResponse.providerMetadata } : {}),
     };
   };
 

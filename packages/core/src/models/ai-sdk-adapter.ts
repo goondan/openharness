@@ -17,6 +17,7 @@ import type {
   LlmResponse,
   LlmFinishReason,
   LlmUsage,
+  LlmProviderMetadata,
   Message,
   ToolDefinition,
 } from "@goondan/openharness-types";
@@ -154,6 +155,16 @@ function toLlmUsage(usage: LanguageModelUsage | undefined): LlmUsage | undefined
   };
 }
 
+function toLlmProviderMetadata(
+  metadata: Record<string, Record<string, unknown>> | undefined,
+): LlmProviderMetadata | undefined {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return undefined;
+  }
+  // Forwarded verbatim — OpenHarness stays provider-agnostic; consumers interpret it.
+  return metadata;
+}
+
 function formatInvalidToolCallReason(error: unknown): string {
   if (error instanceof Error) {
     return `Invalid tool call: ${error.message}`;
@@ -254,6 +265,7 @@ export function createAiSdkClient(
       const toolCalls = toLlmToolCalls(result.toolCalls);
 
       const usage = toLlmUsage(result.usage);
+      const providerMetadata = toLlmProviderMetadata(result.providerMetadata);
 
       return {
         text,
@@ -261,6 +273,7 @@ export function createAiSdkClient(
         finishReason: normalizeFinishReason(result.finishReason),
         rawFinishReason: result.rawFinishReason,
         ...(usage ? { usage } : {}),
+        ...(providerMetadata ? { providerMetadata } : {}),
       };
     },
 
@@ -321,6 +334,7 @@ export function createAiSdkClient(
       const finishReason = await result.finishReason;
       const rawFinishReason = await result.rawFinishReason;
       const usage = toLlmUsage(await result.usage);
+      const providerMetadata = toLlmProviderMetadata(await result.providerMetadata);
 
       return {
         text: text && text.trim().length > 0 ? text : undefined,
@@ -328,6 +342,7 @@ export function createAiSdkClient(
         rawFinishReason,
         toolCalls: toLlmToolCalls(toolCalls),
         ...(usage ? { usage } : {}),
+        ...(providerMetadata ? { providerMetadata } : {}),
       };
     },
   };

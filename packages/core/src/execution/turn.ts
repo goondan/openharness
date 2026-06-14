@@ -417,6 +417,7 @@ export async function executeTurn(
         finishReason: lastStepResult.finishReason,
         rawFinishReason: lastStepResult.rawFinishReason,
         ...(lastStepResult.usage ? { usage: lastStepResult.usage } : {}),
+        ...(lastStepResult.providerMetadata ? { providerMetadata: lastStepResult.providerMetadata } : {}),
       };
       steps.push(stepSummary);
       totalUsage = addUsage(totalUsage, lastStepResult.usage);

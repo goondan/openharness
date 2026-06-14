@@ -143,6 +143,17 @@ export interface LlmUsage {
   };
 }
 
+/**
+ * Provider-specific metadata passthrough from the underlying model call.
+ * Shape mirrors the AI SDK's `providerMetadata`: provider name → arbitrary record.
+ * Use for raw details the normalized `LlmUsage` does not model — e.g. Anthropic's
+ * cache-write TTL split at
+ * `providerMetadata.anthropic.usage.cache_creation.{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`,
+ * the per-iteration compaction breakdown, or container info. OpenHarness stays
+ * provider-agnostic and forwards this verbatim; consumers interpret per provider.
+ */
+export type LlmProviderMetadata = Record<string, JsonObject>;
+
 export interface StepSummary {
   stepNumber: number;
   toolCalls: ToolCallSummary[];
@@ -151,6 +162,8 @@ export interface StepSummary {
   /** Provider-specific raw finish reason, when the adapter exposes one. */
   rawFinishReason?: string;
   usage?: LlmUsage;
+  /** Raw provider metadata for this step's model call (see {@link LlmProviderMetadata}). */
+  providerMetadata?: LlmProviderMetadata;
 }
 
 export type LlmFinishReason =
@@ -188,6 +201,8 @@ export interface StepResult {
     result?: ToolResult;
   }>;
   usage?: LlmUsage;
+  /** Raw provider metadata for this step's model call (see {@link LlmProviderMetadata}). */
+  providerMetadata?: LlmProviderMetadata;
 }
 
 // -----------------------------------------------------------------------
@@ -264,6 +279,8 @@ export interface LlmResponse {
   finishReason?: LlmFinishReason;
   rawFinishReason?: string;
   usage?: LlmUsage;
+  /** Raw provider metadata for this model call (see {@link LlmProviderMetadata}). */
+  providerMetadata?: LlmProviderMetadata;
 }
 
 export interface LlmChatOptions {
