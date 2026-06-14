@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] — 2026-06-14
+
 ### Breaking: `ctx.llm` (전체 LlmClient) → `ctx.subrun` (비영속 경계 하위 실행)
 
 확장 `ctx`에서 전체 `LlmClient`(`ctx.llm`)를 제거하고, **`ctx.subrun`**으로
