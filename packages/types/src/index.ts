@@ -142,6 +142,9 @@ export type {
   LlmChatOptions,
   LlmStreamCallbacks,
   LlmClient,
+  SubrunOptions,
+  SubrunResult,
+  SubrunFn,
 } from "./middleware.js";
 
 // extension

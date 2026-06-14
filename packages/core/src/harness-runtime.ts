@@ -37,6 +37,7 @@ import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
 import { createDefaultStore, makeStoreWrapCtxFor } from "./execution/store-injection.js";
 import { executeToolCall } from "./execution/tool-call.js";
+import { makeSubrun } from "./execution/subrun.js";
 import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
@@ -1505,30 +1506,46 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       leaseOwner,
                     });
                     throwIfResumeAborted();
+                    const resumeStore = createDefaultStore(
+                      agentDeps.storeBacking,
+                      toolCall.conversationId,
+                    );
+                    const resumeInput: InboundEnvelope = {
+                      name: "humanApproval.resume",
+                      content: [],
+                      properties: {
+                        humanApprovalId: id,
+                        toolCallId: toolCall.toolCallId,
+                      },
+                      conversationId: toolCall.conversationId,
+                      source: {
+                        connector: "humanApproval",
+                        connectionName: "humanApproval",
+                        receivedAt: new Date().toISOString(),
+                      },
+                    };
                     toolResult = await executeToolCall(toolCall.toolCallId, {
                       turnId: toolCall.turnId,
                       agentName: toolCall.agentName,
                       conversationId: toolCall.conversationId,
                       conversation: conversationState,
-                      input: {
-                        name: "humanApproval.resume",
-                        content: [],
-                        properties: {
-                          humanApprovalId: id,
-                          toolCallId: toolCall.toolCallId,
+                      input: resumeInput,
+                      subrun: makeSubrun(
+                        {
+                          agentName: toolCall.agentName,
+                          conversationId: toolCall.conversationId,
+                          turnId: toolCall.turnId,
+                          store: resumeStore,
+                          input: resumeInput,
+                          abortSignal: resumeAbortController.signal,
                         },
-                        conversationId: toolCall.conversationId,
-                        source: {
-                          connector: "humanApproval",
-                          connectionName: "humanApproval",
-                          receivedAt: new Date().toISOString(),
+                        {
+                          llmClient: agentDeps.llmClient,
+                          toolRegistry: agentDeps.toolRegistry,
+                          modelInputRegistry: agentDeps.modelInputRegistry,
                         },
-                      },
-                      llm: agentDeps.llmClient,
-                      store: createDefaultStore(
-                        agentDeps.storeBacking,
-                        toolCall.conversationId,
                       ),
+                      store: resumeStore,
                       stepNumber: toolCall.stepNumber,
                       toolCallId: toolCall.toolCallId,
                       toolName: toolCall.toolName,

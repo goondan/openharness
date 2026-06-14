@@ -50,9 +50,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
       },
     },
     stepNumber: 1,
-    llm: {
-      chat: vi.fn().mockResolvedValue({ text: "unused" }),
-    },
+    subrun: vi.fn().mockResolvedValue({ status: "completed", steps: [], text: "unused" }),
     store: makeStore(),
     ...overrides,
   };
@@ -343,6 +341,7 @@ describe("executeStep — streaming (FR-CORE-010)", () => {
         onTextDelta: expect.any(Function),
         onToolCallDelta: expect.any(Function),
       }),
+      undefined, // llmChatOptions — main turn passes none
     );
   });
 

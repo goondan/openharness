@@ -110,7 +110,8 @@ register(api) {
 - `ctx.conversation.getMessages()` — 재생한 현재 상태. `Object.freeze`된 불변 스냅샷.
 - `ctx.conversation.append(event)` — 대화 변경의 유일한 경로(동기, 직후 반영).
 - `ctx.store.get/set(key)` — 대화 스코프 영속 KV. `(확장이름 × conversationId)`로 자동 네임스페이스.
-- `ctx.llm` / `ctx.conversationId` / `ctx.input`.
+- `ctx.subrun(messages, opts?)` — 에이전트 설정(모델·툴·projection)을 상속한 **비영속 경계 step 루프**를 한 번 돌려 값으로 반환(turn 아님, 부모 대화 불변). 압축·캐시 prewarm·recap 같은 하위 실행용. 기본은 상속(→ 캐시 prefix 공유는 부수효과)이고, `overrideModel`/`overrideTools`로 명시적으로 벗어날 수 있습니다.
+- `ctx.conversationId` / `ctx.input`.
 
 두 가지 이벤트 레이어를 헷갈리지 마세요. `conversation.append`/`getEventLog`는 **상태 변경**(이벤트 소싱, 재생=복원)이고, `api.on`/`emit`은 **관측**(EventBus, 재생≠복원)입니다. `append`는 EventBus를 부르지 않습니다.
 

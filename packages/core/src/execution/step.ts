@@ -3,6 +3,7 @@ import type {
   StepContext,
   StepResult,
   LlmClient,
+  LlmChatOptions,
   AssistantModelMessage,
   ToolModelMessage,
   ToolResult,
@@ -261,6 +262,12 @@ export async function executeStep(
     eventBus: EventBus;
     modelInputRegistry: ModelInputRegistry;
     humanApprovalStore?: HumanApprovalReferenceStore;
+    /**
+     * Per-call sampling options forwarded to the LLM (temperature/maxTokens).
+     * The main turn omits this (agent defaults); a sub-run passes its
+     * `SubrunOptions` here so e.g. prewarm's `maxTokens:1` actually caps output.
+     */
+    llmChatOptions?: LlmChatOptions;
     /** Per-layer ctx.store injection for the step chain. */
     storeWrapCtxFor?: WrapCtxFor<StepContext>;
     /** Per-layer ctx.store injection for the toolCall chains spawned by this step. */
@@ -274,6 +281,7 @@ export async function executeStep(
     eventBus,
     modelInputRegistry,
     humanApprovalStore,
+    llmChatOptions,
     storeWrapCtxFor,
     storeWrapCtxForToolCall,
   } = deps;
@@ -330,11 +338,13 @@ export async function executeStep(
                 argsDelta,
               }),
           },
+          llmChatOptions,
         )
       : await llmClient.chat(
           messages as Parameters<LlmClient["chat"]>[0],
           tools as Parameters<LlmClient["chat"]>[1],
           stepCtx.abortSignal,
+          llmChatOptions,
         );
 
     // d. FR-CORE-007: Record the LLM assistant response as a non-system message

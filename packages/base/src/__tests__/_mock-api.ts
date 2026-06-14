@@ -179,9 +179,9 @@ export function makeTurnContext(conversation: ConversationState): TurnContext {
     conversation,
     abortSignal: new AbortController().signal,
     input: inboundEnvelope,
-    llm: {
-      chat: vi.fn().mockResolvedValue({ text: "mock" }),
-    } as unknown as TurnContext["llm"],
+    subrun: vi
+      .fn()
+      .mockResolvedValue({ status: "completed", steps: [], text: "mock" }) as unknown as TurnContext["subrun"],
     store: makeMockStore(),
   };
 }
@@ -189,14 +189,14 @@ export function makeTurnContext(conversation: ConversationState): TurnContext {
 /** Build a {@link StepContext} with the given conversation and a mock store. */
 export function makeStepContext(
   conversation: ConversationState,
-  llmText = "mock",
+  subrunText = "mock",
 ): StepContext {
   return {
     ...makeTurnContext(conversation),
     stepNumber: 1,
-    llm: {
-      chat: vi.fn().mockResolvedValue({ text: llmText }),
-    } as unknown as StepContext["llm"],
+    subrun: vi
+      .fn()
+      .mockResolvedValue({ status: "completed", steps: [], text: subrunText }) as unknown as StepContext["subrun"],
   };
 }
 

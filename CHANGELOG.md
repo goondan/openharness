@@ -6,6 +6,39 @@
 형식은 [Keep a Changelog](https://keepachangelog.com/)를 느슨하게 따르고,
 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [Unreleased]
+
+### Breaking: `ctx.llm` (전체 LlmClient) → `ctx.subrun` (비영속 경계 하위 실행)
+
+확장 `ctx`에서 전체 `LlmClient`(`ctx.llm`)를 제거하고, **`ctx.subrun`**으로
+대체했습니다. `ctx.llm.chat`은 모든 확장에 임의 `model`/`tools`/`streamChat`을
+노출했지만 실제 용도는 압축·캐시 prewarm·recap 같은 "에이전트 설정으로 한 스텝짜리
+하위 실행을 돌린다"였습니다.
+
+```diff
+- const res = await ctx.llm.chat(messages, tools, ctx.abortSignal, { model });
++ const r = await ctx.subrun(messages, { maxSteps, maxTokens, temperature, signal });
++ //   r.text / r.status / r.steps
+```
+
+`ctx.subrun(messages, opts?)`는 **에이전트 설정(모델·툴·`useModelInput` projection)을
+상속한 비영속 경계 step 루프**를 한 번 돌려 결과를 *값으로* 돌려줍니다. turn이 아니라
+step 루프이며(turn 미들웨어·turn 이벤트·steering 없음, 그리고 빈 step 미들웨어로 돌아
+압축 같은 `useStep`이 자기 자신으로 재진입하지 않습니다), 부모 대화에 영속되지 않습니다.
+`messages`는 호출자가 주는 시드(라이브 스냅샷이든 가공/축소한 것이든)이고, projection이
+그 위에 시스템 프롬프트 등을 조립합니다(수동 prepend 불필요).
+
+- `maxSteps`(기본 1): `1`은 단일 완성(압축·prewarm·recap), `>1`은 툴을 호출하는 멀티스텝.
+- 캐시는 계약 어휘에 없습니다 — 기본이 상속이라 prefix가 메인 턴과 같아져 캐시가 맞는 것은
+  **부수효과**입니다. `overrideModel`(LlmClient)·`overrideTools`(ToolDefinition[])로 의도적으로
+  벗어날 수 있고(명시적 이름), 그때 캐시를 빗나갑니다.
+- 에러는 throw하지 않고 `status:"error"`(또는 `"aborted"`/`"waitingForHuman"`/`"maxStepsReached"`)로
+  돌려줘 호출자가 처리합니다.
+
+base `CompactionSummarize`는 에이전트의 실제 메시지 + 요약 지시 한 줄을 `ctx.subrun`으로
+보냅니다(projection이 시스템 프롬프트 담당). config가 `summaryPrompt`/`llmOptions` →
+`summaryInstruction`/`subrunOptions`로 바뀌었습니다.
+
 ## [1.0.0-rc.2] — 1.0 단순화
 
 0.5에서 실험적으로 늘어난 확장 표면을 6개의 결정으로 줄였습니다. 확장이 배워야 하는

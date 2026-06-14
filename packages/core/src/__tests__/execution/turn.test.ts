@@ -721,63 +721,113 @@ describe("executeTurn", () => {
   });
 
   // -----------------------------------------------------------------------
-  // FR-CORE-008: TurnContext.llm — Extension에서 LLM 호출 가능
+  // FR-CORE-008: TurnContext.subrun — Extension에서 비영속 하위 실행
+  //
+  // `ctx.subrun`은 에이전트 자신의 모델·툴·projection을 상속한 경계 step 루프를
+  // 비영속으로 한 번 돌려 값(SubrunResult)으로 돌려준다. 부모 대화에 영속되지
+  // 않으며, 빈 미들웨어로 돌아 useStep(압축 등) 재진입을 막는다. (구 ctx.complete 대체)
   // -----------------------------------------------------------------------
 
-  describe("FR-CORE-008: TurnContext.llm", () => {
-    // AC-15: Turn 미들웨어에서 ctx.llm.chat()을 호출할 수 있다
-    it("AC-15: turn middleware can call ctx.llm.chat() and get a response", async () => {
+  describe("FR-CORE-008: TurnContext.subrun", () => {
+    // AC-15: Turn 미들웨어에서 ctx.subrun()을 호출해 결과를 받는다
+    it("AC-15: turn middleware can call ctx.subrun() and get a result", async () => {
       const llmClient = makeLlmClient({ text: "main response" });
       const middlewareRegistry = new MiddlewareRegistry();
-      let middlewareLlmResult: unknown;
+      let middlewareResult: { text?: string; status?: string } | undefined;
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
-        // Extension이 ctx.llm을 통해 직접 LLM 호출
-        middlewareLlmResult = await ctx.llm.chat(
-          [{ id: "ext-1", data: { role: "user" as const, content: "summarize this" } }],
-          [],
-          ctx.abortSignal,
-        );
+        // Extension이 ctx.subrun으로 1-step 하위 실행
+        middlewareResult = await ctx.subrun([
+          { id: "ext-1", data: { role: "user" as const, content: "summarize this" } },
+        ]);
         return next();
       });
 
       const deps = makeDeps({ llmClient, middlewareRegistry });
       const result = await executeTurn("agent-1", "Hello", undefined, deps);
 
-      // ctx.llm.chat이 호출됨 — 미들웨어에서 1회 + 코어 실행에서 1회 = 최소 2회
+      // chat 호출됨 — subrun의 step 1회 + 코어 step 1회 = 최소 2회
       expect(llmClient.chat).toHaveBeenCalledTimes(2);
-      expect(middlewareLlmResult).toEqual({ text: "main response" });
+      expect(middlewareResult?.status).toBe("completed");
+      expect(middlewareResult?.text).toBe("main response");
       expect(result.status).toBe("completed");
     });
 
-    // TurnContext.llm은 코어가 주입한 것과 동일한 LlmClient 인스턴스다
-    it("ctx.llm is the same LlmClient instance passed to executeTurn", async () => {
+    // ctx.subrun은 호출자가 tools를 넘기지 않아도 에이전트 자신의 tools를 모델에 전달한다.
+    it("ctx.subrun forwards the agent's own tools to the model (inherited)", async () => {
       const llmClient = makeLlmClient({ text: "response" });
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeTool("search"));
       const middlewareRegistry = new MiddlewareRegistry();
-      let capturedLlm: LlmClient | undefined;
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
-        capturedLlm = ctx.llm;
+        // 호출자는 tools를 넘기지 않는다 — subrun이 에이전트 tools를 상속
+        await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }]);
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
+      // 첫 chat 호출(=미들웨어의 subrun)에서도 tools = [search]
+      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      expect(toolNames).toEqual(["search"]);
+    });
+
+    // overrideTools: 지정하면 에이전트 tools 대신 그 툴셋을 모델에 전달한다.
+    it("ctx.subrun overrideTools replaces the agent's tools", async () => {
+      const llmClient = makeLlmClient({ text: "response" });
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeTool("search"));
+      const middlewareRegistry = new MiddlewareRegistry();
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }], {
+          overrideTools: [makeTool("readonly_tool")],
+        });
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
+      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      expect(toolNames).toEqual(["readonly_tool"]);
+    });
+
+    // maxTokens/temperature가 실제 LLM 호출까지 전달되어야 한다(prewarm의 maxTokens:1이 무시되면 안 됨).
+    it("ctx.subrun forwards maxTokens/temperature to the model call", async () => {
+      const llmClient = makeLlmClient({ text: "response" });
+      const middlewareRegistry = new MiddlewareRegistry();
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }], {
+          maxTokens: 1,
+          temperature: 0,
+        });
         return next();
       });
 
       const deps = makeDeps({ llmClient, middlewareRegistry });
       await executeTurn("agent-1", "Hello", undefined, deps);
 
-      expect(capturedLlm).toBe(llmClient);
+      const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
+      // 첫 chat 호출(미들웨어 subrun)의 4번째 인자 = LlmChatOptions
+      expect(chatMock.mock.calls[0]?.[3]).toMatchObject({ maxTokens: 1, temperature: 0 });
     });
 
-    // StepContext도 TurnContext.llm을 상속한다 (propagation)
-    it("StepContext inherits llm from TurnContext (auto-propagation)", async () => {
+    // StepContext도 TurnContext.subrun을 상속한다 (propagation)
+    it("StepContext inherits subrun from TurnContext (auto-propagation)", async () => {
       const llmClient = makeLlmClient({ text: "response" });
       const middlewareRegistry = new MiddlewareRegistry();
-      let stepLlmRef: LlmClient | undefined;
+      let stepSubrunRef: unknown;
 
-      // Step 미들웨어에서 ctx.llm 접근
       middlewareRegistry.register(
         "step",
         ((ctx: import("@goondan/openharness-types").StepContext, next: () => Promise<unknown>) => {
-          stepLlmRef = ctx.llm;
+          stepSubrunRef = ctx.subrun;
           return next();
         }) as (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>,
       );
@@ -785,25 +835,21 @@ describe("executeTurn", () => {
       const deps = makeDeps({ llmClient, middlewareRegistry });
       await executeTurn("agent-1", "Hello", undefined, deps);
 
-      expect(stepLlmRef).toBe(llmClient);
+      expect(typeof stepSubrunRef).toBe("function");
     });
 
-    // EXEC-CONST-006: ctx.llm.chat() 호출이 대화 상태에 자동 반영되지 않는다
-    it("EXEC-CONST-006: ctx.llm.chat() does NOT auto-append to conversation state", async () => {
+    // EXEC-CONST-006: ctx.subrun()은 부모 대화 상태에 영속되지 않는다
+    it("EXEC-CONST-006: ctx.subrun() does NOT write to the parent conversation", async () => {
       const llmClient: LlmClient = {
         chat: vi.fn()
-          .mockResolvedValueOnce({ text: "side-channel response" })  // 미들웨어에서 호출
-          .mockResolvedValue({ text: "main response" }),              // 코어에서 호출
+          .mockResolvedValueOnce({ text: "side-channel response" })  // 미들웨어 subrun에서
+          .mockResolvedValue({ text: "main response" }),              // 코어에서
       };
       const middlewareRegistry = new MiddlewareRegistry();
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
-        // Extension이 ctx.llm으로 별도 LLM 호출 (대화 외 용도)
-        await ctx.llm.chat(
-          [{ id: "side-1", data: { role: "user" as const, content: "side query" } }],
-          [],
-          ctx.abortSignal,
-        );
+        // Extension이 ctx.subrun으로 별도 실행 (부모 대화 외 용도)
+        await ctx.subrun([{ id: "side-1", data: { role: "user" as const, content: "side query" } }]);
         return next();
       });
 
@@ -811,33 +857,42 @@ describe("executeTurn", () => {
       await executeTurn("agent-1", "user input", undefined, deps);
 
       const messages = deps.conversationState.getMessages();
-      // "side-channel response"가 대화 메시지에 포함되지 않아야 한다
+      // subrun의 출력("side-channel response")은 부모 대화에 들어가지 않는다
       const allContent = messages.map((m) => {
         const c = m.data.content;
         return typeof c === "string" ? c : JSON.stringify(c);
       }).join(" ");
       expect(allContent).not.toContain("side-channel response");
+      expect(allContent).not.toContain("side query");
       expect(allContent).toContain("user input");
     });
 
-    // 실패 케이스: ctx.llm.chat()이 에러를 던져도 Turn은 미들웨어의 에러 핸들링에 따른다
-    it("ctx.llm.chat() error in middleware propagates as turn error if not caught", async () => {
+    // 실패 케이스: ctx.subrun()은 에러를 던지지 않고 status:"error"로 돌려준다(호출자가 처리)
+    it("ctx.subrun() returns status 'error' instead of throwing; the turn still completes", async () => {
       const llmClient: LlmClient = {
-        chat: vi.fn().mockRejectedValue(new Error("LLM API down")),
+        chat: vi.fn()
+          .mockRejectedValueOnce(new Error("LLM API down"))  // 미들웨어 subrun에서 실패
+          .mockResolvedValue({ text: "main response" }),     // 코어는 정상
       };
       const middlewareRegistry = new MiddlewareRegistry();
+      let subrunStatus: string | undefined;
+      let subrunError: string | undefined;
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
-        // Extension이 ctx.llm.chat()을 호출하고 에러를 잡지 않음
-        await ctx.llm.chat([], [], ctx.abortSignal);
+        const r = await ctx.subrun([]);
+        subrunStatus = r.status;
+        subrunError = r.error?.message;
         return next();
       });
 
       const deps = makeDeps({ llmClient, middlewareRegistry });
       const result = await executeTurn("agent-1", "Hello", undefined, deps);
 
-      expect(result.status).toBe("error");
-      expect(result.error?.message).toContain("LLM API down");
+      // subrun은 throw하지 않고 에러를 결과에 담아 돌려준다
+      expect(subrunStatus).toBe("error");
+      expect(subrunError).toContain("LLM API down");
+      // subrun이 swallow했으므로 턴은 정상 완료된다
+      expect(result.status).toBe("completed");
     });
   });
 });

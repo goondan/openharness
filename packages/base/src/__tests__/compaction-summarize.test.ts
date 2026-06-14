@@ -122,14 +122,24 @@ describe("CompactionSummarize", () => {
     expect(removedIds).not.toContain("msg-7");
   });
 
-  it("invokes the agent LLM to produce the summary", async () => {
+  it("invokes ctx.subrun (agent model + tools) to produce the summary", async () => {
     const conversation = makeMockConversationState(makeMessages(12));
     const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
     const ctx = makeStepContext(conversation, "LLM-generated summary");
     await mw(ctx, vi.fn(async () => stubStepResult));
 
-    expect(ctx.llm.chat).toHaveBeenCalledOnce();
+    expect(ctx.subrun).toHaveBeenCalledOnce();
+    // The summarize sub-run reuses the real conversation messages (the projection
+    // assembles the system prompt, so the cache prefix matches the main turn) plus
+    // a trailing instruction.
+    const subrunMock = ctx.subrun as ReturnType<typeof vi.fn>;
+    const sentMessages = subrunMock.mock.calls[0][0] as Message[];
+    expect(sentMessages.length).toBe(13); // 12 conversation messages + 1 instruction
+    expect(sentMessages.at(-1)?.data.role).toBe("user");
+    // 1-step sub-run (a single completion).
+    expect(subrunMock.mock.calls[0][1]?.maxSteps).toBe(1);
+
     const append = conversation.appended.find((e) => e.type === "appendSystem");
     if (append && append.type === "appendSystem") {
       expect(append.message.data.content).toContain("LLM-generated summary");

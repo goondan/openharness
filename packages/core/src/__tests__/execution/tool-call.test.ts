@@ -39,7 +39,7 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
     stepNumber: 1,
     toolName: "my_tool",
     toolArgs: { value: "hello" },
-    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
+    subrun: vi.fn().mockResolvedValue({ status: "completed", steps: [], text: "mock" }),
     ...overrides,
   };
 }

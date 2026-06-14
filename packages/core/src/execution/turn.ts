@@ -26,6 +26,7 @@ import type {
 import { isHumanApprovalPendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
+import { makeSubrun } from "./subrun.js";
 import {
   createDefaultStore,
   makeStoreWrapCtxFor,
@@ -197,7 +198,7 @@ function addTokenCounts(
   return a + b;
 }
 
-function addUsage(
+export function addUsage(
   total: LlmUsage | undefined,
   usage: LlmUsage | undefined,
 ): LlmUsage | undefined {
@@ -346,7 +347,17 @@ export async function executeTurn(
     input: envelope,
     inboundItemId: inboundItem?.id,
     inboundCommitRef,
-    llm: llmClient,
+    subrun: makeSubrun(
+      {
+        agentName,
+        conversationId,
+        turnId,
+        store: defaultStore,
+        input: envelope,
+        abortSignal: abortController.signal,
+      },
+      { llmClient, toolRegistry, modelInputRegistry },
+    ),
     store: defaultStore,
   };
 

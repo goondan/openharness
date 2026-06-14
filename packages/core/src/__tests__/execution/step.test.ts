@@ -12,6 +12,7 @@ import type {
   StepContext,
   StepResult,
   LlmClient,
+  SubrunFn,
   LlmResponse,
   ToolDefinition,
   Message,
@@ -46,10 +47,8 @@ function makeStore() {
   return createScopedStore(createMemoryStoreBacking(), "core", "conv-1");
 }
 
-function makeMockLlmClient(): LlmClient {
-  return {
-    chat: vi.fn().mockResolvedValue({ text: "mock response" }),
-  };
+function makeMockSubrun(): SubrunFn {
+  return vi.fn().mockResolvedValue({ status: "completed", steps: [], text: "mock response" });
 }
 
 function makeStepContext(overrides?: Partial<StepContext>): StepContext {
@@ -70,7 +69,7 @@ function makeStepContext(overrides?: Partial<StepContext>): StepContext {
       },
     },
     stepNumber: 1,
-    llm: makeMockLlmClient(),
+    subrun: makeMockSubrun(),
     store: makeStore(),
     ...overrides,
   };
@@ -775,7 +774,8 @@ describe("executeStep", () => {
       expect.arrayContaining([
         expect.objectContaining({ name: "available_tool" }),
       ]),
-      expect.any(Object) // AbortSignal
+      expect.any(Object), // AbortSignal
+      undefined, // llmChatOptions — main turn passes none
     );
   });
 
