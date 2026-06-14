@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] — 2026-06-14
+
+### Added: LLM 응답 provider metadata passthrough
+
+`LlmResponse`/`StepResult`/`StepSummary`에 `providerMetadata?: LlmProviderMetadata`를 추가해 ai-sdk의 `result.providerMetadata`를 verbatim 전달한다. 정규화된 `LlmUsage`가 합산해버리는 정보(예: Anthropic의 5m/1h cache-write TTL 분리 `providerMetadata.anthropic.usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`)를 consumer가 raw로 읽을 수 있다.
+
+
 ## [1.0.0-rc.3] — 2026-06-14
 
 ### Breaking: `ctx.llm` (전체 LlmClient) → `ctx.subrun` (비영속 경계 하위 실행)
