@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] — 2026-06-14
+
+### Fixed: 확장 계약 1.0 코드리뷰 후속 (10건)
+
+store 네임스페이스에 agentName 추가(멀티-agent store 충돌), useModelInput store/read-only 스코프, compaction subrun 결과 검증(히스토리 손실 차단)·제거 슬라이스 요약, 1-step subrun tool 미실행, event-bus tap 이벤트명 bridge, inbound.* runtime-scope 정정, extension-registry staging clear·tool-op 트랜잭션 검증.
+
+
 ## [1.0.0-rc.4] — 2026-06-14
 
 ### Added: LLM 응답 provider metadata passthrough
