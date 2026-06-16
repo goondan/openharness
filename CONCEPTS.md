@@ -108,19 +108,23 @@ Turn 안에서 LLM을 한 번 호출하는 단위입니다. LLM이 도구 사용
 
 ## 미들웨어 훅: Extension이 꽂히는 지점
 
-코어는 실행 루프의 세 단계 각각에 미들웨어 훅을 노출합니다.
+코어는 실행 루프의 세 단계 각각에 미들웨어 훅을 노출합니다. Extension은 `register(api)` 안에서 `api.useTurn` / `api.useStep` / `api.useToolCall`로 미들웨어를 등록합니다.
 
-| 훅 레벨 | 개입 시점 | Extension이 할 수 있는 일 |
+| 등록 API | 개입 시점 | Extension이 할 수 있는 일 |
 |---------|----------|------------------------|
-| **Turn** | 전체 턴 실행 전/후 | 로깅, 실행 시간 측정, 에러 핸들링 |
-| **Step** | LLM 호출 직전/직후 | **메시지 목록 조작**, 컨텍스트 주입, 대화 기록 압축 |
-| **ToolCall** | 도구 실행 직전/직후 | 인자 검증, 결과 가공, 호출 차단, 감사 로그 |
+| **`api.useTurn`** | 전체 턴 실행 전/후 | 로깅, 실행 시간 측정, 에러 핸들링 |
+| **`api.useStep`** | LLM 호출 직전/직후 | 대화 기록 압축 같은 **durable 변형**(`conversation.append`), 컨텍스트 주입 |
+| **`api.useToolCall`** | 도구 실행 직전/직후 | 인자 검증, 결과 가공, 호출 차단, 감사 로그 |
 
-미들웨어는 chain-of-responsibility 패턴으로 동작합니다:
+미들웨어는 양파(onion) 패턴으로 동작합니다 — 각 미들웨어는 `(ctx, next)`를 받고, `next()` 전후로 코드를 실행합니다:
 
 ```
 [요청] → 미들웨어 A → 미들웨어 B → [코어 로직] → 미들웨어 B → 미들웨어 A → [응답]
 ```
+
+LLM에 들어갈 **모델 입력을 조립**하는 것은 별도 훅입니다. `api.useModelInput((messages, ctx) => messages)`는 양파 맨 끝(모델 호출 직전)에 한 번 실행되는 순수 변환으로, 윈도잉·하이드레이션 같은 일회용 뷰를 만듭니다 (durable하지 않음 — 자세한 내용은 Part 2 참고).
+
+**순서는 `before`/`after`로 선언합니다.** 숫자 priority나 phase 밴드는 없습니다. `api.useStep(mw, { before: "other-mw" })`는 "`other-mw`보다 먼저 진입"을 뜻하고(양파이므로 `next()` 이후 코드는 더 나중에 실행), `'*'` 센티넬은 밴드 양 끝(`before: '*'` = 최외곽, `after: '*'` = 최내곽)을 지정합니다. 옵션을 생략하면 등록 순서를 따릅니다. 미지의 이름이나 사이클은 부팅 시 하드 에러입니다.
 
 **코어는 훅만 제공합니다.** 어떤 미들웨어가 등록되느냐는 전적으로 어떤 Extension을 활성화하느냐에 따라 달라집니다.
 
@@ -128,15 +132,28 @@ Turn 안에서 LLM을 한 번 호출하는 단위입니다. LLM이 도구 사용
 
 ## 표준 포트: Tool, Extension, Connector 레지스트리
 
-코어는 세 종류의 플러그를 꽂을 수 있는 레지스트리를 제공합니다.
+코어는 플러그를 꽂을 수 있는 등록 표면을 제공합니다. Tool은 구성에 직접 선언하고, 미들웨어는 Extension의 `register(api)` 안에서 등록합니다.
 
-| 포트 | 등록 대상 | 역할 |
+| 포트 | 등록 방법 | 역할 |
 |------|----------|------|
-| **Tool Registry** | Tool 핸들러 | LLM이 호출 가능한 도구 카탈로그 관리 |
-| **Pipeline Registry** | 미들웨어 | Turn/Step/ToolCall 훅에 미들웨어 등록 |
-| **Ingress Registry** | Ingress 미들웨어 | Verify/Normalize/Route/Dispatch 훅에 미들웨어 등록 |
+| **Tool 카탈로그** | 구성의 `tools: [...]` | LLM이 호출 가능한 도구 카탈로그 관리 |
+| **실행 미들웨어** | `api.useTurn` / `api.useStep` / `api.useToolCall` | Turn/Step/ToolCall 훅에 미들웨어 등록 (agent 확장) |
+| **Ingress 미들웨어** | `api.useIngress` | Ingress 파이프라인에 미들웨어 등록 (connection 확장) |
 
 도구가 등록되면 코어는 JSON Schema에 따른 인자 검증과 에러 핸들링을 수행합니다. 하지만 **어떤 도구가 등록되느냐는 사용자가 어떤 Tool을 구성에 포함시키느냐에 따라 결정됩니다.**
+
+Extension이 `register(api)`에서 배우는 표면은 이게 전부입니다:
+
+```ts
+register(api) {
+  api.useTurn(mw, opts)       // 양파 미들웨어 (ctx, next) — agent 확장
+  api.useStep(mw, opts)
+  api.useToolCall(mw, opts)
+  api.useIngress(mw, opts)    // 양파 미들웨어 — connection 확장
+  api.useModelInput((messages, ctx) => messages)  // 모델 입력 조립 — step 직전 1회, 순수
+  api.on("turn.done", cb)     // 런타임 이벤트 구독 (EventBus 관측)
+}
+```
 
 ---
 
@@ -174,7 +191,7 @@ Ingress는 "외부 이벤트를 받아서 Turn을 시작시키는 입구"입니�
 ④ Dispatch  ─ Agent 세션에 Turn 비동기 접수
 ```
 
-실행 파이프라인과 마찬가지로, 4단계 각각에 미들웨어 훅이 있어서 Extension이 개입할 수 있습니다.
+Connection 확장은 `api.useIngress`로 이 입구 파이프라인에 양파 미들웨어를 등록해 개입할 수 있습니다 (Route는 코어 내부 단계라 별도 훅을 노출하지 않습니다).
 
 Connector는 transport 서버나 스케줄러가 아니라 순수한 정규화 어댑터입니다. 외부 호스트가 이벤트를 수신하고 ingress API를 호출하는 구조를 전제합니다.
 
@@ -182,16 +199,29 @@ Connector는 transport 서버나 스케줄러가 아니라 순수한 정규화 �
 
 ## 대화 상태: 이벤트 소싱
 
-코어는 대화 상태를 **기본 메시지 목록(base) + 이벤트 스트림**으로 관리합니다.
+코어는 대화 상태를 **append-only 이벤트 로그**로 관리합니다. 이 로그가 원천(source of truth)이고, 현재 메시지 목록은 로그를 재생(replay)해 파생합니다.
+
+핸들러는 `ctx.conversation`으로 대화를 다룹니다. 읽기는 메서드 두 개, 쓰기는 `append` 한 길입니다:
+
+| 메서드 | 동작 |
+|--------|------|
+| `getEventLog()` | 원천 — append-only `MessageEvent[]` (직렬화 바이트가 원본과 동일) |
+| `getMessages()` | 파생 — 재생한 현재 상태. `Object.freeze`된 불변 스냅샷 (변형 시 throw) |
+| `append(event)` | 유일한 쓰기 경로. 동기 — 직후 `getMessages()`에 즉시 반영 |
+
+`append`가 받는 `MessageEvent`는 다음과 같습니다:
 
 | 이벤트 | 동작 |
 |--------|------|
-| `append` | 메시지 추가 |
-| `replace` | 특정 메시지를 다른 내용으로 교체 |
-| `remove` | 특정 메시지 삭제 |
-| `truncate` | 지정 개수 초과분 잘라내기 |
+| `appendMessage` | 비-시스템 메시지(user/assistant/tool) 추가 |
+| `appendSystem` | 시스템 메시지 추가 |
+| `replace` | 특정 메시지를 다른 내용으로 교체 (없는 messageId면 멱등 no-op) |
+| `remove` | 특정 메시지 삭제 (없는 messageId면 멱등 no-op) |
+| `truncate` | 최근 N개만 남기고 잘라내기 |
 
-코어는 이 이벤트 시스템의 인프라만 제공합니다. 실제로 이벤트를 발생시켜서 메시지 목록을 조작하는 것은 Extension의 일입니다.
+코어는 이 이벤트 시스템의 인프라만 제공합니다. 실제로 이벤트를 발생시켜서 메시지 목록을 조작하는 것은 Extension의 일입니다. (`append`는 상태를 변경하는 이벤트 소싱 레이어이며, `api.on`/`emit`의 관측용 EventBus와는 별개입니다 — `append`는 EventBus를 호출하지 않습니다.)
+
+메시지의 출처(provenance)는 1급 시민입니다. `createMessage({ data, createdBy })`로 메시지를 만들어 작성자를 기록하고, `getCreatedBy(m)` / `isSynthetic(m)`로 조회합니다.
 
 ---
 
@@ -211,29 +241,35 @@ Extension은 코어의 미들웨어 훅에 등록되어 동작합니다. 미들�
 
 ## LLM 입력 제어 — Extension이 메시지를 결정한다
 
-코어만 있으면 LLM은 빈 메시지 목록을 받습니다. Extension이 Step 미들웨어를 통해 메시지 목록을 만들어줘야 합니다.
+코어만 있으면 LLM은 빈 메시지 목록을 받습니다. Extension이 메시지 목록을 만들어줘야 합니다. 이때 두 가지 결이 있습니다:
+
+- **모델 입력 projection** (`api.useModelInput`) — 모델에 보여줄 *일회용 뷰*를 만듭니다. 시스템 프롬프트 추가, 윈도잉, 하이드레이션 같은 변형이 여기 속합니다. 순수하고 영속되지 않으며, 0번 실행돼도 durable 로그는 그대로 유효해야 합니다.
+- **durable 변형** (`conversation.append` via `api.useStep`) — 로그 자체를 바꾸고 replay로 복원돼야 하는 변형입니다. 오래된 기록을 요약본으로 압축하는 것이 대표적입니다.
 
 ```
 코어만 있을 때:
   LLM 입력 = (빈 메시지 목록)
 
 Extension을 추가하면:
-  LLM 입력 = base 메시지 목록
-    + append(시스템 프롬프트)            ← BasicSystemPrompt
-    + append(인바운드 이벤트 컨텍스트)    ← BasicSystemPrompt
-    + replace(오래된 메시지 → 요약본)    ← CompactionSummarize
-    + truncate(최근 N개만 유지)          ← MessageWindow
+  durable 로그(getMessages)
+    + append(요약본으로 압축)            ← CompactionSummarize (durable, conversation.append)
+        │
+        ▼
+  모델 입력 = useModelInput 양파로 위 로그를 투영
+    + 시스템 프롬프트를 맨 앞에 prepend     ← BasicSystemPrompt (projection)
+    + 인바운드 이벤트 컨텍스트 주입          ← BasicSystemPrompt (projection)
+    + 최근 N개만 남기는 윈도잉              ← MessageWindow (projection)
 ```
 
-**시스템 프롬프트부터 Extension입니다.** `BasicSystemPrompt` Extension을 활성화하지 않으면 시스템 프롬프트에 뭘 적어도 LLM에 전달되지 않습니다. 이것이 "순수한 barebone"의 의미입니다.
+**시스템 프롬프트부터 Extension입니다.** `BasicSystemPrompt` Extension을 활성화하지 않으면 시스템 프롬프트에 뭘 적어도 LLM에 전달되지 않습니다. 그리고 v1에서 시스템 프롬프트는 durable 로그가 아니라 매 step 투영되는 모델 입력의 일부입니다 — projection이 한 번도 안 돌아도 로그는 정확합니다. 이것이 "순수한 barebone"의 의미입니다.
 
 ### 입력 제어 Extension 예시
 
-| Extension | 하는 일 |
-|-----------|--------|
-| `BasicSystemPrompt` | 시스템 프롬프트를 시스템 메시지로 주입하고, 인바운드 이벤트의 내용을 사용자 메시지로 주입 |
-| `CompactionSummarize` | 대화가 길어지면 오래된 메시지를 LLM으로 요약해서 교체 |
-| `MessageWindow` | 최근 N개 메시지만 남기고 나머지를 잘라냄 |
+| Extension | 하는 일 | 결 |
+|-----------|--------|----|
+| `BasicSystemPrompt` | 시스템 프롬프트를 모델 입력 맨 앞에 prepend하고, 인바운드 이벤트 컨텍스트를 주입 | projection (`useModelInput`) |
+| `CompactionSummarize` | 대화가 길어지면 오래된 비-시스템 메시지를 제거하고 LLM 요약을 시스템 메시지로 기록 | durable (`useStep` + `conversation.append`) |
+| `MessageWindow` | 최근 N개 메시지만 모델에 보여주도록 뷰를 윈도잉 | projection (`useModelInput`) |
 
 이 Extension들은 전부 `@goondan/openharness-base` 패키지에 포함되어 있지만, **코어의 일부가 아닙니다.** 별도 패키지이며, 명시적으로 선언해야 활성화됩니다.
 
@@ -279,7 +315,7 @@ ToolCall 미들웨어를 직접 작성하면 도구 호출의 인자를 검증�
 |-----------|--------|
 | `Logging` | Turn/Step/ToolCall의 시작/완료/실패 이벤트를 로그 출력 |
 
-코어 자체도 OTel 호환 이벤트를 발생시키지만, 그 이벤트를 수신해서 실제로 뭔가 하는 것(로그 출력, 메트릭 수집 등)은 Extension의 몫입니다.
+코어 자체도 런타임 이벤트(`turn.done` 같은 고정 이벤트들)를 EventBus로 발생시키지만, 그 이벤트를 `api.on("turn.done", cb)`로 수신해서 실제로 뭔가 하는 것(로그 출력, 메트릭 수집 등)은 Extension의 몫입니다. 이 EventBus는 관측용이라 replay가 상태를 복원하지 않습니다 — 상태를 바꾸는 `conversation.append`(이벤트 소싱)와는 별개 레이어입니다.
 
 ---
 
@@ -397,24 +433,35 @@ Extension을 만드는 과정은 간단합니다.
 
 ```ts
 // @someone/compaction-extractive 패키지의 index.ts
-import type { ExtensionApi } from "@goondan/openharness-types";
+import {
+  type AgentExtension,
+  type AgentExtensionApi,
+  createMessage,
+} from "@goondan/openharness-types";
 
 interface CompactionConfig {
   threshold?: number;
   strategy?: "sentence" | "paragraph";
 }
 
-export function CompactionExtractive(config: CompactionConfig = {}) {
+export function CompactionExtractive(config: CompactionConfig = {}): AgentExtension {
   return {
     name: "compaction-extractive",
-    register(api: ExtensionApi) {
-      api.pipeline.register("step", async (ctx, next) => {
-        const messages = ctx.conversation.nextMessages;
+    register(api: AgentExtensionApi) {
+      // 오래된 기록을 추출 요약본으로 바꾸는 durable 변형이므로 useStep +
+      // conversation.append. (모델에만 보여줄 일회용 변형이라면 useModelInput.)
+      api.useStep(async (ctx, next) => {
+        const messages = ctx.conversation.getMessages();
         if (messages.length > (config.threshold ?? 20)) {
-          // 핵심 문장만 추출하는 로직
+          // 핵심 문장만 추출하는 로직 → 오래된 메시지 remove + 추출본 append
+          // ctx.conversation.append({ type: "remove", messageId: ... });
+          // ctx.conversation.append({
+          //   type: "appendSystem",
+          //   message: createMessage({ data: { role: "system", content: extract }, createdBy: "compaction-extractive" }),
+          // });
         }
-        await next();
-      }, { priority: 100 });
+        return next();
+      });
     },
   };
 }
@@ -489,9 +536,10 @@ pnpm add @someone/compaction-extractive → import → harness.config.ts에 추�
 
 | | 코어가 하는 일 | Extension이 하는 일 |
 |---|---|---|
-| **실행** | Turn → Step → ToolCall 루프를 돌린다 | 루프의 각 단계에 미들웨어로 개입한다 |
-| **메시지** | 이벤트 소싱 인프라를 제공한다 | 이벤트를 발생시켜 LLM 입력을 결정한다 |
-| **도구** | Tool Registry와 JSON Schema 검증을 제공한다 | 도구 구현체를 등록하고, 호출을 감시/차단한다 |
-| **프롬프트** | 아무것도 하지 않는다 | 시스템 프롬프트와 사용자 메시지를 주입한다 |
-| **Ingress** | 4단계 파이프라인을 돌린다 | 각 단계에 미들웨어로 개입한다 |
-| **관측** | OTel 호환 이벤트를 발생시킨다 | 이벤트를 수신해서 로깅/메트릭을 수행한다 |
+| **실행** | Turn → Step → ToolCall 루프를 돌린다 | `useTurn`/`useStep`/`useToolCall`로 각 단계에 미들웨어로 개입한다 |
+| **메시지(durable)** | append-only 이벤트 로그를 원천으로 관리한다 | `conversation.append`로 로그를 변형한다 (replay==restore) |
+| **메시지(모델 입력)** | durable 로그를 `getMessages()`로 노출한다 | `useModelInput`으로 모델에 보여줄 일회용 뷰를 투영한다 |
+| **도구** | Tool 카탈로그와 JSON Schema 검증을 제공한다 | 도구 구현체를 등록하고, 호출을 감시/차단한다 |
+| **프롬프트** | 아무것도 하지 않는다 | 시스템 프롬프트를 모델 입력에 투영한다 (`useModelInput`) |
+| **Ingress** | 입구 파이프라인을 돌린다 | `useIngress`로 양파 미들웨어를 등록해 개입한다 |
+| **관측** | 런타임 이벤트를 EventBus로 발생시킨다 | `api.on`으로 이벤트를 수신해 로깅/메트릭을 수행한다 |

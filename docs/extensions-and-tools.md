@@ -17,26 +17,50 @@ OpenHarness를 처음 쓸 때 가장 많이 헷갈리는 부분이 "이건 Exten
 ### 간단한 Extension 예시
 
 ```ts
-import type { Extension, ExtensionApi } from "@goondan/openharness-types";
+import {
+  type Extension,
+  type ExtensionApi,
+  type ModelInput,
+  createMessage,
+} from "@goondan/openharness-types";
 
 export function BasicSystemPrompt(text: string): Extension {
   return {
     name: "basic-system-prompt",
     register(api: ExtensionApi) {
-      api.pipeline.register("turn", async (ctx, next) => {
-        ctx.conversation.emit({
-          type: "append",
-          message: {
-            id: `sys-${Date.now()}`,
-            data: { role: "system", content: text },
-            metadata: { __createdBy: "basic-system-prompt" },
-          },
+      // 모델 입력 조립: step 직전에 한 번, 시스템 메시지를 view 맨 앞에 끼웁니다.
+      // 순수 projection이라 durable 로그에는 남지 않습니다.
+      api.useModelInput((view): ModelInput => {
+        const system = createMessage({
+          data: { role: "system", content: text },
+          createdBy: "basic-system-prompt",
         });
-        return next();
+        return [system, ...view];
       });
     },
   };
 }
+```
+
+`useModelInput`은 모델 호출 직전에 한 번 실행되는 순수 함수입니다. 여기서 만든 메시지는
+"이번 호출에 보낼 입력"일 뿐, 대화 로그(`conversation`)에는 기록되지 않습니다. 시스템
+프롬프트나 메시지 윈도우처럼 _영속시키면 안 되는_ 변형은 이렇게 projection으로 처리합니다.
+
+반대로, 오래된 대화를 요약으로 _영구히_ 바꾸는 것처럼 durable한 변형이 필요하면
+`api.useTurn(...)` 안에서 `ctx.conversation.append(event)`로 기록합니다. 대화 상태를 바꾸는
+유일한 경로는 `append`이고, 출처는 `createMessage`로 남깁니다.
+
+```ts
+api.useTurn(async (ctx, next) => {
+  ctx.conversation.append({
+    type: "appendSystem",
+    message: createMessage({
+      data: { role: "system", content: "...요약..." },
+      createdBy: "compaction-summarize",
+    }),
+  });
+  return next();
+});
 ```
 
 ## Tool은 _모델이 호출하는 기능_ 입니다

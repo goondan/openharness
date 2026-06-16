@@ -44,10 +44,9 @@ describeE2E("E2E: Anthropic API", () => {
       return {
         name: "basic-system-prompt",
         register(api: ExtensionApi): void {
-          api.pipeline.register(
-            "turn",
+          api.useTurn(
             async (ctx, next) => {
-              ctx.conversation.emit({
+              ctx.conversation.append({
                 type: "appendSystem",
                 message: {
                   id: `sys-${Date.now()}`,
@@ -57,7 +56,7 @@ describeE2E("E2E: Anthropic API", () => {
               });
               return next();
             },
-            { priority: 10 },
+            { before: "*" },
           );
         },
       };

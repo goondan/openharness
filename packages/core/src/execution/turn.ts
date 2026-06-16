@@ -4,13 +4,18 @@ import type {
   StepContext,
   StepResult,
   StepSummary,
+  ToolCallContext,
   InboundEnvelope,
   LlmClient,
   LlmUsage,
+  UserModelMessage,
 } from "@goondan/openharness-types";
+import { createMessage, CORE_CREATED_BY } from "@goondan/openharness-types";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { MiddlewareRegistry } from "../middleware-chain.js";
 import type { EventBus } from "../event-bus.js";
+import type { ModelInputRegistry } from "../model-input.js";
+import type { StoreBacking } from "../store.js";
 import type { ConversationStateImpl } from "../conversation-state.js";
 import type { ProcessTurnOptions } from "@goondan/openharness-types";
 import type {
@@ -21,6 +26,11 @@ import type {
 import { isHumanApprovalPendingError } from "./tool-call.js";
 import { randomUUID } from "node:crypto";
 import { executeStep } from "./step.js";
+import { makeSubrun } from "./subrun.js";
+import {
+  createDefaultStore,
+  makeStoreWrapCtxFor,
+} from "./store-injection.js";
 
 type ExecuteTurnOptions = ProcessTurnOptions & { turnId?: string };
 
@@ -66,7 +76,7 @@ function appendEnvelopeAsUserMessage(
 ): void {
   const commitRef = metadata?.__inboundCommitRef;
   if (typeof commitRef === "string") {
-    const alreadyAppended = conversationState.messages.some(
+    const alreadyAppended = conversationState.getMessages().some(
       (message) => message.metadata?.__inboundCommitRef === commitRef,
     );
     if (alreadyAppended) {
@@ -75,20 +85,23 @@ function appendEnvelopeAsUserMessage(
   }
 
   const text = extractText(envelope);
-  conversationState.emit({
+  // createMessage mirrors createdBy into metadata.__createdBy AFTER spreading the
+  // envelope/extra metadata, so an envelope carrying its own __createdBy can never
+  // spoof the core provenance of this user message.
+  conversationState.append({
     type: "appendMessage",
-    message: {
+    message: createMessage<UserModelMessage>({
       id: generateMessageId(),
       data: {
         role: "user",
         content: text,
       },
+      createdBy: CORE_CREATED_BY,
       metadata: {
-        __createdBy: "core",
         ...envelope.metadata,
         ...metadata,
       },
-    },
+    }),
   });
 }
 
@@ -185,7 +198,7 @@ function addTokenCounts(
   return a + b;
 }
 
-function addUsage(
+export function addUsage(
   total: LlmUsage | undefined,
   usage: LlmUsage | undefined,
 ): LlmUsage | undefined {
@@ -230,14 +243,12 @@ function addUsage(
  * 1. Generate unique turnId
  * 2. Create AbortController
  * 3. Convert string input → InboundEnvelope if needed
- * 4. Set conversationState._turnActive = true
- * 5. FR-CORE-007: Append inbound message to conversation
- * 6. Emit turn.start
- * 7. Build turn middleware chain with core handler
- * 8. Core handler: loop Steps
- * 9. Set conversationState._turnActive = false
- * 10. Emit turn.done (or turn.error on exception)
- * 11. Return TurnResult
+ * 4. FR-CORE-007: Append inbound message to conversation
+ * 5. Emit turn.start
+ * 6. Build turn middleware chain with core handler
+ * 7. Core handler: loop Steps
+ * 8. Emit turn.done (or turn.error on exception)
+ * 9. Return TurnResult
  */
 export async function executeTurn(
   agentName: string,
@@ -248,6 +259,8 @@ export async function executeTurn(
     toolRegistry: ToolRegistry;
     middlewareRegistry: MiddlewareRegistry;
     eventBus: EventBus;
+    modelInputRegistry: ModelInputRegistry;
+    storeBacking: StoreBacking;
     conversationState: ConversationStateImpl;
     maxSteps: number;
     abortController?: AbortController;
@@ -272,6 +285,8 @@ export async function executeTurn(
     toolRegistry,
     middlewareRegistry,
     eventBus,
+    modelInputRegistry,
+    storeBacking,
     conversationState,
     maxSteps,
     steering,
@@ -312,6 +327,16 @@ export async function executeTurn(
   // Use external AbortController if provided, otherwise create a new one
   const abortController = deps.abortController ?? new AbortController();
 
+  // Conversation-scoped store wiring. The default (`core`-owned) store seeds the
+  // base ctx; each middleware layer is later re-scoped to its registering
+  // extension via the chain's `wrapCtxFor` hook.
+  const defaultStore = createDefaultStore(storeBacking, agentName, conversationId);
+  const storeWrapForTurn = makeStoreWrapCtxFor<TurnContext>(storeBacking, agentName, conversationId);
+  const storeWrapForStep = makeStoreWrapCtxFor<StepContext>(storeBacking, agentName, conversationId);
+  // toolCall chains build their own caches, but share the same backing + agentName
+  // + conversationId, so a layer's scoped store stays consistent across levels.
+  const storeWrapForToolCall = makeStoreWrapCtxFor<ToolCallContext>(storeBacking, agentName, conversationId);
+
   // Build TurnContext
   const turnCtx: TurnContext = {
     turnId,
@@ -322,7 +347,18 @@ export async function executeTurn(
     input: envelope,
     inboundItemId: inboundItem?.id,
     inboundCommitRef,
-    llm: llmClient,
+    subrun: makeSubrun(
+      {
+        agentName,
+        conversationId,
+        turnId,
+        store: defaultStore,
+        input: envelope,
+        abortSignal: abortController.signal,
+      },
+      { llmClient, toolRegistry, modelInputRegistry },
+    ),
+    store: defaultStore,
   };
 
   // 6. Emit turn.start
@@ -364,7 +400,10 @@ export async function executeTurn(
         toolRegistry,
         middlewareRegistry,
         eventBus,
+        modelInputRegistry,
         humanApprovalStore,
+        storeWrapCtxFor: storeWrapForStep,
+        storeWrapCtxForToolCall: storeWrapForToolCall,
       });
 
       const stepSummary: StepSummary = {
@@ -378,6 +417,7 @@ export async function executeTurn(
         finishReason: lastStepResult.finishReason,
         rawFinishReason: lastStepResult.rawFinishReason,
         ...(lastStepResult.usage ? { usage: lastStepResult.usage } : {}),
+        ...(lastStepResult.providerMetadata ? { providerMetadata: lastStepResult.providerMetadata } : {}),
       };
       steps.push(stepSummary);
       totalUsage = addUsage(totalUsage, lastStepResult.usage);
@@ -423,14 +463,15 @@ export async function executeTurn(
   };
 
   // 7. Build turn middleware chain with core handler
-  const chain = middlewareRegistry.buildChain<TurnContext, TurnResult>("turn", coreHandler);
+  const chain = middlewareRegistry.buildChain<TurnContext, TurnResult>(
+    "turn",
+    coreHandler,
+    { wrapCtxFor: storeWrapForTurn },
+  );
 
   // Execute the chain and handle errors
   let result: TurnResult;
   try {
-    // 4. Set conversationState._turnActive = true (inside try so errors reset it)
-    conversationState._turnActive = true;
-
     if (!skipInputAppend) {
       // 5. FR-CORE-007: Record inbound message as a non-system conversation event
       appendEnvelopeAsUserMessage(conversationState, envelope, inboundItem && inboundCommitRef
@@ -447,9 +488,6 @@ export async function executeTurn(
     result = await chain(turnCtx);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
-
-    // Set turnActive to false
-    conversationState._turnActive = false;
 
     // Check if this was an abort (AbortError from aborted signal)
     if (turnCtx.abortSignal.aborted || error.name === "AbortError") {
@@ -522,12 +560,9 @@ export async function executeTurn(
     };
   }
 
-  // 9. Set conversationState._turnActive = false
-  conversationState._turnActive = false;
-
   closeSteering(steering);
 
-  // 10. Emit turn.done
+  // Emit turn.done
   eventBus.emit("turn.done", {
     type: "turn.done",
     turnId,

@@ -258,6 +258,52 @@ describe("AI SDK adapter chat()", () => {
     });
   });
 
+  it("forwards generateText providerMetadata verbatim (e.g. Anthropic cache_creation 5m/1h split)", async () => {
+    const providerMetadata = {
+      anthropic: {
+        // Raw Anthropic usage carries the cache-write TTL split that the
+        // normalized LlmUsage.cacheWriteTokens (aggregate) does not separate.
+        usage: {
+          cache_creation: {
+            ephemeral_5m_input_tokens: 100,
+            ephemeral_1h_input_tokens: 50,
+          },
+        },
+        cacheCreationInputTokens: 150,
+      },
+    };
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return {
+        ...actual,
+        generateText: vi.fn().mockResolvedValue({
+          text: "cache response",
+          toolCalls: [],
+          finishReason: "stop",
+          providerMetadata,
+          response: { messages: [] },
+        }),
+      };
+    });
+    vi.doMock("@ai-sdk/anthropic", () => ({
+      createAnthropic: vi.fn().mockReturnValue({
+        languageModel: vi.fn().mockReturnValue({ modelId: "claude-3-5-sonnet-20241022" }),
+      }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const config = { provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" };
+    const client = createClient(config, "sk-ant-resolved");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.providerMetadata).toEqual(providerMetadata);
+    // The 1h cache-write tokens are now reachable through the passthrough.
+    const anthropic = response.providerMetadata?.anthropic as {
+      usage: { cache_creation: Record<string, number> };
+    };
+    expect(anthropic.usage.cache_creation.ephemeral_1h_input_tokens).toBe(50);
+  });
+
   it("returns toolCalls when generateText responds with tool calls", async () => {
     vi.doMock("ai", async (importOriginal) => {
       const actual = await importOriginal<typeof import("ai")>();

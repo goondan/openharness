@@ -906,30 +906,23 @@ describe("createHarness", () => {
   });
 
   // -----------------------------------------------------------------------
-  // Test 13: route middleware comes from the matched agent only
+  // Test 13: route middleware is core-internal in 1.0
+  //
+  // The agent extension surface no longer exposes route registration
+  // (`useRoute` was never added; `route` stays a core-internal MiddlewareLevel
+  // used by ingress routing). The matched agent is still selected by the
+  // routing rules and its turn dispatched — that observable behavior is covered
+  // by the ingress/router tests; there is no longer a public way for an agent
+  // extension to inject route middleware, so the former test was removed.
   // -----------------------------------------------------------------------
-  it("runs route middleware only for the matched agent's extensions", async () => {
-    const routeCalls: string[] = [];
-
-    const routeExtension = (agentLabel: string): Extension => ({
-      name: `route-${agentLabel}`,
-      register(api) {
-        api.pipeline.register("route", async (_ctx, next) => {
-          routeCalls.push(agentLabel);
-          return next();
-        });
-      },
-    });
-
+  it("routes an inbound envelope to the matched agent", async () => {
     const runtime = await createHarness({
       agents: {
         agentA: {
           model: { provider: "openai", model: "gpt-4", apiKey: "key-a" },
-          extensions: [routeExtension("agentA")],
         },
         agentB: {
           model: { provider: "openai", model: "gpt-4", apiKey: "key-b" },
-          extensions: [routeExtension("agentB")],
         },
       },
       connections: {
@@ -959,7 +952,6 @@ describe("createHarness", () => {
     });
 
     expect(results).toHaveLength(1);
-    expect(routeCalls).toEqual(["agentB"]);
 
     await runtime.close();
   });

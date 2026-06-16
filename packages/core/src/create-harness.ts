@@ -11,7 +11,6 @@ import type {
   ToolInfo,
   ExtensionInfo,
   ModelConfig,
-  EventPayload,
   DurableInboundStore,
   DurableInboundReferenceStore,
   HumanApprovalStore,
@@ -23,6 +22,8 @@ import { createLlmClient } from "./models/index.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { EventBus } from "./event-bus.js";
 import { MiddlewareRegistry } from "./middleware-chain.js";
+import { ModelInputRegistry } from "./model-input.js";
+import { createMemoryStoreBacking, type StoreBacking } from "./store.js";
 import { registerExtensions, createExtensionApi } from "./extension-registry.js";
 import { IngressPipeline } from "./ingress/pipeline.js";
 import { HarnessRuntimeImpl, type AgentDeps } from "./harness-runtime.js";
@@ -96,6 +97,12 @@ function normalizeIngressExternalId(value: unknown): string | undefined {
 export async function createHarness(config: HarnessConfig): Promise<HarnessRuntime> {
   const agentDepsMap = new Map<string, AgentDeps>();
   const runtimeEventBus = new EventBus();
+
+  // Conversation-scoped store backing. The host may inject a Redis/MySQL-backed
+  // implementation; otherwise the default is in-memory. The core namespaces
+  // every access by (extension × conversationId), so a single backing is shared
+  // across agents.
+  const storeBacking: StoreBacking = config.store?.backing ?? createMemoryStoreBacking();
   const agentInfoMap: Record<string, AgentInfo> = {};
   const connectionInfoMap: Record<string, ConnectionInfo> = {};
   const agentExtensionInfoMap = new Map<string, ExtensionInfo[]>();
@@ -157,10 +164,14 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     // Create per-agent infrastructure
     const toolRegistry = new ToolRegistry();
     const eventBus = new EventBus();
-    eventBus.tap((payload: EventPayload) => {
-      runtimeEventBus.emit(payload.type, payload);
+    // Bridge the per-agent bus onto the runtime bus under the *emitted* event
+    // name. Using the name (not `payload.type`, which custom events may omit)
+    // keeps `runtime.events.on("my.event")` working for any event `api.on` sees.
+    eventBus.tap((event, payload) => {
+      runtimeEventBus.emit(event as Parameters<typeof runtimeEventBus.emit>[0], payload);
     });
     const middlewareRegistry = new MiddlewareRegistry();
+    const modelInputRegistry = new ModelInputRegistry();
     const maxSteps = agentMaxStepsMap.get(agentName) ?? DEFAULT_MAX_STEPS;
 
     // Register extensions
@@ -178,13 +189,13 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       };
 
       const conversationState = createConversationState();
-      // Temporarily set _turnActive so extensions can read conversation if needed
-      // (extensions only register, they don't emit events)
 
       registerExtensions(agentConfig.extensions, {
+        scope: "agent",
         toolRegistry,
         eventBus,
         middlewareRegistry,
+        modelInputRegistry,
         runtimeInfo,
         conversationState,
       });
@@ -202,6 +213,8 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
       toolRegistry,
       middlewareRegistry,
       eventBus,
+      modelInputRegistry,
+      storeBacking,
       maxSteps,
     });
   }
@@ -215,8 +228,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     { connector: Connector; rules: RoutingRule[]; connectionMiddleware: MiddlewareRegistry }
   >();
   const ingressEventBus = new EventBus();
-  ingressEventBus.tap((payload: EventPayload) => {
-    runtimeEventBus.emit(payload.type, payload);
+  // Bridge under the emitted event name (not `payload.type`) so custom ingress
+  // events without a `type` field still reach `runtime.events.on`.
+  ingressEventBus.tap((event, payload) => {
+    runtimeEventBus.emit(event as Parameters<typeof runtimeEventBus.emit>[0], payload);
   });
 
   if (config.connections) {
@@ -236,14 +251,11 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
           connections: connectionInfoMap,
         };
 
-        const conversationState = createConversationState();
-
         registerExtensions(connConfig.extensions, {
-          toolRegistry: new ToolRegistry(),
+          scope: "connection",
           eventBus: ingressEventBus,
           middlewareRegistry: connectionMiddleware,
           runtimeInfo,
-          conversationState,
         });
       }
 

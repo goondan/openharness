@@ -10,7 +10,80 @@ import type {
 export interface Message<TData extends ModelMessage = ModelMessage> {
   id: string;
   data: TData;
+  /**
+   * Who created this message. Optional only for legacy replay — every newly
+   * authored message should set it, ideally via {@link createMessage}. Through
+   * 1.x the value is mirrored into `metadata.__createdBy`; the field is
+   * authoritative on conflict.
+   */
+  createdBy?: string;
   metadata?: Record<string, unknown>;
+}
+
+// -----------------------------------------------------------------------
+// Provenance helpers
+// -----------------------------------------------------------------------
+
+/** Author tag for messages the core runtime emits (user/assistant/tool). */
+export const CORE_CREATED_BY = "core";
+/**
+ * Sentinel for messages with no recorded author (pre-provenance logs).
+ * Read-only — it is never written. `getCreatedBy` returns it as a fallback; do
+ * not pass it to `createMessage`.
+ */
+export const UNKNOWN_CREATED_BY = "unknown";
+/** Metadata key the createdBy field is mirrored into during the 1.x window. */
+export const CREATED_BY_METADATA_KEY = "__createdBy";
+
+export interface CreateMessageInput<TData extends ModelMessage = ModelMessage> {
+  /** Defaults to a fresh UUID. */
+  id?: string;
+  data: TData;
+  /** Required — the authoring extension/runtime tag. */
+  createdBy: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Construct a fully-provenanced message. Sets the `createdBy` field and
+ * force-mirrors it into `metadata.__createdBy`, *ignoring* any incoming
+ * `__createdBy` in `metadata` (the explicit `createdBy` argument always wins).
+ */
+export function createMessage<TData extends ModelMessage = ModelMessage>(
+  input: CreateMessageInput<TData>,
+): Message<TData> {
+  const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  metadata[CREATED_BY_METADATA_KEY] = input.createdBy;
+  return {
+    id: input.id ?? globalThis.crypto.randomUUID(),
+    data: input.data,
+    createdBy: input.createdBy,
+    metadata,
+  };
+}
+
+/**
+ * Resolve a message's author. Prefers the field, falls back to the mirrored
+ * metadata key, then {@link UNKNOWN_CREATED_BY} for legacy messages.
+ */
+export function getCreatedBy(message: Message): string {
+  if (message.createdBy !== undefined) return message.createdBy;
+  const mirrored = message.metadata?.[CREATED_BY_METADATA_KEY];
+  return typeof mirrored === "string" ? mirrored : UNKNOWN_CREATED_BY;
+}
+
+export function isCreatedBy(message: Message, who: string): boolean {
+  return getCreatedBy(message) === who;
+}
+
+/**
+ * True when a message was injected by a known extension rather than produced by
+ * the core conversational flow. `unknown` (legacy) counts as non-synthetic — a
+ * safe default so old logs are never mistakenly stripped.
+ */
+export function isSynthetic(message: Message): boolean {
+  const who = getCreatedBy(message);
+  return who !== CORE_CREATED_BY && who !== UNKNOWN_CREATED_BY;
 }
 
 export type SystemMessage = Message<SystemModelMessage>;
@@ -26,11 +99,31 @@ export type MessageEvent =
   | { type: "remove"; messageId: string }
   | { type: "truncate"; keepLast: number };
 
+// -----------------------------------------------------------------------
 // ConversationState
+//
+// Reads are methods (not getters) to make point-in-time dependence honest —
+// cf. Redux `getState`. `getEventLog` is the append-only source of truth (event
+// sourcing); its serialized bytes stay identical to the original log
+// (createdBy lifting applies only to the derived `getMessages` view). Writes go
+// through the single `append` path, which is synchronous: the next
+// `getMessages` reflects it immediately. `append` never touches the EventBus.
+// -----------------------------------------------------------------------
+
 export interface ConversationState {
-  readonly events: readonly MessageEvent[];
-  readonly messages: readonly Message[];
+  /**
+   * Source: the append-only event log (event sourcing). The returned array is
+   * the original log — serialization bytes match the source (lifting is applied
+   * only to the derived `getMessages` view, never here).
+   */
+  getEventLog(): readonly MessageEvent[];
+  /**
+   * Derived: the replayed current state. An `Object.freeze`d immutable snapshot
+   * with lifted `createdBy`, but otherwise the raw log (no projection/transform).
+   */
+  getMessages(): readonly Message[];
+  /** The single write path. Synchronous — the next `getMessages` reflects it. */
+  append(event: MessageEvent): void;
+  /** Replace the whole log (legacy 0.5 or new) and replay. Lifting applies here too. */
   restore(events: MessageEvent[]): void;
-  /** Only callable during Turn execution (middleware context) */
-  emit(event: MessageEvent): void;
 }

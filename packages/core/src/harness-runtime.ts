@@ -7,7 +7,8 @@ import type {
   ProcessTurnOptions,
   TurnResult,
   LlmClient,
-  EventPayload,
+  RuntimeEventType,
+  RuntimeEventListener,
   DurableInboundReferenceStore,
   DurableInboundItem,
   DeadLetterInboundInput,
@@ -24,14 +25,19 @@ import type {
   ConversationTurnCoordinator,
   ConversationTurnStartPurpose,
   IngressDisposition,
+  ToolCallContext,
 } from "@goondan/openharness-types";
 import type { ConversationStateImpl } from "./conversation-state.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { MiddlewareRegistry } from "./middleware-chain.js";
+import type { ModelInputRegistry } from "./model-input.js";
+import type { StoreBacking } from "./store.js";
 import type { EventBus } from "./event-bus.js";
 import type { IngressPipeline } from "./ingress/pipeline.js";
 import { createConversationState } from "./conversation-state.js";
+import { createDefaultStore, makeStoreWrapCtxFor } from "./execution/store-injection.js";
 import { executeToolCall } from "./execution/tool-call.js";
+import { makeSubrun } from "./execution/subrun.js";
 import { executeTurn, type TurnSteeredInput, type TurnSteeringController } from "./execution/turn.js";
 import { HarnessError, ConfigError } from "./errors.js";
 import { randomUUID } from "node:crypto";
@@ -49,6 +55,8 @@ export interface AgentDeps {
   toolRegistry: ToolRegistry;
   middlewareRegistry: MiddlewareRegistry;
   eventBus: EventBus;
+  modelInputRegistry: ModelInputRegistry;
+  storeBacking: StoreBacking;
   maxSteps: number;
 }
 
@@ -638,6 +646,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
         toolRegistry: agentDeps.toolRegistry,
         middlewareRegistry: agentDeps.middlewareRegistry,
         eventBus: agentDeps.eventBus,
+        modelInputRegistry: agentDeps.modelInputRegistry,
+        storeBacking: agentDeps.storeBacking,
         conversationState,
         maxSteps: agentDeps.maxSteps,
         abortController,
@@ -854,6 +864,8 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
               toolRegistry: agentDeps.toolRegistry,
               middlewareRegistry: agentDeps.middlewareRegistry,
               eventBus: agentDeps.eventBus,
+              modelInputRegistry: agentDeps.modelInputRegistry,
+              storeBacking: agentDeps.storeBacking,
               conversationState,
               maxSteps: agentDeps.maxSteps,
               abortController,
@@ -1247,9 +1259,9 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
   get events(): HarnessRuntime["events"] {
     return {
-      on: <T extends EventPayload["type"]>(
+      on: <T extends RuntimeEventType>(
         event: T,
-        listener: (payload: Extract<EventPayload, { type: T }>) => void,
+        listener: RuntimeEventListener<T>,
       ) => this._runtimeEvents.on(event, listener),
     };
   }
@@ -1494,26 +1506,47 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       leaseOwner,
                     });
                     throwIfResumeAborted();
+                    const resumeStore = createDefaultStore(
+                      agentDeps.storeBacking,
+                      toolCall.agentName,
+                      toolCall.conversationId,
+                    );
+                    const resumeInput: InboundEnvelope = {
+                      name: "humanApproval.resume",
+                      content: [],
+                      properties: {
+                        humanApprovalId: id,
+                        toolCallId: toolCall.toolCallId,
+                      },
+                      conversationId: toolCall.conversationId,
+                      source: {
+                        connector: "humanApproval",
+                        connectionName: "humanApproval",
+                        receivedAt: new Date().toISOString(),
+                      },
+                    };
                     toolResult = await executeToolCall(toolCall.toolCallId, {
                       turnId: toolCall.turnId,
                       agentName: toolCall.agentName,
                       conversationId: toolCall.conversationId,
                       conversation: conversationState,
-                      input: {
-                        name: "humanApproval.resume",
-                        content: [],
-                        properties: {
-                          humanApprovalId: id,
-                          toolCallId: toolCall.toolCallId,
+                      input: resumeInput,
+                      subrun: makeSubrun(
+                        {
+                          agentName: toolCall.agentName,
+                          conversationId: toolCall.conversationId,
+                          turnId: toolCall.turnId,
+                          store: resumeStore,
+                          input: resumeInput,
+                          abortSignal: resumeAbortController.signal,
                         },
-                        conversationId: toolCall.conversationId,
-                        source: {
-                          connector: "humanApproval",
-                          connectionName: "humanApproval",
-                          receivedAt: new Date().toISOString(),
+                        {
+                          llmClient: agentDeps.llmClient,
+                          toolRegistry: agentDeps.toolRegistry,
+                          modelInputRegistry: agentDeps.modelInputRegistry,
                         },
-                      },
-                      llm: agentDeps.llmClient,
+                      ),
+                      store: resumeStore,
                       stepNumber: toolCall.stepNumber,
                       toolCallId: toolCall.toolCallId,
                       toolName: toolCall.toolName,
@@ -1526,6 +1559,13 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       humanApprovalStore: this._humanApprovalStore,
                       skipHumanApproval: true,
                       lockedToolArgs: finalArgs,
+                      // Scope each toolCall middleware layer to its registering
+                      // extension, matching the live-turn path (turn.ts → step.ts).
+                      storeWrapCtxFor: makeStoreWrapCtxFor<ToolCallContext>(
+                        agentDeps.storeBacking,
+                        toolCall.agentName,
+                        toolCall.conversationId,
+                      ),
                     });
                     throwIfResumeAborted();
                   }
@@ -1547,7 +1587,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
 
                 for (const item of blockedItems.sort((a, b) => a.sequence - b.sequence)) {
                   const commitRef = inboundUserMessageCommitRef(item.id);
-                  const exists = conversationState.messages.some(
+                  const exists = conversationState.getMessages().some(
                     (message) => message.metadata?.__inboundCommitRef === commitRef,
                   );
                   if (!exists) {
@@ -1555,7 +1595,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       .filter((part): part is { type: "text"; text: string } => part.type === "text")
                       .map((part) => part.text)
                       .join("\n");
-                    conversationState.emit({
+                    conversationState.append({
                       type: "appendMessage",
                       message: {
                         id: `msg-${item.id}`,
@@ -1585,12 +1625,10 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   });
                 }
               };
-              conversationState._turnActive = true;
-              try {
-                conversationState.emit({
-                  type: "appendMessage",
-                  message: {
-                    id: `tool-result-${toolCall.toolCallId}`,
+              conversationState.append({
+                type: "appendMessage",
+                message: {
+                  id: `tool-result-${toolCall.toolCallId}`,
                     data: {
                       role: "tool",
                       content: [
@@ -1615,18 +1653,15 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                   },
                 });
 
-                await drainBlockedInboundItemsForApproval();
-                continuationTurn = await this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
-                completedGate = await this._humanApprovalStore!.markApprovalCompleted({
-                  id,
-                  leaseOwner,
-                  turnId: toolCall.turnId,
-                  blockedInboundItemIds,
-                });
-                await drainBlockedInboundItemsForApproval();
-              } finally {
-                conversationState._turnActive = false;
-              }
+              await drainBlockedInboundItemsForApproval();
+              continuationTurn = await this._prepareContinuationTurn(toolCall.agentName, toolCall.conversationId);
+              completedGate = await this._humanApprovalStore!.markApprovalCompleted({
+                id,
+                leaseOwner,
+                turnId: toolCall.turnId,
+                blockedInboundItemIds,
+              });
+              await drainBlockedInboundItemsForApproval();
               this._runtimeEvents.emit("humanApproval.completed", {
                 type: "humanApproval.completed",
                 humanApprovalId: id,

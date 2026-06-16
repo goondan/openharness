@@ -10,7 +10,7 @@ import type {
   RetryInboundInput,
 } from "./ingress.js";
 import type { ProcessTurnOptions } from "./config.js";
-import type { EventPayload } from "./events.js";
+import type { HarnessEvents } from "./events.js";
 import type {
   CancelHumanApprovalInput,
   HumanApprovalRecord,
@@ -68,10 +68,10 @@ export interface HumanApprovalResumeResult {
   continuation?: TurnResult;
 }
 
-export type RuntimeEventType = EventPayload["type"];
+export type RuntimeEventType = keyof HarnessEvents;
 
 export type RuntimeEventListener<T extends RuntimeEventType> = (
-  payload: Extract<EventPayload, { type: T }>,
+  payload: HarnessEvents[T],
 ) => void;
 
 export type RuntimeEventUnsubscribeFn = () => void;

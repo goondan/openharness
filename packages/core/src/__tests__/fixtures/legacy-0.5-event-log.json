@@ -1,0 +1,59 @@
+[
+  {
+    "type": "appendSystem",
+    "message": {
+      "id": "sys-basic-system-prompt",
+      "data": { "role": "system", "content": "You are a helpful assistant." },
+      "metadata": { "__createdBy": "basic-system-prompt" }
+    }
+  },
+  {
+    "type": "appendMessage",
+    "message": {
+      "id": "u1",
+      "data": { "role": "user", "content": "what files are here?" },
+      "metadata": { "__createdBy": "core" }
+    }
+  },
+  {
+    "type": "appendMessage",
+    "message": {
+      "id": "a1",
+      "data": { "role": "assistant", "content": "Let me check." },
+      "metadata": { "__createdBy": "core", "stepNumber": 1 }
+    }
+  },
+  {
+    "type": "appendMessage",
+    "message": {
+      "id": "t1",
+      "data": {
+        "role": "tool",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "tc-1",
+            "toolName": "bash",
+            "output": { "type": "text", "value": "README.md\nsrc\n" }
+          }
+        ]
+      },
+      "metadata": { "__createdBy": "core" }
+    }
+  },
+  {
+    "type": "appendMessage",
+    "message": {
+      "id": "compaction-1",
+      "data": { "role": "user", "content": "[summary of earlier turns]" },
+      "metadata": { "__createdBy": "compaction-summarize" }
+    }
+  },
+  {
+    "type": "appendMessage",
+    "message": {
+      "id": "orphan-1",
+      "data": { "role": "user", "content": "from before provenance existed" }
+    }
+  }
+]

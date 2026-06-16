@@ -1129,7 +1129,7 @@ describe("durable inbound and Human Approval integration", () => {
     const toolMiddlewareExtension: Extension = {
       name: "approval-tool-middleware",
       register(api) {
-        api.pipeline.register("toolCall", async (ctx, next) => {
+        api.useToolCall(async (ctx, next) => {
           middlewareCalls.push(ctx.toolName);
           return next();
         });
@@ -1292,19 +1292,28 @@ describe("durable inbound and Human Approval integration", () => {
     const toolMiddlewareExtension: Extension = {
       name: "double-amount-middleware",
       register(api) {
-        api.pipeline.register("toolCall", doubleAmountMiddleware);
-        api.pipeline.register("toolCall", async (ctx, next) => {
-          if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
-            (ctx.toolArgs as { amount: number }).amount = 99;
-          }
-          return next();
-        });
-        api.pipeline.register("toolCall", async (ctx, next) => {
-          if (ctx.toolName === "guarded") {
-            observedMiddlewareArgs.push(ctx.toolArgs);
-          }
-          return next();
-        });
+        // Three toolCall middleware from one extension — give each an explicit
+        // name (the default identity is the extension name, which must be unique
+        // per level) and order them deterministically.
+        api.useToolCall(doubleAmountMiddleware, { name: "double" });
+        api.useToolCall(
+          async (ctx, next) => {
+            if (ctx.toolName === "guarded" && ctx.input.name === "humanApproval.resume") {
+              (ctx.toolArgs as { amount: number }).amount = 99;
+            }
+            return next();
+          },
+          { name: "resume-override", after: "double" },
+        );
+        api.useToolCall(
+          async (ctx, next) => {
+            if (ctx.toolName === "guarded") {
+              observedMiddlewareArgs.push(ctx.toolArgs);
+            }
+            return next();
+          },
+          { name: "observe", after: "resume-override" },
+        );
       },
     };
     const guardedTool: ToolDefinition = {

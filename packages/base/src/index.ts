@@ -1,9 +1,16 @@
-export { BasicSystemPrompt } from "./extensions/basic-system-prompt.js";
+export {
+  BasicSystemPrompt,
+  getSystemPromptText,
+} from "./extensions/basic-system-prompt.js";
+export type { BasicSystemPromptExtension } from "./extensions/basic-system-prompt.js";
 export { MessageWindow } from "./extensions/message-window.js";
 export { CompactionSummarize } from "./extensions/compaction-summarize.js";
 export { Logging } from "./extensions/logging.js";
 export { ToolSearch } from "./extensions/tool-search.js";
-export { RequiredToolsGuard } from "./extensions/required-tools-guard.js";
+export {
+  RequiredToolsGuard,
+  REQUIRED_TOOLS_GUARD,
+} from "./extensions/required-tools-guard.js";
 
 // Tools
 export { BashTool } from "./tools/bash.js";

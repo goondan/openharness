@@ -1,14 +1,18 @@
-import type { Extension, ExtensionApi, JsonValue } from "@goondan/openharness-types";
+import type {
+  AgentExtension,
+  AgentExtensionApi,
+  JsonValue,
+} from "@goondan/openharness-types";
 
 /**
  * ToolSearch extension — registers a meta-tool `search_tools` that searches
  * registered tool names and descriptions by keyword.
  */
-export function ToolSearch(): Extension {
+export function ToolSearch(): AgentExtension {
   return {
     name: "tool-search",
 
-    register(api: ExtensionApi): void {
+    register(api: AgentExtensionApi): void {
       api.tools.register({
         name: "search_tools",
         description: "Search registered tools by keyword in name or description.",

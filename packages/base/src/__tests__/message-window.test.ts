@@ -1,194 +1,145 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MessageWindow } from "../extensions/message-window.js";
-import type {
-  ExtensionApi,
-  StepMiddleware,
-  StepContext,
-  StepResult,
-  ConversationState,
-  Message,
-  MessageEvent,
-} from "@goondan/openharness-types";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeMessages(count: number): Message[] {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `msg-${i}`,
-    data: {
-      role: "user" as const,
-      content: `Message ${i}`,
-    },
-  }));
-}
-
-function makeMockConversationState(
-  messages: Message[],
-): ConversationState & { emitted: MessageEvent[] } {
-  const emitted: MessageEvent[] = [];
-  return {
-    messages,
-    events: [],
-    emitted,
-    emit: vi.fn((event: MessageEvent) => {
-      emitted.push(event);
-    }),
-    restore: vi.fn(),
-  };
-}
-
-function makeMockApi(conversation: ConversationState): {
-  api: ExtensionApi;
-  registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }>;
-} {
-  const registeredMiddleware: Array<{
-    level: string;
-    handler: StepMiddleware;
-    options?: { priority?: number };
-  }> = [];
-
-  const api: ExtensionApi = {
-    pipeline: {
-      register: vi.fn(
-        (level: string, handler: StepMiddleware, options?: { priority?: number }) => {
-          registeredMiddleware.push({ level, handler, options });
-        },
-      ) as unknown as ExtensionApi["pipeline"]["register"],
-    },
-    tools: {
-      register: vi.fn(),
-      remove: vi.fn(),
-      list: vi.fn(() => []),
-    },
-    on: vi.fn(),
-    conversation,
-    runtime: {
-      agent: {
-        name: "test-agent",
-        model: { provider: "openai", model: "gpt-4o" },
-        extensions: [],
-        tools: [],
-      },
-      agents: {},
-      connections: {},
-    },
-  };
-
-  return { api, registeredMiddleware };
-}
-
-function makeStepContext(conversation: ConversationState): StepContext {
-  return {
-    turnId: "turn-1",
-    agentName: "test-agent",
-    conversationId: "conv-1",
-    conversation,
-    stepNumber: 1,
-    abortSignal: new AbortController().signal,
-    input: {
-      name: "test-event",
-      content: [{ type: "text", text: "hello" }],
-      properties: {},
-      source: {
-        connector: "test-connector",
-        connectionName: "test",
-        receivedAt: new Date().toISOString(),
-      },
-    },
-    llm: { chat: vi.fn().mockResolvedValue({ text: "mock" }) },
-  };
-}
-
-const stubStepResult: StepResult = {
-  toolCalls: [],
-};
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+import type { Message } from "@goondan/openharness-types";
+import {
+  applyModelInputs,
+  makeMessages,
+  makeMockApi,
+  makeMockConversationState,
+  makeStepContext,
+} from "./_mock-api.js";
 
 describe("MessageWindow", () => {
-  it("creates an Extension with name 'message-window'", () => {
-    const ext = MessageWindow({ maxMessages: 5 });
-    expect(ext.name).toBe("message-window");
+  it("creates an AgentExtension with name 'message-window'", () => {
+    expect(MessageWindow({ maxMessages: 5 }).name).toBe("message-window");
   });
 
-  it("registers step middleware via api.pipeline.register", () => {
-    const conversation = makeMockConversationState([]);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("registers a model-input projection (not a durable mutator)", () => {
+    const conversation = makeMockConversationState();
+    const { api, modelInputs, registered } = makeMockApi(conversation);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    expect(api.pipeline.register).toHaveBeenCalledOnce();
-    expect(registeredMiddleware[0].level).toBe("step");
+    expect(modelInputs).toHaveLength(1);
+    expect(registered).toHaveLength(0);
   });
 
-  it("does NOT emit truncate when messages are within maxMessages", async () => {
-    const messages = makeMessages(3);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("returns the view unchanged when within maxMessages", async () => {
+    const conversation = makeMockConversationState(makeMessages(3));
+    const { api, modelInputs } = makeMockApi(conversation);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    const middleware = registeredMiddleware[0].handler;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const view = await applyModelInputs(modelInputs, conversation, ctx);
 
-    await middleware(ctx, next);
-
-    expect(conversation.emit).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledOnce();
+    expect(view).toHaveLength(3);
+    // Projection never mutates the durable log.
+    expect(conversation.append).not.toHaveBeenCalled();
+    expect(conversation.getMessages()).toHaveLength(3);
   });
 
-  it("emits truncate when messages exceed maxMessages", async () => {
-    const messages = makeMessages(8);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("windows the view to the most recent non-system messages", async () => {
+    const conversation = makeMockConversationState(makeMessages(8));
+    const { api, modelInputs } = makeMockApi(conversation);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    const middleware = registeredMiddleware[0].handler;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const view = await applyModelInputs(modelInputs, conversation, ctx);
 
-    await middleware(ctx, next);
-
-    expect(conversation.emit).toHaveBeenCalledOnce();
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
-    expect(emitted.type).toBe("truncate");
-    if (emitted.type === "truncate") {
-      expect(emitted.keepLast).toBe(5);
-    }
-    expect(next).toHaveBeenCalledOnce();
+    expect(view).toHaveLength(5);
+    expect(view.map((m) => m.id)).toEqual([
+      "msg-3",
+      "msg-4",
+      "msg-5",
+      "msg-6",
+      "msg-7",
+    ]);
+    // Durable log is untouched.
+    expect(conversation.getMessages()).toHaveLength(8);
+    expect(conversation.append).not.toHaveBeenCalled();
   });
 
-  it("emits truncate with exact maxMessages count", async () => {
-    const messages = makeMessages(6);
-    const conversation = makeMockConversationState(messages);
-    const { api, registeredMiddleware } = makeMockApi(conversation);
+  it("always retains leading system messages", async () => {
+    const system: Message = {
+      id: "sys",
+      data: { role: "system", content: "you are helpful" },
+    };
+    const conversation = makeMockConversationState([
+      system,
+      ...makeMessages(8),
+    ]);
+    const { api, modelInputs } = makeMockApi(conversation);
 
-    const ext = MessageWindow({ maxMessages: 5 });
-    ext.register(api);
+    MessageWindow({ maxMessages: 5 }).register(api);
 
-    const middleware = registeredMiddleware[0].handler;
     const ctx = makeStepContext(conversation);
-    const next = vi.fn(async () => stubStepResult);
+    const view = await applyModelInputs(modelInputs, conversation, ctx);
 
-    await middleware(ctx, next);
+    expect(view[0].id).toBe("sys");
+    expect(view).toHaveLength(6); // 1 system + 5 body
+    expect(view.slice(1).map((m) => m.id)).toEqual([
+      "msg-3",
+      "msg-4",
+      "msg-5",
+      "msg-6",
+      "msg-7",
+    ]);
+  });
 
-    expect(conversation.emit).toHaveBeenCalledOnce();
-    const emitted = (conversation as ReturnType<typeof makeMockConversationState>).emitted[0];
-    if (emitted.type === "truncate") {
-      expect(emitted.keepLast).toBe(5);
-    }
+  it("extends the boundary left off an orphaned tool-result", async () => {
+    // Body layout (8 messages): the window of 5 would start at index 3, but
+    // msg-3 is a tool-result whose assistant tool-call would be dropped, so the
+    // boundary extends left to include it.
+    const body: Message[] = [
+      { id: "b0", data: { role: "user", content: "0" } },
+      { id: "b1", data: { role: "user", content: "1" } },
+      {
+        id: "b2",
+        data: {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "tc", toolName: "x", input: {} },
+          ],
+        },
+      },
+      {
+        id: "b3",
+        data: {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "tc",
+              toolName: "x",
+              output: { type: "text", value: "ok" },
+            },
+          ],
+        },
+      },
+      { id: "b4", data: { role: "user", content: "4" } },
+      { id: "b5", data: { role: "user", content: "5" } },
+      { id: "b6", data: { role: "user", content: "6" } },
+      { id: "b7", data: { role: "user", content: "7" } },
+    ];
+    const conversation = makeMockConversationState(body);
+    const { api, modelInputs } = makeMockApi(conversation);
+
+    MessageWindow({ maxMessages: 5 }).register(api);
+
+    const ctx = makeStepContext(conversation);
+    const view = await applyModelInputs(modelInputs, conversation, ctx);
+
+    // Default start = 8 - 5 = 3 (b3, a tool-result) → extend left to b2.
+    expect(view[0].id).toBe("b2");
+    expect(view.map((m) => m.id)).toEqual([
+      "b2",
+      "b3",
+      "b4",
+      "b5",
+      "b6",
+      "b7",
+    ]);
   });
 });
