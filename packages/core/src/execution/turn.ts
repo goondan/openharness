@@ -330,12 +330,12 @@ export async function executeTurn(
   // Conversation-scoped store wiring. The default (`core`-owned) store seeds the
   // base ctx; each middleware layer is later re-scoped to its registering
   // extension via the chain's `wrapCtxFor` hook.
-  const defaultStore = createDefaultStore(storeBacking, conversationId);
-  const storeWrapForTurn = makeStoreWrapCtxFor<TurnContext>(storeBacking, conversationId);
-  const storeWrapForStep = makeStoreWrapCtxFor<StepContext>(storeBacking, conversationId);
-  // toolCall chains build their own caches, but share the same backing +
-  // conversationId, so a layer's scoped store stays consistent across levels.
-  const storeWrapForToolCall = makeStoreWrapCtxFor<ToolCallContext>(storeBacking, conversationId);
+  const defaultStore = createDefaultStore(storeBacking, agentName, conversationId);
+  const storeWrapForTurn = makeStoreWrapCtxFor<TurnContext>(storeBacking, agentName, conversationId);
+  const storeWrapForStep = makeStoreWrapCtxFor<StepContext>(storeBacking, agentName, conversationId);
+  // toolCall chains build their own caches, but share the same backing + agentName
+  // + conversationId, so a layer's scoped store stays consistent across levels.
+  const storeWrapForToolCall = makeStoreWrapCtxFor<ToolCallContext>(storeBacking, agentName, conversationId);
 
   // Build TurnContext
   const turnCtx: TurnContext = {

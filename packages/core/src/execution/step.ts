@@ -305,7 +305,7 @@ export async function executeStep(
     const base = stepCtx.conversation.getMessages();
     const messages = modelInputRegistry.isEmpty
       ? [...base]
-      : [...(await modelInputRegistry.apply(base, stepCtx))];
+      : [...(await modelInputRegistry.apply(base, stepCtx, storeWrapCtxFor))];
 
     // b. Get available tools
     const tools = toolRegistry.list() as ReturnType<ToolRegistry["list"]>;

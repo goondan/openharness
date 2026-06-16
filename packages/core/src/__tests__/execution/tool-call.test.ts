@@ -28,7 +28,7 @@ function makeToolCallContext(overrides?: Partial<ToolCallContext>): ToolCallCont
     agentName: "test-agent",
     conversationId: "conv-1",
     conversation: createConversationState(),
-    store: createScopedStore(createMemoryStoreBacking(), "core", "conv-1"),
+    store: createScopedStore(createMemoryStoreBacking(), "test-agent", "core", "conv-1"),
     abortSignal: makeAbortSignal(),
     input: {
       name: "test",
@@ -500,12 +500,12 @@ describe("executeToolCall", () => {
       toolArgs: { value: "hello" },
       conversationId: "conv-scope",
       // Base ctx.store is the default "core" store; wrapCtx re-scopes each layer.
-      store: createScopedStore(backing, "core", "conv-scope"),
+      store: createScopedStore(backing, "test-agent", "core", "conv-scope"),
     });
 
     const deps = {
       ...makeDeps({ toolRegistry, middlewareRegistry }),
-      storeWrapCtxFor: makeStoreWrapCtxFor<ToolCallContext>(backing, "conv-scope"),
+      storeWrapCtxFor: makeStoreWrapCtxFor<ToolCallContext>(backing, "test-agent", "conv-scope"),
     };
 
     const result = await executeToolCall("call-scope", ctx, deps);
@@ -517,13 +517,13 @@ describe("executeToolCall", () => {
     expect(seenByExtB).toBeUndefined();
 
     // The two writes landed in distinct, extension-scoped namespaces.
-    const storeA = createScopedStore(backing, "ext-a", "conv-scope");
-    const storeB = createScopedStore(backing, "ext-b", "conv-scope");
+    const storeA = createScopedStore(backing, "test-agent", "ext-a", "conv-scope");
+    const storeB = createScopedStore(backing, "test-agent", "ext-b", "conv-scope");
     expect(await storeA.get("secret")).toBe("from-a");
     expect(await storeB.get("secret")).toBe("from-b");
 
     // The default "core" store was untouched by either extension.
-    const coreStore = createScopedStore(backing, "core", "conv-scope");
+    const coreStore = createScopedStore(backing, "test-agent", "core", "conv-scope");
     expect(await coreStore.get("secret")).toBeUndefined();
   });
 });

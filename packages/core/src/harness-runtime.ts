@@ -1508,6 +1508,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                     throwIfResumeAborted();
                     const resumeStore = createDefaultStore(
                       agentDeps.storeBacking,
+                      toolCall.agentName,
                       toolCall.conversationId,
                     );
                     const resumeInput: InboundEnvelope = {
@@ -1562,6 +1563,7 @@ export class HarnessRuntimeImpl implements HarnessRuntime {
                       // extension, matching the live-turn path (turn.ts → step.ts).
                       storeWrapCtxFor: makeStoreWrapCtxFor<ToolCallContext>(
                         agentDeps.storeBacking,
+                        toolCall.agentName,
                         toolCall.conversationId,
                       ),
                     });

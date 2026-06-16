@@ -182,11 +182,11 @@ describe("EventBus", () => {
     expect(stepCalls).toHaveLength(0);
   });
 
-  it("tap receives every emitted event regardless of type", () => {
-    const received: EventPayload[] = [];
+  it("tap receives every emitted (event, payload) regardless of type", () => {
+    const received: Array<{ event: string; payload: EventPayload }> = [];
 
-    bus.tap((payload) => {
-      received.push(payload);
+    bus.tap((event, payload) => {
+      received.push({ event, payload });
     });
 
     bus.emit("turn.start", {
@@ -203,6 +203,9 @@ describe("EventBus", () => {
       stepNumber: 1,
     });
 
-    expect(received.map((payload) => payload.type)).toEqual(["turn.start", "step.start"]);
+    // The tap gets the emitted event *name* (not just `payload.type`) so a custom
+    // event without a `type` field still bridges under its real name.
+    expect(received.map((r) => r.event)).toEqual(["turn.start", "step.start"]);
+    expect(received.map((r) => r.payload.type)).toEqual(["turn.start", "step.start"]);
   });
 });

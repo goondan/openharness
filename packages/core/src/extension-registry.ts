@@ -35,6 +35,7 @@ import type {
 } from "@goondan/openharness-types";
 import { MiddlewareRegistry } from "./middleware-chain.js";
 import { ModelInputRegistry } from "./model-input.js";
+import { ToolRegistry } from "./tool-registry.js";
 
 // ---------------------------------------------------------------------------
 // Structural registry shapes
@@ -64,7 +65,7 @@ interface MiddlewareRegistryLike {
 }
 
 interface ModelInputRegistryLike {
-  register(fn: ModelInputMiddleware): void;
+  register(fn: ModelInputMiddleware, owner?: string): void;
 }
 
 interface EventBusLike {
@@ -172,7 +173,7 @@ export function createExtensionApi(
         options,
       )) as AgentExtensionApi["useToolCall"],
     useModelInput: (mw: ModelInputMiddleware): void => {
-      deps.modelInputRegistry.register(mw);
+      deps.modelInputRegistry.register(mw, extensionName);
     },
     tools: {
       register(tool: ToolDefinition): void {
@@ -208,7 +209,7 @@ type RecordedOp =
   | { kind: "tools.register"; tool: ToolDefinition }
   | { kind: "tools.remove"; name: string }
   | { kind: "on"; event: string; listener: (payload: unknown) => void }
-  | { kind: "modelInput.register"; fn: ModelInputMiddleware };
+  | { kind: "modelInput.register"; fn: ModelInputMiddleware; owner?: string };
 
 // ---------------------------------------------------------------------------
 // registerExtensions
@@ -254,10 +255,17 @@ export function registerExtensions(
   }
 
   // --- Step 3: replay into temp registries and validate (no real writes). ---
-  validateOps(pendingOps, deps.scope);
+  validateOps(pendingOps, deps);
 
   // --- Step 4: commit — replay onto the real deps. ---
   replayOps(pendingOps, deps);
+
+  // The recording deps' tool overlay (`stagingTools`) is captured in extension
+  // closures — e.g. a tool handler that calls `api.tools.list()`. After commit
+  // the same tools live in the real registry, so the overlay must be emptied or
+  // every staged tool is returned twice at runtime (real + overlay). The array
+  // object stays alive in those closures; we only clear its contents. (#9)
+  stagingTools.length = 0;
 }
 
 /**
@@ -317,8 +325,8 @@ function makeRecordingDeps(
   };
 
   const modelInputRegistry: ModelInputRegistryLike = {
-    register(fn): void {
-      pendingOps.push({ kind: "modelInput.register", fn });
+    register(fn, owner): void {
+      pendingOps.push({ kind: "modelInput.register", fn, owner });
     },
   };
 
@@ -340,14 +348,20 @@ function makeRecordingDeps(
  * model-input pipe has no ordering topology, so there is nothing to validate
  * beyond exercising registration.
  */
-function validateOps(
-  ops: readonly RecordedOp[],
-  scope: ExtensionRegistryDeps["scope"],
-): void {
+function validateOps(ops: readonly RecordedOp[], deps: ExtensionRegistryDeps): void {
+  const scope = deps.scope;
   const tempMw = new MiddlewareRegistry(
     scope === "agent" ? ["turn", "step", "toolCall"] : ["ingress", "route"],
   );
   const tempModelInput = new ModelInputRegistry();
+  // Seed a throwaway tool registry with the *live* tools so duplicate-name and
+  // missing-tool errors surface here — before replayOps mutates the real
+  // registries. Without this, `validateOps` ignored tool ops and a failing tool
+  // op left earlier-replayed middleware/listeners/tools installed. (#10)
+  const tempTools = new ToolRegistry();
+  if (deps.scope === "agent") {
+    for (const tool of deps.toolRegistry.list()) tempTools.register(tool);
+  }
 
   for (const op of ops) {
     switch (op.kind) {
@@ -360,9 +374,15 @@ function validateOps(
         );
         break;
       case "modelInput.register":
-        tempModelInput.register(op.fn);
+        tempModelInput.register(op.fn, op.owner);
         break;
-      // tools.* / on are not ordering-relevant — nothing to validate.
+      case "tools.register":
+        if (scope === "agent") tempTools.register(op.tool);
+        break;
+      case "tools.remove":
+        if (scope === "agent") tempTools.remove(op.name);
+        break;
+      // `on` is not ordering-relevant — nothing to validate.
     }
   }
 
@@ -392,7 +412,7 @@ function replayOps(ops: readonly RecordedOp[], deps: ExtensionRegistryDeps): voi
         if (deps.scope === "agent") deps.toolRegistry.remove(op.name);
         break;
       case "modelInput.register":
-        if (deps.scope === "agent") deps.modelInputRegistry.register(op.fn);
+        if (deps.scope === "agent") deps.modelInputRegistry.register(op.fn, op.owner);
         break;
     }
   }

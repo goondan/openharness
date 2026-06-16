@@ -5,8 +5,8 @@
  * {@link CoreHarnessEvents} plus any `CustomHarnessEvents` an extension declared
  * via `declare module`. `on`/`emit` are keyed by event name and the payload type
  * follows the key, so a typo or a wrong payload shape is a compile error at the
- * call site. `tap` receives every payload regardless of name — used to bridge a
- * per-agent bus onto the runtime bus.
+ * call site. `tap` receives every `(event, payload)` regardless of name — used to
+ * bridge a per-agent bus onto the runtime bus under the original event name.
  *
  * Storage is keyed by plain string so the bus can carry custom event names the
  * library itself never sees; the typed surface is enforced at the boundary.
@@ -19,11 +19,12 @@ import type { HarnessEvents } from "@goondan/openharness-types";
 
 type AnyPayload = HarnessEvents[keyof HarnessEvents];
 type AnyListener = (payload: AnyPayload) => void;
+type TapListener = (event: string, payload: AnyPayload) => void;
 type UnsubscribeFn = () => void;
 
 export class EventBus {
   private readonly _listeners = new Map<string, Set<AnyListener>>();
-  private readonly _tapListeners = new Set<AnyListener>();
+  private readonly _tapListeners = new Set<TapListener>();
 
   on<T extends keyof HarnessEvents>(
     event: T,
@@ -58,14 +59,14 @@ export class EventBus {
 
     for (const listener of this._tapListeners) {
       try {
-        listener(payload as AnyPayload);
+        listener(key, payload as AnyPayload);
       } catch (err) {
         console.warn(`[EventBus] Tap listener for "${key}" threw an error:`, err);
       }
     }
   }
 
-  tap(listener: (payload: AnyPayload) => void): UnsubscribeFn {
+  tap(listener: TapListener): UnsubscribeFn {
     this._tapListeners.add(listener);
 
     return () => {

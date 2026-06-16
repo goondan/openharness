@@ -28,11 +28,13 @@ const CREATED_BY = "compaction-summarize";
  * prompts/summaries out of the new summary.
  *
  * The summary is produced by `ctx.subrun` — a one-step sub-run in the agent's
- * *own* model and tools. We send the agent's real messages followed by a short
- * summarize instruction; the agent's projection assembles the system prompt, so
- * the request largely hits the main turn's prompt cache instead of re-paying for
- * the whole history as a fresh prompt. A custom `summarizer` callback can override
- * this for advanced use cases (deterministic logic, external API).
+ * *own* model (a single step is offered no tools, so the summarizer can't trigger
+ * side effects). We send the slice being removed followed by a short summarize
+ * instruction; the agent's projection assembles the system prompt, so the request
+ * largely hits the main turn's prompt cache instead of re-paying for the whole
+ * history as a fresh prompt. If the sub-run fails or returns no text, history is
+ * left untouched. A custom `summarizer` callback can override this for advanced
+ * use cases (deterministic logic, external API).
  *
  * @param config.threshold - Trigger compaction when messages exceed this count.
  * @param config.summaryInstruction - Custom trailing instruction for the summarizer.
@@ -69,14 +71,17 @@ export function CompactionSummarize(config: {
             // User-provided summarizer takes precedence
             summaryText = await config.summarizer([...toRemove]);
           } else {
-            // Default: summarize via a one-step sub-run in the agent's own model +
-            // tools. We pass the real conversation messages plus a single
-            // instruction; the agent's projection assembles the system prompt, so
-            // the request shares the main turn's prompt-cache prefix.
+            // Default: summarize via a one-step sub-run in the agent's own model.
+            // Seed it with exactly the slice being removed (`toRemove`), not the
+            // whole conversation: if a windowing projection (e.g. MessageWindow) is
+            // also installed, seeding the full history lets it trim the front —
+            // precisely `toRemove` — before the summarizer sees it, so we'd delete
+            // messages we never summarized. `toRemove` is a prefix, so the request
+            // still shares the main turn's prompt-cache prefix.
             const instruction = config.summaryInstruction ?? DEFAULT_SUMMARY_INSTRUCTION;
             const result = await ctx.subrun(
               [
-                ...messages,
+                ...toRemove,
                 createMessage<UserModelMessage>({
                   id: `compaction-instruction-${randomUUID()}`,
                   data: { role: "user", content: instruction },
@@ -86,7 +91,18 @@ export function CompactionSummarize(config: {
               { maxSteps: 1, signal: ctx.abortSignal, ...config.subrunOptions },
             );
 
-            summaryText = result.text ?? "";
+            // A failed / aborted / no-text sub-run must NOT delete history — leave
+            // the durable log untouched rather than replacing real messages with an
+            // empty `[Summary]:`. `ctx.subrun` reports failure via status, not throw.
+            if (result.status !== "completed" || !result.text) {
+              return next();
+            }
+            summaryText = result.text;
+          }
+
+          // An empty summary (incl. from a user summarizer) must not delete history.
+          if (summaryText.trim().length === 0) {
+            return next();
           }
 
           // Remove the old non-system messages. Durable — survives replay.

@@ -367,9 +367,14 @@ export type EventPayload = CoreHarnessEvents[CoreHarnessEventType];
 // Scope split
 //
 // Agent-scoped events flow on a per-agent bus (turn/step/tool/human-approval
-// lifecycle, plus the turn-coupled inbound transitions). Connection-scoped
-// events belong to ingress/dispatch. The two arrays are disjoint and together
-// cover every core event; `create-harness` wiring is verified against them.
+// lifecycle) and are subscribable via `api.on`. Connection-scoped events belong
+// to ingress/dispatch.
+//
+// The `inbound.{delivered,consumed,failed,deadLettered}` transitions are emitted
+// by the runtime directly on the runtime bus (including background / dead-letter
+// paths with no single owning agent), so they are NOT agent-scoped — observe
+// them via `runtime.events.on(...)` (`RuntimeEventType` covers every event).
+// Listing them under `api.on` previously compiled but never fired.
 // -----------------------------------------------------------------------
 
 export const AGENT_SCOPE_EVENTS = [
@@ -385,10 +390,6 @@ export const AGENT_SCOPE_EVENTS = [
   "tool.start",
   "tool.done",
   "tool.error",
-  "inbound.delivered",
-  "inbound.consumed",
-  "inbound.failed",
-  "inbound.deadLettered",
   "humanApproval.created",
   "humanTask.created",
   "humanTask.resolved",

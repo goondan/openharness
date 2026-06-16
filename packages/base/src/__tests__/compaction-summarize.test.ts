@@ -122,7 +122,7 @@ describe("CompactionSummarize", () => {
     expect(removedIds).not.toContain("msg-7");
   });
 
-  it("invokes ctx.subrun (agent model + tools) to produce the summary", async () => {
+  it("invokes ctx.subrun (agent model, single completion) to summarize the removed slice", async () => {
     const conversation = makeMockConversationState(makeMessages(12));
     const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
 
@@ -130,19 +130,41 @@ describe("CompactionSummarize", () => {
     await mw(ctx, vi.fn(async () => stubStepResult));
 
     expect(ctx.subrun).toHaveBeenCalledOnce();
-    // The summarize sub-run reuses the real conversation messages (the projection
-    // assembles the system prompt, so the cache prefix matches the main turn) plus
-    // a trailing instruction.
+    // The summarize sub-run is seeded with exactly the slice being removed
+    // (`toRemove`) plus a trailing instruction — not the whole conversation — so a
+    // windowing projection can't trim away the very messages we delete. With
+    // threshold 10 and 12 messages, keepCount=5 → removeCount=7.
     const subrunMock = ctx.subrun as ReturnType<typeof vi.fn>;
     const sentMessages = subrunMock.mock.calls[0][0] as Message[];
-    expect(sentMessages.length).toBe(13); // 12 conversation messages + 1 instruction
+    expect(sentMessages.length).toBe(8); // 7 removed messages + 1 instruction
     expect(sentMessages.at(-1)?.data.role).toBe("user");
-    // 1-step sub-run (a single completion).
+    // 1-step sub-run (a single completion — no tools on the only step).
     expect(subrunMock.mock.calls[0][1]?.maxSteps).toBe(1);
 
     const append = conversation.appended.find((e) => e.type === "appendSystem");
-    if (append && append.type === "appendSystem") {
+    expect(append?.type).toBe("appendSystem");
+    if (append?.type === "appendSystem") {
       expect(append.message.data.content).toContain("LLM-generated summary");
+    }
+  });
+
+  it("does NOT delete history when the summarizer sub-run fails or returns no text", async () => {
+    for (const badResult of [
+      { status: "aborted" as const, steps: [] },
+      { status: "error" as const, steps: [] },
+      { status: "completed" as const, steps: [], text: "" },
+      { status: "completed" as const, steps: [], text: "   " },
+    ]) {
+      const conversation = makeMockConversationState(makeMessages(12));
+      const mw = registerStep(conversation, CompactionSummarize({ threshold: 10 }));
+      const ctx = makeStepContext(conversation);
+      (ctx.subrun as ReturnType<typeof vi.fn>).mockResolvedValue(badResult);
+
+      await mw(ctx, vi.fn(async () => stubStepResult));
+
+      // A failed / aborted / empty sub-run must leave the durable log untouched —
+      // no removals, no empty `[Summary]:`. (regression guard for silent history loss)
+      expect(conversation.appended).toEqual([]);
     }
   });
 

@@ -754,14 +754,37 @@ describe("executeTurn", () => {
     });
 
     // ctx.subrun은 호출자가 tools를 넘기지 않아도 에이전트 자신의 tools를 모델에 전달한다.
-    it("ctx.subrun forwards the agent's own tools to the model (inherited)", async () => {
+    it("ctx.subrun forwards the agent's own tools to the model on non-final steps (inherited)", async () => {
       const llmClient = makeLlmClient({ text: "response" });
       const toolRegistry = new ToolRegistry();
       toolRegistry.register(makeTool("search"));
       const middlewareRegistry = new MiddlewareRegistry();
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
-        // 호출자는 tools를 넘기지 않는다 — subrun이 에이전트 tools를 상속
+        // 호출자는 tools를 넘기지 않는다 — subrun이 에이전트 tools를 상속한다.
+        // maxSteps:2 → 첫(비-최종) step은 tools를 받는다. (모델이 tool 안 부르면 거기서 끝)
+        await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }], { maxSteps: 2 });
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
+      // 첫 chat 호출(=미들웨어 subrun의 step 1, 비-최종)에서 tools = [search]
+      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      expect(toolNames).toEqual(["search"]);
+    });
+
+    // 단발(maxSteps:1, 기본) subrun은 tool을 받지 않는다 — 결과를 쓸 다음 step이 없어
+    // 상속된 side-effecting 툴을 (human approval 꺼진 채) 부주의하게 실행하면 안 된다.
+    it("ctx.subrun forwards NO tools on a one-step (default) sub-run", async () => {
+      const llmClient = makeLlmClient({ text: "response" });
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register(makeTool("search"));
+      const middlewareRegistry = new MiddlewareRegistry();
+
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
         await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }]);
         return next();
       });
@@ -770,13 +793,12 @@ describe("executeTurn", () => {
       await executeTurn("agent-1", "Hello", undefined, deps);
 
       const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
-      // 첫 chat 호출(=미들웨어의 subrun)에서도 tools = [search]
       const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
-      expect(toolNames).toEqual(["search"]);
+      expect(toolNames).toEqual([]);
     });
 
-    // overrideTools: 지정하면 에이전트 tools 대신 그 툴셋을 모델에 전달한다.
-    it("ctx.subrun overrideTools replaces the agent's tools", async () => {
+    // overrideTools: 지정하면 에이전트 tools 대신 그 툴셋을 (비-최종 step의) 모델에 전달한다.
+    it("ctx.subrun overrideTools replaces the agent's tools on non-final steps", async () => {
       const llmClient = makeLlmClient({ text: "response" });
       const toolRegistry = new ToolRegistry();
       toolRegistry.register(makeTool("search"));
@@ -784,6 +806,7 @@ describe("executeTurn", () => {
 
       registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
         await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }], {
+          maxSteps: 2,
           overrideTools: [makeTool("readonly_tool")],
         });
         return next();

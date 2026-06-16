@@ -30,13 +30,14 @@ const DEFAULT_STORE_OWNER = "core";
  */
 export function makeStoreWrapCtxFor<Ctx extends { store: ExtensionStore }>(
   backing: StoreBacking,
+  agentName: string,
   conversationId: string,
 ): WrapCtxFor<Ctx> {
   const cache = new Map<string, ExtensionStore>();
   const storeFor = (owner: string): ExtensionStore => {
     let scoped = cache.get(owner);
     if (!scoped) {
-      scoped = createScopedStore(backing, owner, conversationId);
+      scoped = createScopedStore(backing, agentName, owner, conversationId);
       cache.set(owner, scoped);
     }
     return scoped;
@@ -56,7 +57,8 @@ export function makeStoreWrapCtxFor<Ctx extends { store: ExtensionStore }>(
  */
 export function createDefaultStore(
   backing: StoreBacking,
+  agentName: string,
   conversationId: string,
 ): ExtensionStore {
-  return createScopedStore(backing, DEFAULT_STORE_OWNER, conversationId);
+  return createScopedStore(backing, agentName, DEFAULT_STORE_OWNER, conversationId);
 }

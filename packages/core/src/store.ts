@@ -2,9 +2,12 @@
  * Conversation-scoped persistent KV store.
  *
  * The host injects a {@link StoreBacking} (memory / Redis / MySQL). The core
- * scopes every access by `(extension name × conversationId × key)` so an
- * extension only ever passes a plain key — it can never reach another
- * extension's data or another conversation's data.
+ * scopes every access by `(agent name × extension name × conversationId × key)`
+ * so an extension only ever passes a plain key — it can never reach another
+ * extension's data, another conversation's data, or another agent's data. The
+ * agent name matters because the runtime keeps conversation *state* separate per
+ * `(agentName × conversationId)`, so two agents on the same conversation must not
+ * share an extension's store either.
  *
  * Non-goal (by design): global/tenant storage. Scope stops at the conversation.
  */
@@ -18,15 +21,14 @@ export type { StoreBacking } from "@goondan/openharness-types";
 const SEP = "::";
 
 /**
- * Build the namespace prefix `${extensionName}::${conversationId}::`.
+ * Build the namespace prefix `${agentName}::${extensionName}::${conversationId}::`.
  *
- * The components are percent-encoded so a `::` inside an extension name or a
- * conversation id can't shift the namespace boundary (e.g. ext "a" / conv "b::c"
- * would otherwise collide with ext "a::b" / conv "c"). The trailing key is
- * appended raw and recovered by slicing this fixed prefix, so it needs no encoding.
+ * The components are percent-encoded so a `::` inside any component can't shift
+ * the namespace boundary. The trailing key is appended raw and recovered by
+ * slicing this fixed prefix, so it needs no encoding.
  */
-function prefixFor(extensionName: string, conversationId: string): string {
-  return `${encodeURIComponent(extensionName)}${SEP}${encodeURIComponent(conversationId)}${SEP}`;
+function prefixFor(agentName: string, extensionName: string, conversationId: string): string {
+  return `${encodeURIComponent(agentName)}${SEP}${encodeURIComponent(extensionName)}${SEP}${encodeURIComponent(conversationId)}${SEP}`;
 }
 
 /** In-memory backing — the default when the host injects none. */
@@ -55,16 +57,17 @@ export function createMemoryStoreBacking(): StoreBacking {
 }
 
 /**
- * Create an {@link ExtensionStore} view scoped to `(extensionName,
- * conversationId)`. Built at ctx-injection time, since the conversationId is
- * only known per turn. `keys()` returns plain (de-namespaced) keys.
+ * Create an {@link ExtensionStore} view scoped to `(agentName, extensionName,
+ * conversationId)`. Built at ctx-injection time, since the agentName/conversationId
+ * are only known per turn. `keys()` returns plain (de-namespaced) keys.
  */
 export function createScopedStore(
   backing: StoreBacking,
+  agentName: string,
   extensionName: string,
   conversationId: string,
 ): ExtensionStore {
-  const prefix = prefixFor(extensionName, conversationId);
+  const prefix = prefixFor(agentName, extensionName, conversationId);
   const ns = (key: string): string => `${prefix}${key}`;
 
   return {

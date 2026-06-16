@@ -129,6 +129,13 @@ export function makeSubrun(parent: SubrunParentContext, deps: SubrunDeps): Subru
       ...(llmChatOptions ? { llmChatOptions } : {}),
     };
 
+    // Tools are only useful on a step that has a *next* step to consume their
+    // results. On the final allowed step we offer no tools, so a one-step
+    // sub-run (summarize / prewarm / recap) can never trigger inherited,
+    // side-effecting agent tools — sub-runs run with human approval disabled,
+    // so an unintended tool call here would execute unchecked.
+    const emptyToolRegistry = new ToolRegistry();
+
     const steps: StepResult[] = [];
     let lastStep: StepResult | undefined;
     let totalUsage: LlmUsage | undefined;
@@ -139,9 +146,11 @@ export function makeSubrun(parent: SubrunParentContext, deps: SubrunDeps): Subru
       }
 
       const stepCtx: StepContext = { ...subCtxBase, stepNumber };
+      const stepDepsForStep =
+        stepNumber === maxSteps ? { ...stepDeps, toolRegistry: emptyToolRegistry } : stepDeps;
 
       try {
-        lastStep = await executeStep(stepCtx, stepDeps);
+        lastStep = await executeStep(stepCtx, stepDepsForStep);
       } catch (err) {
         if (isHumanApprovalPendingError(err)) {
           return finalize("waitingForHuman", lastStep, steps, totalUsage);

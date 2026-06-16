@@ -164,8 +164,11 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     // Create per-agent infrastructure
     const toolRegistry = new ToolRegistry();
     const eventBus = new EventBus();
-    eventBus.tap((payload) => {
-      runtimeEventBus.emit(payload.type, payload);
+    // Bridge the per-agent bus onto the runtime bus under the *emitted* event
+    // name. Using the name (not `payload.type`, which custom events may omit)
+    // keeps `runtime.events.on("my.event")` working for any event `api.on` sees.
+    eventBus.tap((event, payload) => {
+      runtimeEventBus.emit(event as Parameters<typeof runtimeEventBus.emit>[0], payload);
     });
     const middlewareRegistry = new MiddlewareRegistry();
     const modelInputRegistry = new ModelInputRegistry();
@@ -225,8 +228,10 @@ export async function createHarness(config: HarnessConfig): Promise<HarnessRunti
     { connector: Connector; rules: RoutingRule[]; connectionMiddleware: MiddlewareRegistry }
   >();
   const ingressEventBus = new EventBus();
-  ingressEventBus.tap((payload) => {
-    runtimeEventBus.emit(payload.type, payload);
+  // Bridge under the emitted event name (not `payload.type`) so custom ingress
+  // events without a `type` field still reach `runtime.events.on`.
+  ingressEventBus.tap((event, payload) => {
+    runtimeEventBus.emit(event as Parameters<typeof runtimeEventBus.emit>[0], payload);
   });
 
   if (config.connections) {

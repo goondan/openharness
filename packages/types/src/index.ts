@@ -130,6 +130,8 @@ export type {
   StepResult,
   ModelInput,
   ModelInputMiddleware,
+  ModelInputContext,
+  ReadonlyConversationView,
   IngressContext,
   RouteContext,
   RouteResult,

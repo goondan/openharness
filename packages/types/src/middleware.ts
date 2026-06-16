@@ -108,14 +108,33 @@ export interface ToolCallContext extends StepContext {
 export type ModelInput = readonly Message[];
 
 /**
+ * Read-only conversation view handed to `useModelInput` projections — the write
+ * path (`append`/`restore`) is intentionally absent. A projection assembles a
+ * throwaway model-input view and must never mutate the durable log; narrowing
+ * the type here enforces that at compile time.
+ */
+export type ReadonlyConversationView = Pick<ConversationState, "getEventLog" | "getMessages">;
+
+/**
+ * Context for a `useModelInput` projection. Narrows {@link StepContext} so the
+ * conversation is read-only — a projection cannot persist messages immediately
+ * before the model call, which would defeat the throwaway-projection contract.
+ * `store` is scoped to the registering extension, like other `use*` handlers.
+ */
+export type ModelInputContext = Omit<StepContext, "conversation"> & {
+  conversation: ReadonlyConversationView;
+};
+
+/**
  * Assembles the model input for a single step. Runs once at the end of the
  * onion, immediately before the model call. Pure and side-effect-free with
  * respect to durable state; async is allowed (hydration is the representative
- * case). It must never touch `conversation`. Throwing fails the step loudly.
+ * case). It receives a read-only conversation ({@link ModelInputContext}) so it
+ * cannot mutate the durable log. Throwing fails the step loudly.
  */
 export type ModelInputMiddleware = (
   messages: ModelInput,
-  ctx: StepContext,
+  ctx: ModelInputContext,
 ) => ModelInput | Promise<ModelInput>;
 
 // -----------------------------------------------------------------------

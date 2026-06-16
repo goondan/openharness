@@ -44,7 +44,7 @@ function makeConversation() {
 }
 
 function makeStore() {
-  return createScopedStore(createMemoryStoreBacking(), "core", "conv-1");
+  return createScopedStore(createMemoryStoreBacking(), "test-agent", "core", "conv-1");
 }
 
 function makeMockSubrun(): SubrunFn {
