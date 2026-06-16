@@ -37,7 +37,7 @@ describe("two event layers stay separate", () => {
     const bus = new EventBus();
 
     const seen: string[] = [];
-    bus.tap((payload) => seen.push(payload.type));
+    bus.tap((event) => seen.push(event));
 
     // Exercise every MessageEvent kind.
     conversation.append({
