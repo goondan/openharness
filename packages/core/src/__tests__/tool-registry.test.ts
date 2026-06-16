@@ -1,10 +1,10 @@
 import { jsonSchema } from "ai";
 import { describe, it, expect, vi } from "vitest";
 import { ToolRegistry } from "../tool-registry.js";
-import {
-  type ToolDefinition,
-  type ToolContext,
-  type ToolResult,
+import type {
+  ToolDefinition,
+  ToolContext,
+  ToolResult,
 } from "@goondan/openharness-types";
 
 // Helper to create a minimal ToolContext

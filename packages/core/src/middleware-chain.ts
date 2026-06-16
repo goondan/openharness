@@ -178,7 +178,9 @@ export function planMiddlewareOrder(
   const n = entries.length;
 
   const byName = new Map<string, number>();
-  entries.forEach((e, i) => byName.set(e.name, i));
+  entries.forEach((e, i) => {
+    byName.set(e.name, i);
+  });
 
   // Even a single registration may carry an unknown `before`/`after` reference,
   // which must surface as a boot error. Resolve refs up front (also catches a
