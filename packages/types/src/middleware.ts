@@ -2,6 +2,7 @@ import type { ConversationState, Message } from "./conversation.js";
 import type { ToolResult, ToolDefinition, JsonObject } from "./tool.js";
 import type { InboundEnvelope } from "./ingress.js";
 import type { ExtensionStore } from "./store.js";
+import type { ProviderRequestOptions } from "./config.js";
 
 // Middleware level discriminant.
 //
@@ -309,6 +310,8 @@ export interface LlmChatOptions {
   temperature?: number;
   /** Max output tokens override. */
   maxTokens?: number;
+  /** Provider-specific request options passed to the model call. */
+  providerOptions?: ProviderRequestOptions;
 }
 
 export interface LlmStreamCallbacks {

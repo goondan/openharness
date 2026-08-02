@@ -213,6 +213,7 @@ export { AGENT_SCOPE_EVENTS, CONNECTION_SCOPE_EVENTS } from "./events.js";
 export type {
   EnvRef,
   EnvResolvable,
+  ProviderRequestOptions,
   ModelConfig,
   AgentConfig,
   ConnectionConfig,

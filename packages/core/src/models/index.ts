@@ -37,5 +37,10 @@ export function createLlmClient(
     providerOptions["apiKey"] = effectiveApiKey;
   }
 
-  return createAiSdkClient(config.provider, config.model, providerOptions);
+  return createAiSdkClient(
+    config.provider,
+    config.model,
+    providerOptions,
+    config.requestProviderOptions,
+  );
 }

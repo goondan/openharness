@@ -580,7 +580,14 @@ describe("AI SDK adapter streamChat()", () => {
 
     const { createLlmClient: createClient } = await import("../models/index.js");
     const client = createClient(
-      { provider: "google", model: "gemini-1.5-pro", apiKey: "key" },
+      {
+        provider: "google",
+        model: "gemini-1.5-pro",
+        apiKey: "key",
+        requestProviderOptions: {
+          google: { thinkingConfig: { thinkingBudget: 1024 }, mode: "default" },
+        },
+      },
       "g-resolved",
     );
 
@@ -589,11 +596,22 @@ describe("AI SDK adapter streamChat()", () => {
       [],
       abortSignal,
       {},
-      { model: "gemini-1.5-flash", temperature: 0.7, maxTokens: 1024 },
+      {
+        model: "gemini-1.5-flash",
+        temperature: 0.7,
+        maxTokens: 1024,
+        providerOptions: { google: { mode: "override" } },
+      },
     );
 
     expect(capturedArgs).toBeDefined();
     expect(capturedArgs!["temperature"]).toBe(0.7);
     expect(capturedArgs!["maxOutputTokens"]).toBe(1024);
+    expect(capturedArgs!["providerOptions"]).toEqual({
+      google: {
+        thinkingConfig: { thinkingBudget: 1024 },
+        mode: "override",
+      },
+    });
   });
 });

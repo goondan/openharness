@@ -107,6 +107,27 @@ interface AgentConfig {
   maxSteps?: number;
 }
 
+type ProviderRequestOptions = Record<
+  string,
+  Record<string, JsonValue>
+>;
+
+interface ModelConfig {
+  provider: string;
+  model: string;
+  apiKey?: string | EnvRef;
+  baseUrl?: string | EnvRef;
+  providerOptions?: Record<string, unknown>;
+  requestProviderOptions?: ProviderRequestOptions;
+}
+
+interface LlmChatOptions {
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  providerOptions?: ProviderRequestOptions;
+}
+
 interface DurableInboundConfig {
   enabled?: boolean;
   store: DurableInboundStore;
@@ -184,6 +205,15 @@ interface IngressAcceptResult {
 - `model`은 필수
 - `apiKey`, `baseUrl/baseURL`, provider-specific option은 pass-through
 - env ref를 그대로 받을 수 있고, 실제 해석은 `createHarness()`에서 수행한다
+- `providerOptions`는 AI SDK provider 생성 설정이고, `requestProviderOptions`는 모델의 요청별 provider 옵션 기본값이다.
+- 모델 기본 요청 옵션과 `LlmChatOptions.providerOptions`는 provider 블록별로 얕게 병합하며, 호출별 키가 우선한다.
+- 병합한 요청 옵션은 `generateText`와 `streamText` 양쪽에 동일하게 전달한다.
+
+Anthropic factory 추가 계약:
+
+- `effort?: "low" | "medium" | "high" | "max"`
+- `effort`는 provider 생성 설정에 포함하지 않고 `requestProviderOptions.anthropic.effort`로 변환한다.
+- `effort`가 없고 별도 요청 옵션도 없으면 기존 AI SDK 호출 형태를 유지한다.
 
 ### 5.2 CLI 옵션
 
@@ -217,3 +247,7 @@ interface IngressAcceptResult {
 - Given agent가 둘 이상인데 `--agent`가 없으면, When CLI를 실행하면, Then usage error로 종료한다.
 - Given `--max-steps 7`이 전달되면, When runtime을 생성하면, Then 선택된 agent config에만 `maxSteps: 7`이 적용된다.
 - Given `.env`와 기존 `process.env`가 같은 키를 가질 때, When CLI가 env를 로드하면, Then 기존 `process.env` 값이 유지된다.
+- Given `Anthropic({ effort: "medium" })`, When model config를 만들면, Then provider 생성 옵션에는 effort가 없고 `requestProviderOptions.anthropic.effort`가 `medium`이다.
+- Given model 기본 요청 옵션이 있으면, When `chat` 또는 `streamChat`이 AI SDK를 호출하면, Then 해당 옵션을 `providerOptions`로 전달한다.
+- Given 호출별 provider 옵션이 모델 기본값과 같은 키를 가지면, When AI SDK를 호출하면, Then 호출별 값이 우선하고 같은 provider 블록의 나머지 기본 키는 유지된다.
+- Given model과 호출 모두 요청 provider 옵션이 없으면, When AI SDK를 호출하면, Then `providerOptions` 필드를 추가하지 않는다.

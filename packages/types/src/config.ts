@@ -1,5 +1,9 @@
 import type { AgentExtension, ConnectionExtension } from "./extension.js";
-import type { HumanApprovalStore, ToolDefinition } from "./tool.js";
+import type {
+  HumanApprovalStore,
+  JsonValue,
+  ToolDefinition,
+} from "./tool.js";
 import type { Connector, DurableInboundStore, RoutingRule } from "./ingress.js";
 import type { StoreBacking } from "./store.js";
 
@@ -29,12 +33,15 @@ export type EnvResolvable<T> =
 // Model / agent / connection config
 // -----------------------------------------------------------------------
 
+export type ProviderRequestOptions = Record<string, Record<string, JsonValue>>;
+
 export interface ModelConfig {
   provider: string;
   model: string;
   apiKey?: string | EnvRef;
   baseUrl?: string | EnvRef;
   providerOptions?: Record<string, unknown>;
+  requestProviderOptions?: ProviderRequestOptions;
 }
 
 export interface AgentConfig {

@@ -119,6 +119,52 @@ describe("FR-CORE-009: LlmChatOptions via AI SDK adapter", () => {
     expect(capturedArgs[0]["maxOutputTokens"]).toBe(100);
   });
 
+  it("Anthropic: forwards default request provider options", async () => {
+    const client = createFn(
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        apiKey: "key",
+        requestProviderOptions: {
+          anthropic: { effort: "medium", cacheControl: { type: "ephemeral" } },
+        },
+      },
+      "sk-ant",
+    );
+
+    await client.chat(mockMessages, emptyTools, signal);
+
+    expect(capturedArgs[0]["providerOptions"]).toEqual({
+      anthropic: { effort: "medium", cacheControl: { type: "ephemeral" } },
+    });
+  });
+
+  it("Anthropic: merges call provider options over model defaults per provider", async () => {
+    const client = createFn(
+      {
+        provider: "anthropic",
+        model: "claude-opus-5",
+        apiKey: "key",
+        requestProviderOptions: {
+          anthropic: { effort: "medium", cacheControl: { type: "ephemeral" } },
+          openai: { reasoningEffort: "low" },
+        },
+      },
+      "sk-ant",
+    );
+
+    await client.chat(mockMessages, emptyTools, signal, {
+      providerOptions: {
+        anthropic: { effort: "high" },
+      },
+    });
+
+    expect(capturedArgs[0]["providerOptions"]).toEqual({
+      anthropic: { effort: "high", cacheControl: { type: "ephemeral" } },
+      openai: { reasoningEffort: "low" },
+    });
+  });
+
   it("Anthropic: partial options — only temperature, model stays default", async () => {
     const client = createFn({ provider: "anthropic", model: "claude-3-5-sonnet-20241022", apiKey: "key" }, "sk-ant");
     await client.chat(mockMessages, emptyTools, signal, { temperature: 0.5 });

@@ -5,9 +5,12 @@ import type {
   ModelConfig,
 } from "@goondan/openharness-types";
 
+export type AnthropicEffort = "low" | "medium" | "high" | "max";
+
 export type AnthropicConfig = {
   model: string;
   baseUrl?: string | EnvRef;
+  effort?: AnthropicEffort;
 } & EnvResolvable<AnthropicProviderSettings>;
 
 /**
@@ -15,7 +18,7 @@ export type AnthropicConfig = {
  * The actual LLM call is handled by the unified AI SDK adapter.
  */
 export function Anthropic(config: AnthropicConfig): ModelConfig {
-  const { model, baseUrl, ...providerOptions } = config;
+  const { model, baseUrl, effort, ...providerOptions } = config;
   const normalizedProviderOptions = {
     ...providerOptions,
     ...(providerOptions.baseURL === undefined && baseUrl !== undefined
@@ -34,6 +37,9 @@ export function Anthropic(config: AnthropicConfig): ModelConfig {
       : {}),
     ...(Object.keys(normalizedProviderOptions).length > 0
       ? { providerOptions: normalizedProviderOptions }
+      : {}),
+    ...(effort !== undefined
+      ? { requestProviderOptions: { anthropic: { effort } } }
       : {}),
   };
 }

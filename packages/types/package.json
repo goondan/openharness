@@ -1,6 +1,6 @@
 {
   "name": "@goondan/openharness-types",
-  "version": "1.0.0-rc.5",
+  "version": "1.0.0-rc.6",
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {

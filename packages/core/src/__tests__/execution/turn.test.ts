@@ -772,7 +772,11 @@ describe("executeTurn", () => {
 
       const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
       // 첫 chat 호출(=미들웨어 subrun의 step 1, 비-최종)에서 tools = [search]
-      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      const firstChatCall = chatMock.mock.calls[0];
+      if (!firstChatCall) {
+        throw new Error("Expected the subrun to call the LLM");
+      }
+      const toolNames = (firstChatCall[1] as ToolDefinition[]).map((t) => t.name);
       expect(toolNames).toEqual(["search"]);
     });
 
@@ -793,7 +797,11 @@ describe("executeTurn", () => {
       await executeTurn("agent-1", "Hello", undefined, deps);
 
       const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
-      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      const firstChatCall = chatMock.mock.calls[0];
+      if (!firstChatCall) {
+        throw new Error("Expected the subrun to call the LLM");
+      }
+      const toolNames = (firstChatCall[1] as ToolDefinition[]).map((t) => t.name);
       expect(toolNames).toEqual([]);
     });
 
@@ -816,7 +824,11 @@ describe("executeTurn", () => {
       await executeTurn("agent-1", "Hello", undefined, deps);
 
       const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
-      const toolNames = (chatMock.mock.calls[0]?.[1] as ToolDefinition[]).map((t) => t.name);
+      const firstChatCall = chatMock.mock.calls[0];
+      if (!firstChatCall) {
+        throw new Error("Expected the subrun to call the LLM");
+      }
+      const toolNames = (firstChatCall[1] as ToolDefinition[]).map((t) => t.name);
       expect(toolNames).toEqual(["readonly_tool"]);
     });
 
