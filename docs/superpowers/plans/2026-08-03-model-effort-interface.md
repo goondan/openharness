@@ -84,7 +84,7 @@ Expected: FAIL because `effort` is not accepted by `AnthropicConfig` and `reques
 In `packages/types/src/config.ts`, add:
 
 ```ts
-export type ProviderRequestOptions = Record<string, Record<string, unknown>>;
+export type ProviderRequestOptions = Record<string, Record<string, JsonValue>>;
 
 export interface ModelConfig {
   provider: string;

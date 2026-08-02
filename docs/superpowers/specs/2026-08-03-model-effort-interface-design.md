@@ -17,7 +17,7 @@ OpenHarness currently forwards model, temperature, and maximum output tokens to 
 OpenHarness will distinguish provider-construction options from request provider options.
 
 ```ts
-type ProviderRequestOptions = Record<string, Record<string, unknown>>;
+type ProviderRequestOptions = Record<string, Record<string, JsonValue>>;
 
 interface ModelConfig {
   provider: string;
@@ -65,6 +65,8 @@ OpenAI and Google factories are unchanged in this delivery. Their consumers can 
 
 Provider blocks are shallow-merged independently. Call-specific keys win while unrelated model defaults remain present. For example, a call-specific Anthropic cache option does not remove the model's default effort.
 
+Request provider options are limited to JSON-serializable values, matching the AI SDK request contract and allowing the adapter to forward them without unsafe casts.
+
 ## Karby Integration
 
 Karby's `buildHarnessModelConfig` will set `effort: "medium"` for both direct Anthropic and Amazon-routed Anthropic models. Because all Karby Harness profiles use the same model-config builder, this covers Slack, API, background, CLI, and Harness subagent profiles.
@@ -107,4 +109,3 @@ Karby tests will verify:
 2. Upgrade Karby's three OpenHarness packages with `pnpm`.
 3. Configure Karby effort `medium`, update product/technical/runtime specifications, and run `pnpm fix` plus `pnpm check:type` and focused tests.
 4. Push both branches and create the required pull requests.
-

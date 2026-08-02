@@ -63,6 +63,20 @@ export default defineHarness({
 
 `OpenAI`, `Anthropic`, `Google` 팩토리는 각 AI SDK provider의 `createOpenAI`, `createAnthropic`, `createGoogleGenerativeAI` 옵션을 그대로 받습니다. `apiKey`는 선택값이라 provider 기본 환경 변수 규칙을 그대로 써도 됩니다.
 
+Anthropic 요청의 effort를 모델 기본값으로 지정하려면 `effort`를 사용합니다. 이 값은 provider 생성 설정이 아니라 모든 `generateText`/`streamText` 요청의 `providerOptions.anthropic.effort`로 전달됩니다.
+
+```ts
+import { Anthropic } from "@goondan/openharness/models";
+
+const model = Anthropic({
+  model: "claude-opus-5",
+  apiKey: env("ANTHROPIC_API_KEY"),
+  effort: "medium",
+});
+```
+
+지원 값은 `low`, `medium`, `high`, `max`입니다. 더 일반적인 provider 요청 옵션은 `ModelConfig.requestProviderOptions`에 기본값을 두고, 개별 `chat`/`streamChat` 호출의 `LlmChatOptions.providerOptions`로 덮어쓸 수 있습니다. 같은 provider 블록 안에서는 호출별 키가 우선하며, 덮어쓰지 않은 기본 키는 유지됩니다.
+
 ### 3. 실행
 
 ```bash
