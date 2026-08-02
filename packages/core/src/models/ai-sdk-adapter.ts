@@ -19,6 +19,7 @@ import type {
   LlmUsage,
   LlmProviderMetadata,
   Message,
+  ProviderRequestOptions,
   ToolDefinition,
 } from "@goondan/openharness-types";
 import { isJsonSchemaWrapper } from "@goondan/openharness-types";
@@ -27,6 +28,30 @@ import { normalizeToolArgsResult } from "../tool-args.js";
 type ProviderFactory = {
   languageModel: (modelId: string) => LanguageModel;
 };
+
+function mergeProviderRequestOptions(
+  defaults?: ProviderRequestOptions,
+  overrides?: ProviderRequestOptions,
+): ProviderRequestOptions | undefined {
+  if (!defaults && !overrides) {
+    return undefined;
+  }
+
+  const merged: ProviderRequestOptions = {};
+  const providerNames = new Set([
+    ...Object.keys(defaults ?? {}),
+    ...Object.keys(overrides ?? {}),
+  ]);
+
+  for (const providerName of providerNames) {
+    merged[providerName] = {
+      ...(defaults?.[providerName] ?? {}),
+      ...(overrides?.[providerName] ?? {}),
+    };
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
 
 async function getProviderFactory(
   provider: string,
@@ -224,6 +249,7 @@ export function createAiSdkClient(
   provider: string,
   defaultModel: string,
   providerOptions: Record<string, unknown> = {},
+  defaultRequestProviderOptions?: ProviderRequestOptions,
 ): LlmClient {
   const providerFactoryPromise = getProviderFactory(provider, providerOptions);
 
@@ -241,11 +267,18 @@ export function createAiSdkClient(
       const aiTools =
         tools.length > 0 ? toAiSdkTools(tools) : undefined;
       const prompt = toAiSdkPrompt(messages);
+      const requestProviderOptions = mergeProviderRequestOptions(
+        defaultRequestProviderOptions,
+        options?.providerOptions,
+      );
 
       const result = await generateText({
         model,
         ...prompt,
         ...(aiTools ? { tools: aiTools } : {}),
+        ...(requestProviderOptions
+          ? { providerOptions: requestProviderOptions }
+          : {}),
         ...(options?.temperature !== undefined
           ? { temperature: options.temperature }
           : {}),
@@ -291,11 +324,18 @@ export function createAiSdkClient(
       const aiTools =
         tools.length > 0 ? toAiSdkTools(tools) : undefined;
       const prompt = toAiSdkPrompt(messages);
+      const requestProviderOptions = mergeProviderRequestOptions(
+        defaultRequestProviderOptions,
+        options?.providerOptions,
+      );
 
       const result = streamText({
         model,
         ...prompt,
         ...(aiTools ? { tools: aiTools } : {}),
+        ...(requestProviderOptions
+          ? { providerOptions: requestProviderOptions }
+          : {}),
         ...(options?.temperature !== undefined
           ? { temperature: options.temperature }
           : {}),
