@@ -51,6 +51,19 @@ describe("Anthropic()", () => {
       headers: { "x-proxy": "openharness" },
     });
   });
+
+  it("maps effort to request provider options without leaking it into provider settings", () => {
+    const config = Anthropic({
+      model: "claude-opus-5",
+      apiKey: "sk-ant-test",
+      effort: "medium",
+    });
+
+    expect(config.providerOptions).toEqual({ apiKey: "sk-ant-test" });
+    expect(config.requestProviderOptions).toEqual({
+      anthropic: { effort: "medium" },
+    });
+  });
 });
 
 describe("OpenAI()", () => {

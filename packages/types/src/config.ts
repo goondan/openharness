@@ -29,12 +29,15 @@ export type EnvResolvable<T> =
 // Model / agent / connection config
 // -----------------------------------------------------------------------
 
+export type ProviderRequestOptions = Record<string, Record<string, unknown>>;
+
 export interface ModelConfig {
   provider: string;
   model: string;
   apiKey?: string | EnvRef;
   baseUrl?: string | EnvRef;
   providerOptions?: Record<string, unknown>;
+  requestProviderOptions?: ProviderRequestOptions;
 }
 
 export interface AgentConfig {
