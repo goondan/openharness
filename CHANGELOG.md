@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.7] — 2026-09-04
+
+### Added: `OpenAIChat` 모델 팩토리 (Chat Completions API)
+
+`OpenAI()`는 AI SDK 기본값대로 Responses API(`/v1/responses`)로 요청한다. Chat Completions API(`/v1/chat/completions`)만 제공하는 OpenAI 호환 게이트웨이(예: 사내 LLM 라우터 뒤의 Gemini)를 쓰려면 같은 config를 받는 `OpenAIChat()`을 사용한다. provider 식별자는 `"openai-chat"`.
+
+## [1.0.0-rc.6] — 2026-08-02
+
+### Added: 모델 effort 설정과 provider request options 전달
+
+`Anthropic({ effort })`로 모든 요청의 `providerOptions.anthropic.effort` 기본값을 지정할 수 있고, `ModelConfig.requestProviderOptions`가 `generateText`/`streamText`의 `providerOptions`로 병합·전달된다.
+
 ## [1.0.0-rc.5] — 2026-06-14
 
 ### Fixed: 확장 계약 1.0 코드리뷰 후속 (10건)

@@ -63,6 +63,17 @@ export default defineHarness({
 
 `OpenAI`, `Anthropic`, `Google` 팩토리는 각 AI SDK provider의 `createOpenAI`, `createAnthropic`, `createGoogleGenerativeAI` 옵션을 그대로 받습니다. `apiKey`는 선택값이라 provider 기본 환경 변수 규칙을 그대로 써도 됩니다.
 
+`OpenAI`는 Responses API(`/v1/responses`)로 요청합니다. Chat Completions API(`/v1/chat/completions`)만 제공하는 OpenAI 호환 게이트웨이(예: 다른 벤더 모델을 OpenAI 표면으로 감싼 사내 라우터)에는 같은 옵션을 받는 `OpenAIChat`을 사용합니다.
+
+```ts
+import { OpenAIChat } from "@goondan/openharness/models";
+
+const model = OpenAIChat({
+  model: "google/gemini-3.7-flash",
+  baseUrl: "https://llm-router.example.com/v1",
+});
+```
+
 Anthropic 요청의 effort를 모델 기본값으로 지정하려면 `effort`를 사용합니다. 이 값은 provider 생성 설정이 아니라 모든 `generateText`/`streamText` 요청의 `providerOptions.anthropic.effort`로 전달됩니다.
 
 ```ts

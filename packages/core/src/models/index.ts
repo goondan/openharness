@@ -3,10 +3,15 @@ import { ConfigError } from "../errors.js";
 import { createAiSdkClient } from "./ai-sdk-adapter.js";
 
 export { Anthropic } from "./anthropic.js";
-export { OpenAI } from "./openai.js";
+export { OpenAI, OpenAIChat } from "./openai.js";
 export { Google } from "./google.js";
 
-const SUPPORTED_PROVIDERS = new Set(["anthropic", "openai", "google"]);
+const SUPPORTED_PROVIDERS = new Set([
+  "anthropic",
+  "openai",
+  "openai-chat",
+  "google",
+]);
 
 export function createLlmClient(
   config: ModelConfig,

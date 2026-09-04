@@ -1,7 +1,7 @@
 import { jsonSchema } from "ai";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "@goondan/openharness-types";
-import { Anthropic, OpenAI, Google, createLlmClient } from "../models/index.js";
+import { Anthropic, OpenAI, OpenAIChat, Google, createLlmClient } from "../models/index.js";
 import { ConfigError } from "../errors.js";
 import type { Message, ToolDefinition } from "@goondan/openharness-types";
 
@@ -107,6 +107,26 @@ describe("OpenAI()", () => {
   });
 });
 
+describe("OpenAIChat()", () => {
+  it("returns ModelConfig with provider 'openai-chat' and the same option shape as OpenAI()", () => {
+    const config = OpenAIChat({
+      model: "google/gemini-3.7-flash",
+      apiKey: "key",
+      baseUrl: "https://router.example.com/v1",
+      headers: { "x-proxy": "openharness" },
+    });
+    const responses = OpenAI({
+      model: "google/gemini-3.7-flash",
+      apiKey: "key",
+      baseUrl: "https://router.example.com/v1",
+      headers: { "x-proxy": "openharness" },
+    });
+
+    expect(config.provider).toBe("openai-chat");
+    expect({ ...config, provider: "openai" }).toEqual(responses);
+  });
+});
+
 describe("Google()", () => {
   it("returns ModelConfig with provider 'google'", () => {
     const config = Google({ model: "gemini-1.5-pro", apiKey: "google-key" });
@@ -152,6 +172,7 @@ describe("createLlmClient()", () => {
     const providers = [
       { factory: Anthropic, model: "claude-3-5-sonnet-20241022", provider: "anthropic" },
       { factory: OpenAI, model: "gpt-4o", provider: "openai" },
+      { factory: OpenAIChat, model: "gpt-4o", provider: "openai-chat" },
       { factory: Google, model: "gemini-1.5-pro", provider: "google" },
     ] as const;
 
@@ -188,6 +209,33 @@ const abortSignal = new AbortController().signal;
 describe("AI SDK adapter chat()", () => {
   beforeEach(() => {
     vi.resetModules();
+  });
+
+  it("routes provider 'openai-chat' through the Chat Completions model (p.chat), not the Responses model", async () => {
+    const generateText = vi.fn().mockResolvedValue({
+      text: "chat completions",
+      toolCalls: [],
+      finishReason: "stop",
+      response: { messages: [] },
+    });
+    vi.doMock("ai", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("ai")>();
+      return { ...actual, generateText };
+    });
+    const chat = vi.fn().mockReturnValue({ modelId: "chat-model" });
+    const languageModel = vi.fn().mockReturnValue({ modelId: "responses-model" });
+    vi.doMock("@ai-sdk/openai", () => ({
+      createOpenAI: vi.fn().mockReturnValue({ chat, languageModel }),
+    }));
+
+    const { createLlmClient: createClient } = await import("../models/index.js");
+    const client = createClient({ provider: "openai-chat", model: "google/gemini-3.7-flash" }, "key");
+    const response = await client.chat(mockMessages, [], abortSignal);
+
+    expect(response.text).toBe("chat completions");
+    expect(chat).toHaveBeenCalledWith("google/gemini-3.7-flash");
+    expect(languageModel).not.toHaveBeenCalled();
+    expect(generateText.mock.calls[0]?.[0]?.model).toEqual({ modelId: "chat-model" });
   });
 
   it("calls generateText and returns LlmResponse with text", async () => {
