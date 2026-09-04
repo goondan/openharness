@@ -62,6 +62,8 @@ OPENAI_API_KEY=...
 
 `OpenAI`, `Anthropic`, `Google`은 AI SDK provider 팩토리 옵션을 그대로 받습니다. 예를 들어 `baseURL`, `project`, `organization`, `authToken`, `headers`를 직접 넣을 수 있고, `apiKey`는 필수가 아닙니다.
 
+Chat Completions API만 제공하는 OpenAI 호환 엔드포인트에는 `OpenAI` 대신 `OpenAIChat`을 사용합니다. 옵션은 동일하고 요청 경로만 `/v1/chat/completions`로 바뀝니다.
+
 ## 3. CLI 사용법
 
 ### 한 번 실행

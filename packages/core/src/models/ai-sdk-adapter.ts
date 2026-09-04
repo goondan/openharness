@@ -72,6 +72,12 @@ async function getProviderFactory(
       factory = { languageModel: (m: string) => p.languageModel(m) };
       break;
     }
+    case "openai-chat": {
+      const { createOpenAI } = await import("@ai-sdk/openai");
+      const p = createOpenAI(providerOptions as OpenAIProviderSettings);
+      factory = { languageModel: (m: string) => p.chat(m) };
+      break;
+    }
     case "google": {
       const { createGoogleGenerativeAI } = await import("@ai-sdk/google");
       const p = createGoogleGenerativeAI(

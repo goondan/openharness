@@ -10,11 +10,10 @@ export type OpenAIConfig = {
   baseUrl?: string | EnvRef;
 } & EnvResolvable<OpenAIProviderSettings>;
 
-/**
- * Factory function that returns a ModelConfig for OpenAI models.
- * The actual LLM call is handled by the unified AI SDK adapter.
- */
-export function OpenAI(config: OpenAIConfig): ModelConfig {
+function buildOpenAIModelConfig(
+  provider: "openai" | "openai-chat",
+  config: OpenAIConfig,
+): ModelConfig {
   const { model, baseUrl, ...providerOptions } = config;
   const normalizedProviderOptions = {
     ...providerOptions,
@@ -24,7 +23,7 @@ export function OpenAI(config: OpenAIConfig): ModelConfig {
   };
 
   return {
-    provider: "openai",
+    provider,
     model,
     ...(normalizedProviderOptions.apiKey !== undefined
       ? { apiKey: normalizedProviderOptions.apiKey }
@@ -36,4 +35,23 @@ export function OpenAI(config: OpenAIConfig): ModelConfig {
       ? { providerOptions: normalizedProviderOptions }
       : {}),
   };
+}
+
+/**
+ * Factory function that returns a ModelConfig for OpenAI models.
+ * Requests go through the Responses API (`/v1/responses`).
+ * The actual LLM call is handled by the unified AI SDK adapter.
+ */
+export function OpenAI(config: OpenAIConfig): ModelConfig {
+  return buildOpenAIModelConfig("openai", config);
+}
+
+/**
+ * Factory function that returns a ModelConfig for OpenAI-compatible models that
+ * only serve the Chat Completions API (`/v1/chat/completions`), e.g. gateways
+ * that front non-OpenAI models behind an OpenAI-compatible surface.
+ * Accepts the same options as `OpenAI()`.
+ */
+export function OpenAIChat(config: OpenAIConfig): ModelConfig {
+  return buildOpenAIModelConfig("openai-chat", config);
 }

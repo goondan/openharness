@@ -198,6 +198,7 @@ interface IngressAcceptResult {
 
 - `Anthropic(config)`
 - `OpenAI(config)`
+- `OpenAIChat(config)` — `OpenAI`와 같은 config, Responses API 대신 Chat Completions API 사용
 - `Google(config)`
 
 공통 특징:
