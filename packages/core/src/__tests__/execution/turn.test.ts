@@ -780,9 +780,11 @@ describe("executeTurn", () => {
       expect(toolNames).toEqual(["search"]);
     });
 
-    // 단발(maxSteps:1, 기본) subrun은 tool을 받지 않는다 — 결과를 쓸 다음 step이 없어
-    // 상속된 side-effecting 툴을 (human approval 꺼진 채) 부주의하게 실행하면 안 된다.
-    it("ctx.subrun forwards NO tools on a one-step (default) sub-run", async () => {
+    // 단발(maxSteps:1, 기본) subrun도 에이전트와 **같은 tool 정의**를 모델에 보낸다 — provider
+    // prompt cache의 prefix는 tool 목록부터 시작하므로, 도구를 빼면 prewarm/recap/summarize가
+    // 에이전트 step의 캐시를 한 번도 못 맞춘다. 대신 최종 step의 tool은 실행되지 않는다
+    // (human approval 꺼진 채 상속된 side-effecting 툴이 돌면 안 된다).
+    it("ctx.subrun advertises the same tool definitions on a one-step sub-run (cache prefix preserved)", async () => {
       const llmClient = makeLlmClient({ text: "response" });
       const toolRegistry = new ToolRegistry();
       toolRegistry.register(makeTool("search"));
@@ -797,12 +799,43 @@ describe("executeTurn", () => {
       await executeTurn("agent-1", "Hello", undefined, deps);
 
       const chatMock = llmClient.chat as ReturnType<typeof vi.fn>;
-      const firstChatCall = chatMock.mock.calls[0];
-      if (!firstChatCall) {
-        throw new Error("Expected the subrun to call the LLM");
+      const [subrunCall, agentCall] = chatMock.mock.calls;
+      if (!subrunCall || !agentCall) {
+        throw new Error("Expected the subrun and the agent step to call the LLM");
       }
-      const toolNames = (firstChatCall[1] as ToolDefinition[]).map((t) => t.name);
-      expect(toolNames).toEqual([]);
+      const wire = (tools: ToolDefinition[]) =>
+        tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+      expect(wire(subrunCall[1] as ToolDefinition[])).toEqual(wire(agentCall[1] as ToolDefinition[]));
+    });
+
+    it("ctx.subrun never executes a tool the model calls on the final step", async () => {
+      const handler = vi.fn(async () => ({ type: "text" as const, text: "ran" }));
+      const toolRegistry = new ToolRegistry();
+      toolRegistry.register({ ...makeTool("search"), handler });
+      const middlewareRegistry = new MiddlewareRegistry();
+      // 첫 호출(subrun 최종 step)에서 모델이 tool을 부른다; 이후 호출은 텍스트로 끝난다.
+      const llmClient = makeLlmClient({ text: "response" });
+      (llmClient.chat as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        text: "",
+        toolCalls: [{ toolCallId: "tc-1", toolName: "search", args: {} }],
+        finishReason: "tool-calls",
+      });
+
+      let subrunResult: Awaited<ReturnType<TurnContext["subrun"]>> | undefined;
+      registerTurnMiddleware(middlewareRegistry, async (ctx, next) => {
+        subrunResult = await ctx.subrun([{ id: "ext-1", data: { role: "user" as const, content: "q" } }]);
+        return next();
+      });
+
+      const deps = makeDeps({ llmClient, toolRegistry, middlewareRegistry });
+      await executeTurn("agent-1", "Hello", undefined, deps);
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(subrunResult?.status).toBe("maxStepsReached");
+      expect(subrunResult?.steps[0]?.toolCalls[0]?.result).toEqual({
+        type: "error",
+        error: 'Tool "search" is not available on the final step of a sub-run.',
+      });
     });
 
     // overrideTools: 지정하면 에이전트 tools 대신 그 툴셋을 (비-최종 step의) 모델에 전달한다.

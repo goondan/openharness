@@ -50,7 +50,23 @@ function toSeedEvent(message: Message): MessageEvent {
     : { type: "appendMessage", message: message as Extract<Message, { data: { role: Exclude<Message["data"]["role"], "system"> } }> };
 }
 
-function toolRegistryFrom(tools: ToolDefinition[]): ToolRegistry {
+/**
+ * Same name/description/parameters (so the model request — and the cached
+ * prefix — is byte-identical to the agent's own steps), but a handler that
+ * refuses to run and no human-approval gate to wait on.
+ */
+function inertTool(tool: ToolDefinition): ToolDefinition {
+  const { humanApproval: _humanApproval, ...definition } = tool;
+  return {
+    ...definition,
+    handler: async () => ({
+      type: "error",
+      error: `Tool "${tool.name}" is not available on the final step of a sub-run.`,
+    }),
+  };
+}
+
+function toolRegistryFrom(tools: readonly ToolDefinition[]): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of tools) {
     registry.register(tool);
@@ -130,11 +146,14 @@ export function makeSubrun(parent: SubrunParentContext, deps: SubrunDeps): Subru
     };
 
     // Tools are only useful on a step that has a *next* step to consume their
-    // results. On the final allowed step we offer no tools, so a one-step
-    // sub-run (summarize / prewarm / recap) can never trigger inherited,
-    // side-effecting agent tools — sub-runs run with human approval disabled,
-    // so an unintended tool call here would execute unchecked.
-    const emptyToolRegistry = new ToolRegistry();
+    // results. On the final allowed step a tool call must never execute: sub-runs
+    // run with human approval disabled, so an inherited side-effecting agent tool
+    // would run unchecked. We still *advertise* the same tool definitions, though:
+    // the provider prompt-cache prefix starts with the tool list, so dropping it
+    // would make every one-step sub-run (prewarm / recap / summarize) miss the
+    // agent's cached prefix entirely — defeating prewarm's whole purpose. Same
+    // wire bytes, inert handlers.
+    const inertToolRegistry = toolRegistryFrom(toolRegistry.list().map(inertTool));
 
     const steps: StepResult[] = [];
     let lastStep: StepResult | undefined;
@@ -147,7 +166,7 @@ export function makeSubrun(parent: SubrunParentContext, deps: SubrunDeps): Subru
 
       const stepCtx: StepContext = { ...subCtxBase, stepNumber };
       const stepDepsForStep =
-        stepNumber === maxSteps ? { ...stepDeps, toolRegistry: emptyToolRegistry } : stepDeps;
+        stepNumber === maxSteps ? { ...stepDeps, toolRegistry: inertToolRegistry } : stepDeps;
 
       try {
         lastStep = await executeStep(stepCtx, stepDepsForStep);
