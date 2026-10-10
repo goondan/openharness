@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc.8] — 2026-10-10
+
+### Fixed: 서브런 마지막 step이 에이전트 tool 정의를 그대로 보낸다 (prompt cache prefix 보존)
+
+`ctx.subrun`의 마지막 step은 상속된 side-effecting tool이 실행되지 않도록 tool을 비워 보냈다. 그런데 provider prompt cache의 prefix는 tool 목록부터 시작하므로, 단발 서브런(prewarm·recap·summarize)의 요청이 에이전트 step의 캐시와 한 번도 맞지 않았다 — prewarm이 메인 루프를 데우지 못하고 recap 입력의 대부분이 캐시 쓰기로 청구됐다.
+
+이제 마지막 step에도 에이전트와 같은 `name`/`description`/`parameters`를 보내 요청 바이트를 동일하게 유지하고, 핸들러만 실행을 거부하는 inert 핸들러로 바꾼다(`humanApproval` 게이트 없음). 모델이 마지막 step에서 tool을 부르면 `{ type: "error" }` 결과가 남고 서브런은 `maxStepsReached`로 끝난다. 확장 코드 변경은 필요 없다.
+
 ## [1.0.0-rc.7] — 2026-09-04
 
 ### Added: `OpenAIChat` 모델 팩토리 (Chat Completions API)
