@@ -1,6 +1,15 @@
 {
   "name": "@goondan/openharness-cli",
   "version": "1.0.0-rc.8",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goondan/openharness.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/goondan/openharness/tree/v1/packages/cli",
+  "bugs": {
+    "url": "https://github.com/goondan/openharness/issues"
+  },
   "type": "module",
   "bin": {
     "oh": "./dist/index.js"

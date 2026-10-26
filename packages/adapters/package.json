@@ -1,6 +1,15 @@
 {
   "name": "@goondan/openharness-adapters",
   "version": "1.0.0-rc.8",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goondan/openharness.git",
+    "directory": "packages/adapters"
+  },
+  "homepage": "https://github.com/goondan/openharness/tree/v1/packages/adapters",
+  "bugs": {
+    "url": "https://github.com/goondan/openharness/issues"
+  },
   "description": "Reference adapters for OpenHarness",
   "type": "module",
   "types": "./dist/index.d.ts",
