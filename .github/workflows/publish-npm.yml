@@ -1,0 +1,57 @@
+# npm Trusted Publishing(OIDC)으로 공개 패키지를 발행한다. 토큰 없음.
+# npmjs.com의 각 패키지 Trusted Publisher 설정이 이 파일명(publish-npm.yml)과 goondan/openharness를 가리킨다.
+name: Publish npm packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack and verify without uploading to npm
+        type: boolean
+        default: false
+      dist_tag:
+        description: npm dist-tag (default latest)
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # OIDC 발행은 npm 11.5.1 이상에서만 동작한다 (Node 22 기본 npm은 10.x).
+      - name: Upgrade npm for trusted publishing
+        run: npm install --global npm@^11.5.1
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      - name: Publish public packages
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          DIST_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dist_tag) || 'latest' }}
+        run: node scripts/publish-packages.mjs
